@@ -4,6 +4,7 @@
 /// that the optimizer can search over. Handles encoding/decoding
 /// of mixed continuous and discrete parameters.
 
+use crate::movement::MovementConfig;
 use noice_generator_core::{
     AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine, SpatialMode,
 };
@@ -17,9 +18,12 @@ pub const MAX_OBJECTS: usize = 8;
 //       + anchor_volume(1) + environment(1) = 6
 // Per object (8): active(1) + color(1) + x(1) + y(1) + z(1) + volume(1)
 //               + reverb_send(1) + bass_kind(1) + bass_a(1) + bass_b(1) + bass_c(1)
-//               + sat_kind(1) + sat_a(1) + sat_b(1) + sat_c(1) = 15
-// Total: 6 + 8×15 = 126
-pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 15;
+//               + sat_kind(1) + sat_a(1) + sat_b(1) + sat_c(1)
+//               + mov_kind(1) + mov_radius(1) + mov_speed(1) + mov_phase(1)
+//               + mov_depth_min(1) + mov_depth_max(1) + mov_reverb_min(1)
+//               + mov_reverb_max(1) = 23
+// Total: 6 + 8×23 = 190
+pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 23;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModConfig {
@@ -81,6 +85,8 @@ pub struct ObjectConfig {
     pub reverb_send: f32,
     pub bass_mod: ModConfig,
     pub satellite_mod: ModConfig,
+    #[serde(default)]
+    pub movement: MovementConfig,
 }
 
 impl Default for ObjectConfig {
@@ -95,6 +101,7 @@ impl Default for ObjectConfig {
             reverb_send: 0.1,
             bass_mod: ModConfig::default(),
             satellite_mod: ModConfig::default(),
+            movement: MovementConfig::default(),
         }
     }
 }
@@ -109,6 +116,7 @@ impl ObjectConfig {
         self.reverb_send = self.reverb_send.clamp(0.0, 1.0);
         self.bass_mod.clamp();
         self.satellite_mod.clamp();
+        self.movement.clamp();
     }
 }
 
@@ -248,6 +256,14 @@ impl Preset {
             g.push(obj.satellite_mod.param_a as f64);
             g.push(obj.satellite_mod.param_b as f64);
             g.push(obj.satellite_mod.param_c as f64);
+            g.push(obj.movement.kind as f64);
+            g.push(obj.movement.radius as f64);
+            g.push(obj.movement.speed as f64);
+            g.push(obj.movement.phase as f64);
+            g.push(obj.movement.depth_min as f64);
+            g.push(obj.movement.depth_max as f64);
+            g.push(obj.movement.reverb_min as f64);
+            g.push(obj.movement.reverb_max as f64);
         }
 
         g
@@ -268,7 +284,7 @@ impl Preset {
         };
 
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 15;
+            let base = 6 + i * 23;
             let obj = ObjectConfig {
                 active: g[base] > 0.5,
                 color: g[base + 1].round() as u8,
@@ -288,6 +304,16 @@ impl Preset {
                     param_a: g[base + 12] as f32,
                     param_b: g[base + 13] as f32,
                     param_c: g[base + 14] as f32,
+                },
+                movement: MovementConfig {
+                    kind: g[base + 15].round() as u8,
+                    radius: g[base + 16] as f32,
+                    speed: g[base + 17] as f32,
+                    phase: g[base + 18] as f32,
+                    depth_min: g[base + 19] as f32,
+                    depth_max: g[base + 20] as f32,
+                    reverb_min: g[base + 21] as f32,
+                    reverb_max: g[base + 22] as f32,
                 },
             };
             preset.objects.push(obj);
@@ -326,6 +352,14 @@ impl Preset {
             b.push((0.0, 2.0));     // sat_mod.param_a
             b.push((0.0, 1.0));     // sat_mod.param_b
             b.push((0.0, 0.5));     // sat_mod.param_c
+            b.push((0.0, 5.0));     // movement.kind
+            b.push((0.0, 5.0));     // movement.radius
+            b.push((0.0, 5.0));     // movement.speed
+            b.push((0.0, 6.283));   // movement.phase
+            b.push((0.5, 5.0));     // movement.depth_min
+            b.push((0.5, 6.0));     // movement.depth_max
+            b.push((0.0, 1.0));     // movement.reverb_min
+            b.push((0.0, 1.0));     // movement.reverb_max
         }
 
         b

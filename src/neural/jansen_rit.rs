@@ -15,6 +15,7 @@
 ///
 /// EEG output: y1 - y2 (net pyramidal PSP)
 
+use crate::brain_type::{BilateralParams, TonotopicParams};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -432,4 +433,191 @@ pub fn simulate_tonotopic(
         band_powers,
         dominant_freq,
     }
+}
+
+/// Result of bilateral cortical simulation.
+pub struct BilateralResult {
+    /// Combined bilateral EEG (average of both hemispheres).
+    pub combined: JansenRitResult,
+    /// Left hemisphere dominant frequency (Hz).
+    pub left_dominant_freq: f64,
+    /// Right hemisphere dominant frequency (Hz).
+    pub right_dominant_freq: f64,
+    /// Left hemisphere band powers (normalised).
+    pub left_band_powers: BandPowers,
+    /// Right hemisphere band powers (normalised).
+    pub right_band_powers: BandPowers,
+    /// Hemispheric asymmetry index: (left_alpha - right_alpha) / (left_alpha + right_alpha).
+    /// Positive = left alpha dominance, negative = right alpha dominance.
+    pub alpha_asymmetry: f64,
+}
+
+/// Run bilateral cortical model: 2×4 parallel Jansen-Rit models (one set per
+/// hemisphere) with callosal coupling.
+///
+/// Each hemisphere receives:
+///   - contralateral ear signal × contralateral_ratio (65%)
+///   - ipsilateral ear signal × (1 - contralateral_ratio) (35%)
+///
+/// Callosal coupling: each hemisphere receives a delayed, attenuated copy of
+/// the other hemisphere's combined EEG as additional excitatory input.
+///
+/// `left_bands` / `right_bands`: tonotopic band signals from left/right ear.
+/// `left_energy` / `right_energy`: energy fractions from left/right ear.
+pub fn simulate_bilateral(
+    left_bands: &[Vec<f64>; 4],
+    right_bands: &[Vec<f64>; 4],
+    left_energy: &[f64; 4],
+    right_energy: &[f64; 4],
+    bilateral: &BilateralParams,
+    c: f64,
+    input_scale: f64,
+    sample_rate: f64,
+) -> BilateralResult {
+    let n = left_bands[0].len();
+    let contra = bilateral.contralateral_ratio;
+    let ipsi = 1.0 - contra;
+
+    // Mix input for each hemisphere:
+    // Right hemisphere ← 65% left ear (contra) + 35% right ear (ipsi)
+    // Left hemisphere  ← 65% right ear (contra) + 35% left ear (ipsi)
+    let mut rh_bands: [Vec<f64>; 4] = [
+        vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n],
+    ];
+    let mut lh_bands: [Vec<f64>; 4] = [
+        vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n],
+    ];
+    let mut rh_energy = [0.0_f64; 4];
+    let mut lh_energy = [0.0_f64; 4];
+
+    for b in 0..4 {
+        for i in 0..n {
+            rh_bands[b][i] = contra * left_bands[b][i] + ipsi * right_bands[b][i];
+            lh_bands[b][i] = contra * right_bands[b][i] + ipsi * left_bands[b][i];
+        }
+        rh_energy[b] = contra * left_energy[b] + ipsi * right_energy[b];
+        lh_energy[b] = contra * right_energy[b] + ipsi * left_energy[b];
+    }
+
+    // Normalise energy fractions
+    let rh_sum: f64 = rh_energy.iter().sum();
+    let lh_sum: f64 = lh_energy.iter().sum();
+    if rh_sum > 1e-30 { for e in &mut rh_energy { *e /= rh_sum; } }
+    if lh_sum > 1e-30 { for e in &mut lh_energy { *e /= lh_sum; } }
+
+    // Phase 1: Run each hemisphere's tonotopic model independently.
+    // This gives us the base per-hemisphere EEG.
+    let rh_eeg = run_hemisphere_tonotopic(
+        &rh_bands, &rh_energy, &bilateral.right, c, input_scale, sample_rate,
+    );
+    let lh_eeg = run_hemisphere_tonotopic(
+        &lh_bands, &lh_energy, &bilateral.left, c, input_scale, sample_rate,
+    );
+
+    // Phase 2: Apply callosal coupling.
+    // Each hemisphere receives a delayed, attenuated version of the other's EEG
+    // as additive excitatory input, then we re-run a lightweight combination.
+    //
+    // Rather than re-running full JR (expensive), we model the callosal effect
+    // as a linear mix: the coupled EEG is the independent EEG plus a small
+    // fraction of the delayed contralateral EEG. This is justified because
+    // callosal input is ~10% of convergent input — a perturbative effect.
+    let delay_samples = (bilateral.callosal_delay_s * sample_rate) as usize;
+    let k = bilateral.callosal_coupling;
+
+    let mut rh_coupled = vec![0.0_f64; n];
+    let mut lh_coupled = vec![0.0_f64; n];
+
+    for i in 0..n {
+        let delayed_lh = if i >= delay_samples { lh_eeg[i - delay_samples] } else { 0.0 };
+        let delayed_rh = if i >= delay_samples { rh_eeg[i - delay_samples] } else { 0.0 };
+
+        rh_coupled[i] = rh_eeg[i] + k * delayed_lh;
+        lh_coupled[i] = lh_eeg[i] + k * delayed_rh;
+    }
+
+    // Combined bilateral EEG: average of both hemispheres
+    let mut combined_eeg = vec![0.0_f64; n];
+    for i in 0..n {
+        combined_eeg[i] = 0.5 * (lh_coupled[i] + rh_coupled[i]);
+    }
+
+    // Analyse each hemisphere and the combined signal
+    let analysis = JansenRitModel::new(sample_rate);
+
+    let combined_mean = combined_eeg.iter().sum::<f64>() / n as f64;
+    let combined_det: Vec<f64> = combined_eeg.iter().map(|x| x - combined_mean).collect();
+    let combined_bp = analysis.compute_band_powers(&combined_det);
+    let combined_df = analysis.find_dominant_frequency(&combined_det);
+
+    let lh_mean = lh_coupled.iter().sum::<f64>() / n as f64;
+    let lh_det: Vec<f64> = lh_coupled.iter().map(|x| x - lh_mean).collect();
+    let lh_bp = analysis.compute_band_powers(&lh_det);
+    let lh_df = analysis.find_dominant_frequency(&lh_det);
+
+    let rh_mean = rh_coupled.iter().sum::<f64>() / n as f64;
+    let rh_det: Vec<f64> = rh_coupled.iter().map(|x| x - rh_mean).collect();
+    let rh_bp = analysis.compute_band_powers(&rh_det);
+    let rh_df = analysis.find_dominant_frequency(&rh_det);
+
+    // Compute alpha asymmetry index
+    let lh_alpha_norm = lh_bp.normalized().alpha;
+    let rh_alpha_norm = rh_bp.normalized().alpha;
+    let alpha_sum = lh_alpha_norm + rh_alpha_norm;
+    let alpha_asymmetry = if alpha_sum > 1e-30 {
+        (lh_alpha_norm - rh_alpha_norm) / alpha_sum
+    } else {
+        0.0
+    };
+
+    BilateralResult {
+        combined: JansenRitResult {
+            eeg: combined_eeg,
+            band_powers: combined_bp,
+            dominant_freq: combined_df,
+        },
+        left_dominant_freq: lh_df,
+        right_dominant_freq: rh_df,
+        left_band_powers: lh_bp.normalized(),
+        right_band_powers: rh_bp.normalized(),
+        alpha_asymmetry,
+    }
+}
+
+/// Run one hemisphere's tonotopic JR model (4 bands) and return raw EEG.
+fn run_hemisphere_tonotopic(
+    bands: &[Vec<f64>; 4],
+    energy: &[f64; 4],
+    params: &TonotopicParams,
+    c: f64,
+    input_scale: f64,
+    sample_rate: f64,
+) -> Vec<f64> {
+    let n = bands[0].len();
+    let mut eeg = vec![0.0_f64; n];
+
+    for b in 0..4 {
+        let (a_rate, b_rate) = params.band_rates[b];
+        let (a_gain, b_gain) = params.band_gains[b];
+
+        let jr = JansenRitModel::with_params(
+            sample_rate, a_gain, b_gain, a_rate, b_rate,
+            c, params.band_offsets[b], input_scale,
+        );
+
+        let result = jr.simulate(&bands[b]);
+
+        // Detrend + normalise to unit RMS (same as simulate_tonotopic)
+        let band_mean = result.eeg.iter().sum::<f64>() / n as f64;
+        let detrended: Vec<f64> = result.eeg.iter().map(|x| x - band_mean).collect();
+        let rms = (detrended.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
+        let norm = if rms > 1e-10 { 1.0 / rms } else { 1.0 };
+
+        let weight = energy[b];
+        for i in 0..n {
+            eeg[i] += weight * detrended[i] * norm;
+        }
+    }
+
+    eeg
 }

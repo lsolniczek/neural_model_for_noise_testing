@@ -5,7 +5,8 @@
 
 use crate::auditory::GammatoneFilterbank;
 use crate::brain_type::BrainType;
-use crate::neural::{FhnModel, simulate_tonotopic};
+use crate::movement::MovementController;
+use crate::neural::{FhnModel, simulate_bilateral};
 use crate::preset::Preset;
 use crate::scoring::Goal;
 use noice_generator_core::NoiseEngine;
@@ -56,6 +57,12 @@ pub struct SimulationResult {
     pub brightness: f64,
     /// Energy fraction per tonotopic band [Low, Low-mid, Mid-high, High].
     pub band_energy_fractions: [f64; 4],
+    /// Left hemisphere dominant frequency (Hz).
+    pub left_dominant_freq: f64,
+    /// Right hemisphere dominant frequency (Hz).
+    pub right_dominant_freq: f64,
+    /// Alpha asymmetry index: (left_alpha - right_alpha) / (left_alpha + right_alpha).
+    pub alpha_asymmetry: f64,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -120,11 +127,42 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let engine = NoiseEngine::new(SAMPLE_RATE, 0.8);
     preset.apply_to_engine(&engine);
 
-    // 2. Render audio — skip first 1.0s to let engine filters and
-    //    gammatone/JR models settle into their steady-state regime.
+    // 2. Set up movement controller
+    let mut movement = MovementController::from_preset(preset);
+
+    // 3. Render audio with movement updates.
+    //    When objects move, we render in small chunks (~50ms) and update
+    //    positions between chunks so the HRTF pipeline reflects motion.
+    //    For static presets we render in one shot for efficiency.
     let warmup_frames = (SAMPLE_RATE as f32 * 1.0) as u32;
-    let _ = engine.render_audio(warmup_frames);
-    let audio = engine.render_audio(num_frames);
+    let chunk_frames = (SAMPLE_RATE as f32 * 0.05) as u32; // 50ms chunks
+
+    if movement.has_movement() {
+        // Warmup with movement ticking
+        let warmup_chunks = warmup_frames / chunk_frames;
+        let dt = chunk_frames as f64 / SAMPLE_RATE as f64;
+        for _ in 0..warmup_chunks {
+            movement.tick(dt, &engine);
+            let _ = engine.render_audio(chunk_frames);
+        }
+    } else {
+        let _ = engine.render_audio(warmup_frames);
+    }
+
+    let audio = if movement.has_movement() {
+        let dt = chunk_frames as f64 / SAMPLE_RATE as f64;
+        let mut all_audio = Vec::with_capacity((num_frames * 2) as usize);
+        let mut rendered = 0_u32;
+        while rendered < num_frames {
+            let this_chunk = chunk_frames.min(num_frames - rendered);
+            movement.tick(dt, &engine);
+            all_audio.extend_from_slice(&engine.render_audio(this_chunk));
+            rendered += this_chunk;
+        }
+        all_audio
+    } else {
+        engine.render_audio(num_frames)
+    };
 
     // 3. Deinterleave to L/R
     let (left, right) = deinterleave(&audio);
@@ -138,33 +176,35 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let bands_l = filterbank_l.process_to_band_groups(&left);
     let bands_r = filterbank_r.process_to_band_groups(&right);
 
-    // 5. Average L/R band signals and normalise each band to [0, 1]
-    let mut band_signals: [Vec<f64>; 4] = [
+    // 5. Normalise each ear's band signals to [0, 1] independently
+    let mut left_bands: [Vec<f64>; 4] = [
         vec![0.0; bands_l.signals[0].len()],
         vec![0.0; bands_l.signals[1].len()],
         vec![0.0; bands_l.signals[2].len()],
         vec![0.0; bands_l.signals[3].len()],
     ];
-    let mut energy_fractions = [0.0_f64; 4];
+    let mut right_bands: [Vec<f64>; 4] = [
+        vec![0.0; bands_r.signals[0].len()],
+        vec![0.0; bands_r.signals[1].len()],
+        vec![0.0; bands_r.signals[2].len()],
+        vec![0.0; bands_r.signals[3].len()],
+    ];
 
     for b in 0..4 {
-        // Average L/R
-        let raw: Vec<f64> = bands_l.signals[b]
-            .iter()
-            .zip(bands_r.signals[b].iter())
-            .map(|(l, r)| (l + r) * 0.5)
-            .collect();
+        let max_l = bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max);
+        let norm_l = if max_l > 1e-10 { 1.0 / max_l } else { 1.0 };
+        left_bands[b] = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
 
-        // Normalise to [0, 1]
-        let max_val = raw.iter().cloned().fold(0.0_f64, f64::max);
-        let norm = if max_val > 1e-10 { 1.0 / max_val } else { 1.0 };
-        band_signals[b] = raw.iter().map(|x| x * norm).collect();
-
-        // Average energy fractions from L/R
-        energy_fractions[b] = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
+        let max_r = bands_r.signals[b].iter().cloned().fold(0.0_f64, f64::max);
+        let norm_r = if max_r > 1e-10 { 1.0 / max_r } else { 1.0 };
+        right_bands[b] = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
     }
 
-    // Re-normalise energy fractions after averaging
+    // Average energy fractions for display (the bilateral model uses per-ear fractions)
+    let mut energy_fractions = [0.0_f64; 4];
+    for b in 0..4 {
+        energy_fractions[b] = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
+    }
     let ef_sum: f64 = energy_fractions.iter().sum();
     if ef_sum > 1e-30 {
         for ef in &mut energy_fractions {
@@ -175,25 +215,27 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     // 5b. Spectral brightness from audio FFT (psychoacoustic complement)
     let brightness = spectral_brightness(&left, sr);
 
-    // 6. Tonotopic Jansen-Rit: 4 parallel cortical models with different
-    //    time constants per frequency band, weighted by energy fractions.
+    // 6. Bilateral cortical model: 2×4 parallel Jansen-Rit models
+    //    Left hemisphere (fast, θ/γ) ← mainly right ear (contralateral)
+    //    Right hemisphere (slow, δ/β) ← mainly left ear (contralateral)
+    //    Coupled through corpus callosum with ~10ms delay, ~10% strength.
     let neural_params = config.brain_type.params();
-    let tono_params = config.brain_type.tonotopic_params();
+    let bilateral = config.brain_type.bilateral_params();
 
-    let jr_result = simulate_tonotopic(
-        &band_signals,
-        &energy_fractions,
-        &tono_params.band_rates,
-        &tono_params.band_gains,
-        &tono_params.band_offsets,
+    let bi_result = simulate_bilateral(
+        &left_bands,
+        &right_bands,
+        &bands_l.energy_fractions,
+        &bands_r.energy_fractions,
+        &bilateral,
         neural_params.jansen_rit.c,
         neural_params.jansen_rit.input_scale,
         sr,
     );
 
-    // 7. FHN: single-neuron driven by combined EEG oscillations.
-    //    The tonotopic EEG has real oscillatory content (unlike the smooth
-    //    nerve aggregate), so the FHN can actually fire spikes.
+    let jr_result = &bi_result.combined;
+
+    // 7. FHN: single-neuron driven by combined bilateral EEG oscillations.
     let fhn = FhnModel::with_params(
         sr,
         neural_params.fhn.a,
@@ -208,7 +250,7 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
     // 8. Score (with reduced brightness modifier — neural model now does most work)
-    let score = goal.evaluate_with_brightness(&fhn_result, &jr_result, brightness);
+    let score = goal.evaluate_with_brightness(&fhn_result, jr_result, brightness);
     let norm_bands = jr_result.band_powers.normalized();
 
     SimulationResult {
@@ -223,5 +265,8 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         gamma_power: norm_bands.gamma,
         brightness,
         band_energy_fractions: energy_fractions,
+        left_dominant_freq: bi_result.left_dominant_freq,
+        right_dominant_freq: bi_result.right_dominant_freq,
+        alpha_asymmetry: bi_result.alpha_asymmetry,
     }
 }

@@ -1,6 +1,7 @@
 mod auditory;
 mod brain_type;
 mod export;
+mod movement;
 mod neural;
 mod optimizer;
 mod pipeline;
@@ -434,10 +435,11 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let result = evaluate_preset(&preset, &goal, &sim_config);
 
         // Re-run pipeline for detailed diagnosis (need FHN/JR results)
-        let (fhn_result, jr_result, brightness, energy_fractions) =
-            run_detailed_pipeline(&preset, bt, duration);
+        let detailed = run_detailed_pipeline(&preset, bt, duration);
+        let brightness = detailed.brightness;
+        let energy_fractions = detailed.energy_fractions;
 
-        let diagnosis = goal.diagnose(&fhn_result, &jr_result, brightness);
+        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness);
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
@@ -542,6 +544,46 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
             diagnosis.dominant_band_name()
         );
 
+        // Bilateral hemispheric info
+        let bi = &detailed.bilateral;
+        println!();
+        println!("  Bilateral Cortical Model:");
+        println!("    {:<20} {:<12} {:<12}", "Hemisphere", "Dominant", "Alpha");
+        println!("    {}", "\u{2500}".repeat(44));
+        let lh_bp = &bi.left_band_powers;
+        let rh_bp = &bi.right_band_powers;
+        println!(
+            "    {:<20} {:.1} Hz      {:.1}%",
+            "Left (fast, \u{03b8}/\u{03b3})",
+            bi.left_dominant_freq,
+            lh_bp.alpha * 100.0,
+        );
+        println!(
+            "    {:<20} {:.1} Hz      {:.1}%",
+            "Right (slow, \u{03b4}/\u{03b2})",
+            bi.right_dominant_freq,
+            rh_bp.alpha * 100.0,
+        );
+        let asym_label = if bi.alpha_asymmetry.abs() < 0.05 {
+            "balanced"
+        } else if bi.alpha_asymmetry > 0.0 {
+            "left-dominant"
+        } else {
+            "right-dominant"
+        };
+        println!(
+            "    Alpha asymmetry: {:+.3} ({})",
+            bi.alpha_asymmetry, asym_label,
+        );
+        let coupling = bt.bilateral_params();
+        println!(
+            "    Callosal: coupling={:.0}%, delay={:.0}ms, contra={:.0}%",
+            coupling.callosal_coupling * 100.0,
+            coupling.callosal_delay_s * 1000.0,
+            coupling.contralateral_ratio * 100.0,
+        );
+        println!();
+
         let brightness_label = if brightness > 0.7 {
             "bright (white-like)"
         } else if brightness > 0.4 {
@@ -576,11 +618,18 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
 /// Run the full tonotopic pipeline for detailed diagnosis.
 ///
 /// Returns (FhnResult, JansenRitResult, brightness, energy_fractions).
+struct DetailedResult {
+    fhn: neural::FhnResult,
+    bilateral: neural::BilateralResult,
+    brightness: f64,
+    energy_fractions: [f64; 4],
+}
+
 fn run_detailed_pipeline(
     preset: &Preset,
     brain_type: BrainType,
     duration: f32,
-) -> (neural::FhnResult, neural::JansenRitResult, f64, [f64; 4]) {
+) -> DetailedResult {
     use crate::auditory::GammatoneFilterbank;
     use noice_generator_core::NoiseEngine;
     use rustfft::{num_complex::Complex, FftPlanner};
@@ -592,9 +641,36 @@ fn run_detailed_pipeline(
     let engine = NoiseEngine::new(sample_rate, 0.8);
     preset.apply_to_engine(&engine);
 
-    // Warmup — let engine filters settle
-    let _ = engine.render_audio((sample_rate as f32 * 1.0) as u32);
-    let audio = engine.render_audio(num_frames);
+    // Movement controller
+    let mut movement = movement::MovementController::from_preset(preset);
+    let warmup_frames = (sample_rate as f32 * 1.0) as u32;
+    let chunk_frames = (sample_rate as f32 * 0.05) as u32;
+
+    if movement.has_movement() {
+        let warmup_chunks = warmup_frames / chunk_frames;
+        let dt = chunk_frames as f64 / sample_rate as f64;
+        for _ in 0..warmup_chunks {
+            movement.tick(dt, &engine);
+            let _ = engine.render_audio(chunk_frames);
+        }
+    } else {
+        let _ = engine.render_audio(warmup_frames);
+    }
+
+    let audio = if movement.has_movement() {
+        let dt = chunk_frames as f64 / sample_rate as f64;
+        let mut all_audio = Vec::with_capacity((num_frames * 2) as usize);
+        let mut rendered = 0_u32;
+        while rendered < num_frames {
+            let this_chunk = chunk_frames.min(num_frames - rendered);
+            movement.tick(dt, &engine);
+            all_audio.extend_from_slice(&engine.render_audio(this_chunk));
+            rendered += this_chunk;
+        }
+        all_audio
+    } else {
+        engine.render_audio(num_frames)
+    };
 
     // Deinterleave to L/R
     let num_samples = audio.len() / 2;
@@ -605,38 +681,40 @@ fn run_detailed_pipeline(
         right.push(audio[i * 2 + 1]);
     }
 
-    // Tonotopic band-grouped cochlear processing
+    // Cochlear processing — separate L/R
     let mut fb_l = GammatoneFilterbank::new(sr);
     let mut fb_r = GammatoneFilterbank::new(sr);
     let bands_l = fb_l.process_to_band_groups(&left);
     let bands_r = fb_r.process_to_band_groups(&right);
 
-    // Average L/R and normalise each band
-    let mut band_signals: [Vec<f64>; 4] = [
+    // Normalise each ear independently
+    let mut left_bands: [Vec<f64>; 4] = [
         vec![0.0; bands_l.signals[0].len()],
         vec![0.0; bands_l.signals[1].len()],
         vec![0.0; bands_l.signals[2].len()],
         vec![0.0; bands_l.signals[3].len()],
     ];
+    let mut right_bands: [Vec<f64>; 4] = [
+        vec![0.0; bands_r.signals[0].len()],
+        vec![0.0; bands_r.signals[1].len()],
+        vec![0.0; bands_r.signals[2].len()],
+        vec![0.0; bands_r.signals[3].len()],
+    ];
     let mut energy_fractions = [0.0_f64; 4];
 
     for b in 0..4 {
-        let raw: Vec<f64> = bands_l.signals[b].iter()
-            .zip(bands_r.signals[b].iter())
-            .map(|(l, r)| (l + r) * 0.5)
-            .collect();
-        let max_val = raw.iter().cloned().fold(0.0_f64, f64::max);
-        let norm = if max_val > 1e-10 { 1.0 / max_val } else { 1.0 };
-        band_signals[b] = raw.iter().map(|x| x * norm).collect();
+        let max_l = bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max);
+        let norm_l = if max_l > 1e-10 { 1.0 / max_l } else { 1.0 };
+        left_bands[b] = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
+
+        let max_r = bands_r.signals[b].iter().cloned().fold(0.0_f64, f64::max);
+        let norm_r = if max_r > 1e-10 { 1.0 / max_r } else { 1.0 };
+        right_bands[b] = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
+
         energy_fractions[b] = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
     }
-
     let ef_sum: f64 = energy_fractions.iter().sum();
-    if ef_sum > 1e-30 {
-        for ef in &mut energy_fractions {
-            *ef /= ef_sum;
-        }
-    }
+    if ef_sum > 1e-30 { for ef in &mut energy_fractions { *ef /= ef_sum; } }
 
     // Brightness from FFT
     let n = left.len();
@@ -664,34 +742,39 @@ fn run_detailed_pipeline(
     let log_high = 10000.0_f64.ln();
     let brightness = ((centroid.max(100.0).ln() - log_low) / (log_high - log_low)).clamp(0.0, 1.0);
 
-    // Tonotopic JR
+    // Bilateral cortical model
     let neural_params = brain_type.params();
-    let tono_params = brain_type.tonotopic_params();
+    let bilateral = brain_type.bilateral_params();
 
-    let jr_result = neural::simulate_tonotopic(
-        &band_signals,
-        &energy_fractions,
-        &tono_params.band_rates,
-        &tono_params.band_gains,
-        &tono_params.band_offsets,
+    let bi_result = neural::simulate_bilateral(
+        &left_bands,
+        &right_bands,
+        &bands_l.energy_fractions,
+        &bands_r.energy_fractions,
+        &bilateral,
         neural_params.jansen_rit.c,
         neural_params.jansen_rit.input_scale,
         sr,
     );
 
-    // FHN driven by combined EEG
+    // FHN driven by combined bilateral EEG
     let fhn = neural::FhnModel::with_params(
         sr,
         neural_params.fhn.a,
         neural_params.fhn.b,
         neural_params.fhn.epsilon,
     );
-    let eeg_max = jr_result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let eeg_max = bi_result.combined.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
     let eeg_norm = if eeg_max > 1e-10 { 1.0 / eeg_max } else { 1.0 };
-    let fhn_input: Vec<f64> = jr_result.eeg.iter().map(|x| x * eeg_norm).collect();
+    let fhn_input: Vec<f64> = bi_result.combined.eeg.iter().map(|x| x * eeg_norm).collect();
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
-    (fhn_result, jr_result, brightness, energy_fractions)
+    DetailedResult {
+        fhn: fhn_result,
+        bilateral: bi_result,
+        brightness,
+        energy_fractions,
+    }
 }
 
 fn print_comparison_matrix(
@@ -808,6 +891,25 @@ fn print_preset_summary(preset: &Preset) {
                 obj.satellite_mod.param_b,
                 obj.satellite_mod.param_c,
             );
+        }
+        let pattern = obj.movement.pattern();
+        if pattern != movement::MovementPattern::Static {
+            let mv = &obj.movement;
+            match pattern {
+                movement::MovementPattern::DepthBreathing => {
+                    println!(
+                        "      Movement:  {} (speed={:.2}, z={:.1}–{:.1}, reverb={:.2}–{:.2})",
+                        pattern.label(), mv.speed, mv.depth_min, mv.depth_max,
+                        mv.reverb_min, mv.reverb_max,
+                    );
+                }
+                _ => {
+                    println!(
+                        "      Movement:  {} (radius={:.2}, speed={:.2}, phase={:.2})",
+                        pattern.label(), mv.radius, mv.speed, mv.phase,
+                    );
+                }
+            }
         }
     }
 }

@@ -254,6 +254,184 @@ impl BrainType {
         }
     }
 
+    /// Get bilateral cortical parameters for this brain type.
+    ///
+    /// Each hemisphere has its own tonotopic params per the AST hypothesis:
+    ///   Left hemisphere  = fast (θ/γ): integration ~25-40ms
+    ///   Right hemisphere = slow (δ/β): integration ~150-300ms
+    ///
+    /// Brain-type-specific hemispheric signatures:
+    ///   Normal:    balanced asymmetry
+    ///   ADHD:      right-hemisphere theta excess, weaker callosal coupling
+    ///   Anxious:   left-hemisphere beta excess, stronger coupling
+    ///   Aging:     both slower, much weaker callosal transfer
+    ///   HighAlpha: strong bilateral alpha synchrony, stronger coupling
+    pub fn bilateral_params(&self) -> BilateralParams {
+        match self {
+            BrainType::Normal => BilateralParams {
+                // Left hemisphere: fast — θ/α/β-low/β-high
+                left: TonotopicParams {
+                    band_rates: [
+                        (80.0, 40.0),    // θ ~9 Hz
+                        (100.0, 50.0),   // α ~11 Hz
+                        (120.0, 60.0),   // β-low ~14 Hz
+                        (140.0, 70.0),   // β-high ~17 Hz
+                    ],
+                    band_gains: [(3.25, 22.0); 4],
+                    band_offsets: [220.0; 4],
+                },
+                // Right hemisphere: slow — δ/θ/α-low/α
+                right: TonotopicParams {
+                    band_rates: [
+                        (60.0, 30.0),    // δ ~7 Hz
+                        (70.0, 35.0),    // θ ~8 Hz
+                        (85.0, 42.0),    // α-low ~10 Hz
+                        (100.0, 50.0),   // α ~11 Hz
+                    ],
+                    band_gains: [(3.25, 22.0); 4],
+                    band_offsets: [220.0; 4],
+                },
+                callosal_coupling: 0.10,
+                callosal_delay_s: 0.010,
+                contralateral_ratio: 0.65,
+            },
+
+            BrainType::HighAlpha => BilateralParams {
+                // Both hemispheres converge toward alpha (meditation training)
+                left: TonotopicParams {
+                    band_rates: [
+                        (85.0, 42.0),
+                        (95.0, 47.0),
+                        (105.0, 52.0),
+                        (115.0, 57.0),
+                    ],
+                    band_gains: [
+                        (3.25, 24.0),
+                        (3.25, 25.0),
+                        (3.25, 25.0),
+                        (3.25, 24.0),
+                    ],
+                    band_offsets: [220.0; 4],
+                },
+                right: TonotopicParams {
+                    band_rates: [
+                        (70.0, 35.0),
+                        (85.0, 42.0),
+                        (95.0, 47.0),
+                        (105.0, 52.0),
+                    ],
+                    band_gains: [
+                        (3.25, 24.0),
+                        (3.25, 25.0),
+                        (3.25, 25.0),
+                        (3.25, 24.0),
+                    ],
+                    band_offsets: [220.0; 4],
+                },
+                // Stronger callosal coupling — bilateral synchrony from training
+                callosal_coupling: 0.15,
+                callosal_delay_s: 0.010,
+                contralateral_ratio: 0.65,
+            },
+
+            BrainType::Adhd => BilateralParams {
+                // Left: fast but unstable (weak inhibition)
+                left: TonotopicParams {
+                    band_rates: [
+                        (85.0, 42.0),
+                        (105.0, 52.0),
+                        (120.0, 60.0),
+                        (135.0, 67.0),
+                    ],
+                    band_gains: [(3.5, 18.0); 4],
+                    band_offsets: [240.0; 4],
+                },
+                // Right: theta excess (documented ADHD signature)
+                right: TonotopicParams {
+                    band_rates: [
+                        (55.0, 28.0),    // Strong delta → theta excess
+                        (65.0, 32.0),    // θ
+                        (80.0, 40.0),    // α-low (slower than normal)
+                        (95.0, 47.0),    // α
+                    ],
+                    band_gains: [(3.5, 18.0); 4],
+                    band_offsets: [240.0; 4],
+                },
+                // Weaker callosal coupling — reduced interhemispheric coherence
+                callosal_coupling: 0.06,
+                callosal_delay_s: 0.010,
+                contralateral_ratio: 0.65,
+            },
+
+            BrainType::Aging => BilateralParams {
+                // Both hemispheres slower; asymmetry reduced
+                left: TonotopicParams {
+                    band_rates: [
+                        (70.0, 35.0),
+                        (85.0, 42.0),
+                        (100.0, 50.0),
+                        (115.0, 57.0),
+                    ],
+                    band_gains: [
+                        (3.25, 22.0),
+                        (3.25, 22.0),
+                        (3.0, 21.0),
+                        (3.0, 21.0),
+                    ],
+                    band_offsets: [200.0; 4],
+                },
+                right: TonotopicParams {
+                    band_rates: [
+                        (50.0, 25.0),    // Very slow δ
+                        (60.0, 30.0),    // δ/θ border
+                        (70.0, 35.0),    // θ
+                        (85.0, 42.0),    // α-low
+                    ],
+                    band_gains: [
+                        (3.25, 22.0),
+                        (3.25, 22.0),
+                        (3.0, 21.0),
+                        (3.0, 21.0),
+                    ],
+                    band_offsets: [200.0; 4],
+                },
+                // Much weaker callosal transfer — white matter degradation
+                callosal_coupling: 0.05,
+                callosal_delay_s: 0.012,  // Slower transfer
+                contralateral_ratio: 0.65,
+            },
+
+            BrainType::Anxious => BilateralParams {
+                // Left: beta excess (hyperactive left hemisphere)
+                left: TonotopicParams {
+                    band_rates: [
+                        (90.0, 45.0),
+                        (110.0, 55.0),
+                        (130.0, 65.0),   // Strong β bias
+                        (145.0, 72.0),   // β-high
+                    ],
+                    band_gains: [(3.5, 19.0); 4],
+                    band_offsets: [250.0; 4],
+                },
+                // Right: elevated but less extreme
+                right: TonotopicParams {
+                    band_rates: [
+                        (70.0, 35.0),
+                        (85.0, 42.0),
+                        (100.0, 50.0),
+                        (115.0, 57.0),
+                    ],
+                    band_gains: [(3.5, 19.0); 4],
+                    band_offsets: [250.0; 4],
+                },
+                // Stronger coupling — hyperconnected
+                callosal_coupling: 0.14,
+                callosal_delay_s: 0.010,
+                contralateral_ratio: 0.65,
+            },
+        }
+    }
+
     /// Short description of this brain type's characteristics.
     pub fn description(&self) -> &'static str {
         match self {
@@ -318,4 +496,31 @@ pub struct TonotopicParams {
     /// in the JR bifurcation diagram. Lower → slower oscillation (delta/theta),
     /// higher → faster or mixed (beta).
     pub band_offsets: [f64; 4],
+}
+
+/// Bilateral cortical parameters.
+///
+/// Models the asymmetric sampling in time (AST) hypothesis (Poeppel, 2003):
+///   - Left hemisphere: shorter integration windows → theta/gamma preference
+///   - Right hemisphere: longer integration windows → delta/beta preference
+///
+/// Each hemisphere gets 65% contralateral + 35% ipsilateral auditory input
+/// (Gutschalk et al., 2015), coupled through the corpus callosum with ~10ms
+/// delay and ~10% coupling strength (relative to intracortical connectivity).
+#[derive(Debug, Clone)]
+pub struct BilateralParams {
+    /// Left hemisphere tonotopic params (processes mainly R ear — contralateral).
+    /// Faster time constants per AST: theta/gamma bias.
+    pub left: TonotopicParams,
+    /// Right hemisphere tonotopic params (processes mainly L ear — contralateral).
+    /// Slower time constants per AST: delta/beta bias.
+    pub right: TonotopicParams,
+    /// Callosal coupling strength as fraction of intracortical C.
+    /// ~0.10 = anatomical baseline (10% of convergent input is callosal).
+    pub callosal_coupling: f64,
+    /// Interhemispheric transfer delay in seconds.
+    /// ~0.010 = 10ms (N1 ERP contralateral-ipsilateral latency difference).
+    pub callosal_delay_s: f64,
+    /// Contralateral input fraction (0.65 = 65% contra, 35% ipsi).
+    pub contralateral_ratio: f64,
 }
