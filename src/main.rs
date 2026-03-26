@@ -70,6 +70,10 @@ enum Commands {
         /// Brain type profile
         #[arg(long, default_value = "normal")]
         brain_type: String,
+
+        /// Seed population from an existing preset JSON (explores around it)
+        #[arg(long)]
+        init_preset: Option<PathBuf>,
     },
 
     /// Evaluate an existing preset against goal(s) and brain type(s).
@@ -123,6 +127,7 @@ fn main() {
             de_cr,
             convergence,
             brain_type,
+            init_preset,
         } => {
             run_optimize(
                 &goal,
@@ -135,6 +140,7 @@ fn main() {
                 de_cr,
                 convergence,
                 &brain_type,
+                init_preset.as_deref(),
             );
         }
         Commands::Evaluate {
@@ -164,10 +170,11 @@ fn run_optimize(
     de_cr: f64,
     convergence: f64,
     brain_type_str: &str,
+    init_preset: Option<&std::path::Path>,
 ) {
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
-            "Unknown goal: '{}'. Valid: deep_relaxation, focus, sleep, isolation, meditation",
+            "Unknown goal: '{}'. Valid: deep_relaxation, focus, sleep, isolation, meditation, deep_work",
             goal_str
         );
         std::process::exit(1);
@@ -200,6 +207,21 @@ fn run_optimize(
 
     let bounds = Preset::bounds();
     let mut de = DifferentialEvolution::new(bounds, population, de_f, de_cr, seed);
+
+    // Seed population from an existing preset if provided
+    if let Some(path) = init_preset {
+        let json = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("Failed to read init preset: {}", e);
+            std::process::exit(1);
+        });
+        let preset: Preset = serde_json::from_str(&json).unwrap_or_else(|e| {
+            eprintln!("Failed to parse init preset: {}", e);
+            std::process::exit(1);
+        });
+        let genome = preset.to_genome();
+        de.seed_from_genome(&genome, 0.15);
+        println!("  Init preset:    {}", path.display());
+    }
 
     let start = Instant::now();
 
@@ -463,24 +485,26 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         println!("    {}", "\u{2500}".repeat(50));
         for band in &diagnosis.bands {
             let detail = match band.expectation {
-                scoring::BandExpectation::High => {
-                    if band.actual >= 0.25 { "want high, got high" }
-                    else if band.actual >= 0.15 { "want high, moderate" }
-                    else { "want high, got low" }
+                scoring::BandExpectation::Range(min, ideal, max) => {
+                    if band.actual < min { "below range" }
+                    else if band.actual > max { "above range" }
+                    else if (band.actual - ideal).abs() <= (max - min) * 0.25 { "in range" }
+                    else { "within range" }
                 }
-                scoring::BandExpectation::Low => {
-                    if band.actual <= 0.15 { "want low, got low" }
-                    else if band.actual <= 0.25 { "want low, moderate" }
-                    else { "want low, got high" }
-                }
-                scoring::BandExpectation::Neutral => "neutral",
                 scoring::BandExpectation::Flat(_) => {
                     if (band.actual - 0.2).abs() < 0.05 { "near uniform" }
                     else { "deviates from uniform" }
                 }
+                scoring::BandExpectation::High => {
+                    if band.actual >= 0.25 { "in range" } else { "below range" }
+                }
+                scoring::BandExpectation::Low => {
+                    if band.actual <= 0.15 { "in range" } else { "above range" }
+                }
+                scoring::BandExpectation::Neutral => "neutral",
             };
             println!(
-                "    {:<8} {:<8} {:<8.3} {} {}  ({})",
+                "    {:<8} {:<10} {:<8.3} {} {}  ({})",
                 band.name,
                 band.expectation,
                 band.actual,
@@ -836,7 +860,7 @@ fn print_preset_summary(preset: &Preset) {
         "VastSpace",
         "DeepSanctuary",
     ];
-    let mod_kind_names = ["Flat", "SineLfo", "Breathing", "Stochastic"];
+    let mod_kind_names = ["Flat", "SineLfo", "Breathing", "Stochastic", "NeuralLfo"];
 
     println!("  Preset Configuration:");
     println!("    Master gain:    {:.2}", preset.master_gain);

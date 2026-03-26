@@ -76,7 +76,7 @@ impl BrainType {
                     a_rate: 100.0,
                     b_rate: 50.0,
                     c: 135.0,
-                    input_offset: 200.0,  // Center of oscillatory regime
+                    input_offset: 175.0,  // Above bifurcation but input-sensitive
                     input_scale: 60.0,    // Temporal modulation around center
                 },
             },
@@ -94,11 +94,14 @@ impl BrainType {
                     a_rate: 100.0,
                     b_rate: 50.0,
                     c: 135.0,
-                    input_offset: 220.0,  // Mid-alpha regime
+                    input_offset: 195.0,  // Mid-alpha regime, strong oscillation
                     input_scale: 40.0,    // Stable alpha
                 },
             },
 
+            // ADHD: hypoaroused cortex — near bifurcation boundary (~120).
+            // Without noise: barely oscillating, theta-dominant.
+            // With noise: pushed into oscillatory regime → stochastic resonance.
             BrainType::Adhd => NeuralParams {
                 fhn: FhnParams {
                     a: 0.7,
@@ -112,8 +115,8 @@ impl BrainType {
                     a_rate: 100.0,
                     b_rate: 50.0,
                     c: 135.0,
-                    input_offset: 240.0,  // Higher drive
-                    input_scale: 80.0,    // More reactive
+                    input_offset: 75.0,   // Near ADHD bifurcation (~80) → hypoaroused
+                    input_scale: 80.0,    // Highly reactive to input
                 },
             },
 
@@ -130,11 +133,12 @@ impl BrainType {
                     a_rate: 80.0,   // Slower excitatory time constant
                     b_rate: 40.0,   // Slower inhibitory time constant
                     c: 120.0,       // Reduced connectivity
-                    input_offset: 180.0,  // Lower drive → alpha/theta border
+                    input_offset: 165.0,  // Lower drive → alpha/theta border
                     input_scale: 50.0,
                 },
             },
 
+            // Anxious: overdriven cortex, elevated beta, always oscillating
             BrainType::Anxious => NeuralParams {
                 fhn: FhnParams {
                     a: 0.7,
@@ -148,7 +152,7 @@ impl BrainType {
                     a_rate: 100.0,
                     b_rate: 50.0,
                     c: 145.0,       // Higher connectivity
-                    input_offset: 250.0,  // Higher baseline
+                    input_offset: 220.0,  // Deep in oscillatory regime
                     input_scale: 70.0,
                 },
             },
@@ -172,6 +176,12 @@ impl BrainType {
             //   (85, 42)  → ~9.5 Hz (alpha-low)
             //   (100, 50) → ~11.3 Hz (alpha)
             //   (120, 60) → ~13.5 Hz (beta-low)
+            //
+            // Band offsets are graduated: lower bands sit closer to the Hopf
+            // bifurcation (~120) so they only oscillate when driven by input.
+            // Higher bands sit further inside the oscillatory regime.
+            // This creates input-dependent band recruitment — weak input → theta;
+            // strong input → theta + alpha + beta.
             BrainType::Normal => TonotopicParams {
                 band_rates: [
                     (70.0, 35.0),   // Low → theta
@@ -185,7 +195,8 @@ impl BrainType {
                     (3.25, 22.0),
                     (3.25, 22.0),
                 ],
-                band_offsets: [220.0; 4],  // All at center of oscillatory regime
+                // Graduated: low band near threshold, high band solidly oscillating
+                band_offsets: [150.0, 170.0, 190.0, 200.0],
             },
 
             BrainType::HighAlpha => TonotopicParams {
@@ -201,14 +212,20 @@ impl BrainType {
                     (3.25, 25.0),
                     (3.25, 23.0),
                 ],
-                band_offsets: [220.0; 4],
+                // Mid bands deepest in oscillatory regime → strong alpha
+                band_offsets: [160.0, 190.0, 210.0, 180.0],
             },
 
+            // ADHD: hypoaroused cortex — offsets BELOW bifurcation (~120).
+            // Without sufficient input, high bands don't oscillate (beta deficit).
+            // Low bands barely oscillate → theta excess (elevated theta/beta ratio).
+            // With noise: bands pushed across threshold → stochastic resonance.
+            // (Barry et al. 2003: elevated theta/beta ratio)
             BrainType::Adhd => TonotopicParams {
                 band_rates: [
                     (75.0, 37.0),   // Slightly faster low band
                     (90.0, 45.0),
-                    (110.0, 55.0),  // Faster mid → more beta
+                    (110.0, 55.0),  // Faster mid → more beta when activated
                     (120.0, 60.0),
                 ],
                 band_gains: [
@@ -217,7 +234,10 @@ impl BrainType {
                     (3.5, 19.0),
                     (3.5, 18.0),
                 ],
-                band_offsets: [240.0; 4],  // Higher drive
+                // Near ADHD bifurcation (~80 with b_gain=18):
+                // Low band borderline → theta present
+                // High bands subthreshold → beta deficit, SR-susceptible
+                band_offsets: [80.0, 75.0, 70.0, 65.0],
             },
 
             BrainType::Aging => TonotopicParams {
@@ -233,9 +253,11 @@ impl BrainType {
                     (3.25, 22.0),
                     (3.0, 21.0),
                 ],
-                band_offsets: [200.0; 4],
+                // Moderate offsets; slower rates shift frequency down
+                band_offsets: [155.0, 170.0, 185.0, 180.0],
             },
 
+            // Anxious: overdriven cortex — elevated beta, hyperarousal
             BrainType::Anxious => TonotopicParams {
                 band_rates: [
                     (80.0, 40.0),
@@ -249,7 +271,8 @@ impl BrainType {
                     (3.5, 19.0),
                     (3.5, 19.0),
                 ],
-                band_offsets: [250.0; 4],  // Higher baseline drive
+                // Deep in oscillatory regime → persistent high-frequency activity
+                band_offsets: [190.0, 210.0, 230.0, 240.0],
             },
         }
     }
@@ -278,7 +301,8 @@ impl BrainType {
                         (140.0, 70.0),   // β-high ~17 Hz
                     ],
                     band_gains: [(3.25, 22.0); 4],
-                    band_offsets: [220.0; 4],
+                    // Graduated: low band near bifurcation, high band solidly oscillating
+                    band_offsets: [150.0, 175.0, 195.0, 205.0],
                 },
                 // Right hemisphere: slow — δ/θ/α-low/α
                 right: TonotopicParams {
@@ -289,7 +313,8 @@ impl BrainType {
                         (100.0, 50.0),   // α ~11 Hz
                     ],
                     band_gains: [(3.25, 22.0); 4],
-                    band_offsets: [220.0; 4],
+                    // Right hemisphere slightly lower → slower, more input-dependent
+                    band_offsets: [140.0, 165.0, 185.0, 195.0],
                 },
                 callosal_coupling: 0.10,
                 callosal_delay_s: 0.010,
@@ -311,7 +336,8 @@ impl BrainType {
                         (3.25, 25.0),
                         (3.25, 24.0),
                     ],
-                    band_offsets: [220.0; 4],
+                    // Mid bands deepest → strong bilateral alpha synchrony
+                    band_offsets: [165.0, 195.0, 210.0, 185.0],
                 },
                 right: TonotopicParams {
                     band_rates: [
@@ -326,7 +352,7 @@ impl BrainType {
                         (3.25, 25.0),
                         (3.25, 24.0),
                     ],
-                    band_offsets: [220.0; 4],
+                    band_offsets: [155.0, 185.0, 200.0, 175.0],
                 },
                 // Stronger callosal coupling — bilateral synchrony from training
                 callosal_coupling: 0.15,
@@ -336,6 +362,7 @@ impl BrainType {
 
             BrainType::Adhd => BilateralParams {
                 // Left: fast but unstable (weak inhibition)
+                // Below bifurcation → needs input to oscillate
                 left: TonotopicParams {
                     band_rates: [
                         (85.0, 42.0),
@@ -344,9 +371,13 @@ impl BrainType {
                         (135.0, 67.0),
                     ],
                     band_gains: [(3.5, 18.0); 4],
-                    band_offsets: [240.0; 4],
+                    // Near ADHD bifurcation (~80 with b_gain=18): low bands borderline,
+                    // high bands subthreshold → noise can push across threshold (SR)
+                    band_offsets: [80.0, 75.0, 70.0, 65.0],
                 },
                 // Right: theta excess (documented ADHD signature)
+                // Low band just at threshold → theta present
+                // High bands well below → beta deficit
                 right: TonotopicParams {
                     band_rates: [
                         (55.0, 28.0),    // Strong delta → theta excess
@@ -355,7 +386,8 @@ impl BrainType {
                         (95.0, 47.0),    // α
                     ],
                     band_gains: [(3.5, 18.0); 4],
-                    band_offsets: [240.0; 4],
+                    // Right hemisphere slightly lower → more subthreshold
+                    band_offsets: [75.0, 70.0, 65.0, 60.0],
                 },
                 // Weaker callosal coupling — reduced interhemispheric coherence
                 callosal_coupling: 0.06,
@@ -378,7 +410,8 @@ impl BrainType {
                         (3.0, 21.0),
                         (3.0, 21.0),
                     ],
-                    band_offsets: [200.0; 4],
+                    // Moderate, slightly reduced from Normal
+                    band_offsets: [155.0, 170.0, 185.0, 185.0],
                 },
                 right: TonotopicParams {
                     band_rates: [
@@ -393,7 +426,7 @@ impl BrainType {
                         (3.0, 21.0),
                         (3.0, 21.0),
                     ],
-                    band_offsets: [200.0; 4],
+                    band_offsets: [145.0, 160.0, 175.0, 175.0],
                 },
                 // Much weaker callosal transfer — white matter degradation
                 callosal_coupling: 0.05,
@@ -411,7 +444,8 @@ impl BrainType {
                         (145.0, 72.0),   // β-high
                     ],
                     band_gains: [(3.5, 19.0); 4],
-                    band_offsets: [250.0; 4],
+                    // Deep in oscillatory regime → persistent beta overactivation
+                    band_offsets: [195.0, 215.0, 235.0, 245.0],
                 },
                 // Right: elevated but less extreme
                 right: TonotopicParams {
@@ -422,7 +456,7 @@ impl BrainType {
                         (115.0, 57.0),
                     ],
                     band_gains: [(3.5, 19.0); 4],
-                    band_offsets: [250.0; 4],
+                    band_offsets: [185.0, 205.0, 220.0, 230.0],
                 },
                 // Stronger coupling — hyperconnected
                 callosal_coupling: 0.14,

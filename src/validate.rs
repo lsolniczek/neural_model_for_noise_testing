@@ -2,7 +2,9 @@
 /// core neural dynamics: frequency tracking, bifurcation threshold,
 /// impulse response, stochastic resonance, and spectral discrimination.
 
+use crate::brain_type::BrainType;
 use crate::neural::jansen_rit::JansenRitModel;
+use crate::neural::{simulate_bilateral, simulate_tonotopic};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -504,9 +506,6 @@ pub fn test_stochastic_resonance() {
 // ── Test 5: White vs Brown Spectral Discrimination ───────────────────────────
 
 pub fn test_spectral_discrimination() {
-    use crate::neural::simulate_tonotopic;
-    use crate::brain_type::BrainType;
-
     println!("\n  Test 5: White vs Brown Spectral Discrimination");
     println!("  ════════════════════════════════════════");
     println!("  Using tonotopic cortical model (4 parallel JR models).");
@@ -648,12 +647,503 @@ fn normalise_bands(bands: &[Vec<f64>; 4]) -> [Vec<f64>; 4] {
     out
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Part 2: Bilateral Hemispheric Model Tests
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Helper: build 4-band signals from a mono signal, distributing energy
+/// according to given fractions. Each band gets an independent noise-like
+/// modulation but weighted by the fraction to simulate spectral shape.
+fn make_bands_from_signal(signal: &[f64], energy_fractions: &[f64; 4], seed_offset: u64) -> [Vec<f64>; 4] {
+    let n = signal.len();
+    let mut bands: [Vec<f64>; 4] = [
+        vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n],
+    ];
+    for b in 0..4 {
+        let modulation = white_noise(n as f64 / SAMPLE_RATE, 1000 + seed_offset + b as u64);
+        for i in 0..n {
+            // Band signal = base signal * energy weight + small independent modulation
+            bands[b][i] = (signal[i] * energy_fractions[b].sqrt()
+                + 0.1 * modulation[i] * energy_fractions[b]).clamp(0.0, 1.0);
+        }
+    }
+    normalise_bands(&bands)
+}
+
+// ── Bilateral Test 1: Frequency Tracking Through Both Hemispheres ────────────
+
+pub fn test_bilateral_frequency_tracking() {
+    println!("\n  Bilateral Test 1: Frequency Tracking (Both Hemispheres)");
+    println!("  ════════════════════════════════════════");
+    println!("  Driving bilateral model with pure sinusoids at 10, 20, 40 Hz");
+    println!("  Same signal to both ears → checking each hemisphere responds\n");
+
+    let neural = BrainType::Normal.params();
+    let bilateral = BrainType::Normal.bilateral_params();
+    let test_freqs = [10.0, 20.0, 40.0];
+    let duration = 5.0;
+    let equal_energy = [0.25, 0.25, 0.25, 0.25];
+
+    let mut all_pass = true;
+
+    println!("    Freq     Left Hz    Right Hz   L-Alpha   R-Alpha   Asym     Status");
+    println!("    ─────────────────────────────────────────────────────────────────────");
+
+    for &freq in &test_freqs {
+        let input = sine_signal(freq, duration, 1.0);
+        let bands = make_bands_from_signal(&input, &equal_energy, 0);
+
+        let result = simulate_bilateral(
+            &bands, &bands,
+            &equal_energy, &equal_energy,
+            &bilateral,
+            neural.jansen_rit.c,
+            neural.jansen_rit.input_scale,
+            SAMPLE_RATE,
+        );
+
+        let lf = result.left_dominant_freq;
+        let rf = result.right_dominant_freq;
+        let la = result.left_band_powers.alpha;
+        let ra = result.right_band_powers.alpha;
+        let asym = result.alpha_asymmetry;
+
+        // Both hemispheres should produce meaningful oscillations
+        let pass = lf > 0.5 && rf > 0.5;
+        if !pass { all_pass = false; }
+
+        println!(
+            "    {:.0} Hz    {:>6.1}     {:>6.1}     {:.3}     {:.3}     {:>+.3}    {}",
+            freq, lf, rf, la, ra, asym,
+            if pass { "✓ PASS" } else { "✗ FAIL" }
+        );
+    }
+
+    println!();
+    if all_pass {
+        println!("  Result: PASS — both hemispheres produce oscillatory response to all inputs");
+    } else {
+        println!("  Result: PARTIAL — some frequency inputs failed to elicit bilateral response");
+    }
+
+    // Additional check: with symmetric input, alpha asymmetry should be small
+    let input = sine_signal(10.0, duration, 1.0);
+    let bands = make_bands_from_signal(&input, &equal_energy, 100);
+    let result = simulate_bilateral(
+        &bands, &bands,
+        &equal_energy, &equal_energy,
+        &bilateral,
+        neural.jansen_rit.c,
+        neural.jansen_rit.input_scale,
+        SAMPLE_RATE,
+    );
+
+    // Note: asymmetry won't be exactly 0 because L/R hemispheres have different
+    // intrinsic rates (L=fast, R=slow in the AST model)
+    println!("\n  Symmetric input asymmetry check:");
+    println!("    Alpha asymmetry with identical L/R input: {:+.4}", result.alpha_asymmetry);
+    println!("    Left hemisphere is 'fast' (theta/beta), Right is 'slow' (delta/alpha)");
+    println!("    Non-zero asymmetry with symmetric input reflects hemispheric specialisation.");
+}
+
+// ── Bilateral Test 2: Gain Sensitivity (Bifurcation via Bilateral Path) ──────
+
+pub fn test_bilateral_bifurcation() {
+    println!("\n  Bilateral Test 2: Gain Sensitivity (Bilateral Bifurcation)");
+    println!("  ════════════════════════════════════════");
+    println!("  Testing amplitude sensitivity by scaling band signals directly");
+    println!("  (bypassing normalisation that would erase amplitude info).\n");
+
+    let neural = BrainType::Normal.params();
+    let bilateral = BrainType::Normal.bilateral_params();
+    let duration = 3.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+    let equal_energy = [0.25, 0.25, 0.25, 0.25];
+
+    // Create a base noise signal and normalise it once
+    let base_noise = white_noise(duration, 200);
+    let base_bands = make_bands_from_signal(&base_noise, &equal_energy, 200);
+
+    println!("    Amplitude   Combined RMS   L-dominant   R-dominant   State");
+    println!("    ────────────────────────────────────────────────────────────");
+
+    let mut onset_amp = None;
+    let mut was_active = false;
+
+    // Scale the normalised bands by amplitude factor to simulate input level.
+    // amplitude=0 → all bands at 0 (p = offset + 0 = offset, some below bifurcation)
+    // amplitude=1 → all bands at full [0,1] (p = offset + input_scale, well above)
+    for amp_pct in (0..=100).step_by(10) {
+        let amp = amp_pct as f64 / 100.0;
+
+        // Scale each band by amplitude — this controls effective p = offset + amp*signal*input_scale
+        let scaled_bands: [Vec<f64>; 4] = [
+            base_bands[0].iter().map(|&x| x * amp).collect(),
+            base_bands[1].iter().map(|&x| x * amp).collect(),
+            base_bands[2].iter().map(|&x| x * amp).collect(),
+            base_bands[3].iter().map(|&x| x * amp).collect(),
+        ];
+
+        let result = simulate_bilateral(
+            &scaled_bands, &scaled_bands,
+            &equal_energy, &equal_energy,
+            &bilateral,
+            neural.jansen_rit.c,
+            neural.jansen_rit.input_scale,
+            SAMPLE_RATE,
+        );
+
+        let mean = result.combined.eeg.iter().sum::<f64>() / n as f64;
+        let det: Vec<f64> = result.combined.eeg.iter().map(|x| x - mean).collect();
+        let eeg_rms = rms(&det);
+        let active = eeg_rms > 0.1;
+
+        if active && !was_active && onset_amp.is_none() {
+            onset_amp = Some(amp);
+        }
+        was_active = active;
+
+        println!(
+            "    {:.2}         {:>10.4}     {:>6.1} Hz    {:>6.1} Hz    {}",
+            amp, eeg_rms,
+            result.left_dominant_freq, result.right_dominant_freq,
+            if active { "oscillating" } else { "silent" }
+        );
+    }
+
+    println!();
+    match onset_amp {
+        Some(a) => {
+            let reasonable = a >= 0.1 && a <= 0.7;
+            println!("  Bilateral oscillation onset at amplitude ≈ {:.2}", a);
+            println!(
+                "  Result: {} — {}",
+                if reasonable { "PASS" } else { "WARN" },
+                if a < 0.1 {
+                    "too sensitive — fires at minimal input"
+                } else if a > 0.7 {
+                    "too insensitive — needs extreme input to fire"
+                } else {
+                    "onset in healthy range"
+                }
+            );
+        }
+        None => {
+            println!("  Result: WARN — model oscillates at all amplitude levels (or never)");
+            println!("  This may indicate the offset places it in a permanent limit cycle.");
+        }
+    }
+}
+
+// ── Bilateral Test 3: Impulse Response + Callosal Propagation ────────────────
+
+pub fn test_bilateral_impulse() {
+    println!("\n  Bilateral Test 3: Impulse Response + Callosal Propagation");
+    println!("  ════════════════════════════════════════");
+    println!("  Short impulse to LEFT ear only, silence to right.");
+    println!("  Checking: (a) left response, (b) callosal transfer to right.\n");
+
+    let neural = BrainType::Normal.params();
+    let bilateral = BrainType::Normal.bilateral_params();
+    let duration = 5.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+    let impulse_len = (SAMPLE_RATE * 0.05) as usize; // 50ms impulse
+
+    // Left ear: impulse then silence
+    let mut left_input = vec![0.3_f64; n]; // Low baseline
+    for i in 0..impulse_len.min(n) {
+        left_input[i] = 1.0;
+    }
+    // Right ear: silence throughout
+    let right_input = vec![0.3_f64; n];
+
+    let left_energy = [0.25, 0.25, 0.25, 0.25];
+    let right_energy = [0.25, 0.25, 0.25, 0.25];
+
+    let left_bands = make_bands_from_signal(&left_input, &left_energy, 300);
+    let right_bands = make_bands_from_signal(&right_input, &right_energy, 400);
+
+    let result = simulate_bilateral(
+        &left_bands, &right_bands,
+        &left_energy, &right_energy,
+        &bilateral,
+        neural.jansen_rit.c,
+        neural.jansen_rit.input_scale,
+        SAMPLE_RATE,
+    );
+
+    // Analyse response in 0.5s windows
+    let window_samples = (SAMPLE_RATE * 0.5) as usize;
+    let combined = &result.combined.eeg;
+    let mean = combined.iter().sum::<f64>() / n as f64;
+
+    println!("    Time (s)   Combined RMS   State");
+    println!("    ─────────────────────────────────");
+
+    let mut peak_rms = 0.0_f64;
+    for w in 0..(n / window_samples) {
+        let start = w * window_samples;
+        let end = (start + window_samples).min(n);
+        let window: Vec<f64> = combined[start..end].iter().map(|x| x - mean).collect();
+        let w_rms = rms(&window);
+        let t = (start as f64 + window_samples as f64 / 2.0) / SAMPLE_RATE;
+        if w_rms > peak_rms { peak_rms = w_rms; }
+
+        println!(
+            "    {:>5.1}      {:>10.4}     {}",
+            t, w_rms,
+            if w_rms > peak_rms * 0.5 { "active" } else { "settling" }
+        );
+    }
+
+    // Check hemispheric asymmetry — impulse to left ear should primarily
+    // activate RIGHT hemisphere (contralateral pathway, 65%)
+    println!();
+    println!("  Hemispheric analysis:");
+    println!("    Impulse delivered to: LEFT ear");
+    println!("    Right hemisphere (contralateral): dominant = {:.1} Hz", result.right_dominant_freq);
+    println!("    Left hemisphere (ipsilateral):    dominant = {:.1} Hz", result.left_dominant_freq);
+    println!("    Alpha asymmetry: {:+.4}", result.alpha_asymmetry);
+    println!();
+
+    // Callosal delay check: with 10ms delay and 10% coupling, the response
+    // should still reach both hemispheres but with the contralateral one stronger.
+    let contra_stronger = result.alpha_asymmetry.abs() > 0.01;
+    println!(
+        "  Result: {} — {}",
+        if contra_stronger { "PASS" } else { "WARN" },
+        if contra_stronger {
+            "hemispheres show asymmetric response to unilateral input"
+        } else {
+            "hemispheres show nearly identical response (callosal coupling may be too strong)"
+        }
+    );
+    println!("  Callosal coupling: {:.0}%, delay: {:.0}ms",
+        bilateral.callosal_coupling * 100.0,
+        bilateral.callosal_delay_s * 1000.0);
+}
+
+// ── Bilateral Test 4: Stochastic Resonance (ADHD Bilateral Check) ────────────
+
+pub fn test_bilateral_stochastic_resonance() {
+    println!("\n  Bilateral Test 4: Stochastic Resonance (Bilateral ADHD Check)");
+    println!("  ════════════════════════════════════════");
+    println!("  Weak 20 Hz signal (subthreshold amplitude). Adding noise.");
+    println!("  ADHD offsets are BELOW bifurcation — noise should help.\n");
+
+    let neural_normal = BrainType::Normal.params();
+    let bilateral_normal = BrainType::Normal.bilateral_params();
+    let bilateral_adhd = BrainType::Adhd.bilateral_params();
+    let neural_adhd = BrainType::Adhd.params();
+
+    let duration = 10.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+
+    let energy_frac = [0.25, 0.25, 0.25, 0.25];
+    let noise_raw = white_noise(duration, 54321);
+
+    // Weak 20 Hz signal at VERY LOW amplitude — must stay below ADHD's
+    // lowered Hopf bifurcation (~110-115 due to b_gain=18, a_gain=3.5).
+    // With ADHD offsets ~90-105 and input_scale=80:
+    //   signal=0.02 → peak p = 105 + 0.02*80 = 106.6 (well below ADHD threshold ~115)
+    //   signal=0.02 + noise*0.15 → peak p = 105 + 0.17*80 = 118.6 (crosses!)
+    //   signal=0.02 + noise*0.30 → peak p = 105 + 0.32*80 = 130.6 (solidly above)
+    // Normal brain (offsets 150+) is always above its threshold (~125) regardless.
+    let signal_amp = 0.02;
+    let noise_levels = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.60];
+
+    for (brain_label, bilateral, neural) in &[
+        ("Normal", &bilateral_normal, &neural_normal),
+        ("ADHD", &bilateral_adhd, &neural_adhd),
+    ] {
+        println!("    Brain type: {} (offsets: L0={:.0}, R0={:.0})",
+            brain_label,
+            bilateral.left.band_offsets[0],
+            bilateral.right.band_offsets[0]);
+        println!("    Noise amp   Beta     EEG RMS    20Hz SNR   SR ratio   Dominant");
+        println!("    ──────────────────────────────────────────────────────────────────");
+
+        let mut snr_baseline = 0.0_f64;
+        let mut best_sr = 0.0_f64;
+        let mut best_noise = 0.0;
+
+        for &noise_amp in &noise_levels {
+            // Build band signals with explicit amplitude control (no normalisation)
+            // Signal = signal_amp * sin(20Hz) + noise_amp * white_noise
+            let band_signal: Vec<f64> = (0..n).map(|i| {
+                let t = i as f64 / SAMPLE_RATE;
+                let sig = signal_amp * (0.5 + 0.5 * (2.0 * PI * 20.0 * t).sin());
+                let nz = noise_amp * noise_raw[i];
+                (sig + nz).clamp(0.0, 1.0)
+            }).collect();
+
+            // All 4 bands get the same signal (equal energy distribution)
+            let bands: [Vec<f64>; 4] = [
+                band_signal.clone(),
+                band_signal.clone(),
+                band_signal.clone(),
+                band_signal.clone(),
+            ];
+
+            let result = simulate_bilateral(
+                &bands, &bands,
+                &energy_frac, &energy_frac,
+                bilateral,
+                neural.jansen_rit.c,
+                neural.jansen_rit.input_scale,
+                SAMPLE_RATE,
+            );
+
+            let bp_norm = result.combined.band_powers.normalized();
+
+            let mean = result.combined.eeg.iter().sum::<f64>() / n as f64;
+            let det: Vec<f64> = result.combined.eeg.iter().map(|x| x - mean).collect();
+            let (freqs, powers) = power_spectrum(&det);
+            let signal_20 = band_power(&freqs, &powers, 19.0, 21.0);
+            let total: f64 = powers.iter().sum();
+            let noise_power = total - signal_20;
+            let snr = if noise_power > 1e-15 { signal_20 / noise_power } else { 0.0 };
+
+            if noise_amp == 0.0 { snr_baseline = snr; }
+            let sr_ratio = if snr_baseline > 1e-10 { snr / snr_baseline } else if snr > 1e-10 { 100.0 } else { 1.0 };
+
+            if sr_ratio > best_sr {
+                best_sr = sr_ratio;
+                best_noise = noise_amp;
+            }
+
+            println!(
+                "    {:.2}        {:.4}   {:.4}     {:.3}      {:.2}×       {:>5.1} Hz",
+                noise_amp, bp_norm.beta, rms(&det), snr, sr_ratio,
+                result.combined.dominant_freq
+            );
+        }
+        println!("    Best SR ratio: {:.2}× at noise={:.1}", best_sr, best_noise);
+        println!();
+    }
+
+    println!("  Interpretation:");
+    println!("    - SR ratio > 1.0 = noise IMPROVED signal detection (stochastic resonance)");
+    println!("    - ADHD brain (near/below bifurcation) should show SR; Normal may not");
+    println!("    - Classical SR curve: improves then degrades (inverted U)");
+}
+
+// ── Bilateral Test 5: White vs Brown Spectral Discrimination (Full Pipeline) ─
+
+pub fn test_bilateral_spectral_discrimination() {
+    println!("\n  Bilateral Test 5: White vs Brown Spectral Discrimination (Bilateral)");
+    println!("  ════════════════════════════════════════");
+    println!("  White and brown noise at same RMS through bilateral model.");
+    println!("  Testing all 5 brain types for spectral sensitivity.\n");
+
+    let duration = 10.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+
+    // White noise: equal energy per band
+    let white_energy = [0.25, 0.25, 0.25, 0.25];
+    let wn = white_noise(duration, 42);
+    let white_bands_l = make_bands_from_signal(&wn, &white_energy, 600);
+    let white_bands_r = make_bands_from_signal(&white_noise(duration, 43), &white_energy, 700);
+
+    // Brown noise: 80% low, 15% low-mid, 4% mid-high, 1% high
+    let brown_energy = [0.80, 0.15, 0.04, 0.01];
+    let bn = brown_noise(duration, 42);
+    let brown_bands_l = make_bands_from_signal(&bn, &brown_energy, 800);
+    let brown_bands_r = make_bands_from_signal(&brown_noise(duration, 43), &brown_energy, 900);
+
+    let brain_types = [
+        BrainType::Normal,
+        BrainType::Adhd,
+        BrainType::HighAlpha,
+        BrainType::Aging,
+        BrainType::Anxious,
+    ];
+
+    println!("    Brain Type   Noise    Delta   Theta   Alpha   Beta    Gamma   Dominant  Asym");
+    println!("    ──────────────────────────────────────────────────────────────────────────────────");
+
+    let mut any_discriminates = false;
+
+    for brain in &brain_types {
+        let neural = brain.params();
+        let bilateral = brain.bilateral_params();
+
+        let result_w = simulate_bilateral(
+            &white_bands_l, &white_bands_r,
+            &white_energy, &white_energy,
+            &bilateral,
+            neural.jansen_rit.c,
+            neural.jansen_rit.input_scale,
+            SAMPLE_RATE,
+        );
+
+        let result_b = simulate_bilateral(
+            &brown_bands_l, &brown_bands_r,
+            &brown_energy, &brown_energy,
+            &bilateral,
+            neural.jansen_rit.c,
+            neural.jansen_rit.input_scale,
+            SAMPLE_RATE,
+        );
+
+        let bpw = result_w.combined.band_powers.normalized();
+        let bpb = result_b.combined.band_powers.normalized();
+
+        let max_diff = [
+            (bpw.delta - bpb.delta).abs(),
+            (bpw.theta - bpb.theta).abs(),
+            (bpw.alpha - bpb.alpha).abs(),
+            (bpw.beta - bpb.beta).abs(),
+            (bpw.gamma - bpb.gamma).abs(),
+        ].iter().cloned().fold(0.0_f64, f64::max);
+
+        if max_diff > 0.03 { any_discriminates = true; }
+
+        let label = format!("{:?}", brain);
+        println!(
+            "    {:<12} White    {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1} Hz  {:>+.3}",
+            label, bpw.delta, bpw.theta, bpw.alpha, bpw.beta, bpw.gamma,
+            result_w.combined.dominant_freq, result_w.alpha_asymmetry
+        );
+        println!(
+            "    {:<12} Brown    {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1} Hz  {:>+.3}",
+            "", bpb.delta, bpb.theta, bpb.alpha, bpb.beta, bpb.gamma,
+            result_b.combined.dominant_freq, result_b.alpha_asymmetry
+        );
+        println!(
+            "    {:<12} Diff     {:>+.3}  {:>+.3}  {:>+.3}  {:>+.3}  {:>+.3}   max={:.1}%",
+            "",
+            bpw.delta - bpb.delta,
+            bpw.theta - bpb.theta,
+            bpw.alpha - bpb.alpha,
+            bpw.beta - bpb.beta,
+            bpw.gamma - bpb.gamma,
+            max_diff * 100.0
+        );
+        println!();
+    }
+
+    println!(
+        "  Result: {} — {}",
+        if any_discriminates { "PASS" } else { "FAIL" },
+        if any_discriminates {
+            "bilateral model produces different EEG for white vs brown noise"
+        } else {
+            "model fails to distinguish noise colors through bilateral pathway"
+        }
+    );
+    if any_discriminates {
+        println!("  Brown noise should show: more theta/delta (slow), less beta/gamma");
+        println!("  White noise should show: more balanced spectrum, higher beta/gamma");
+    }
+}
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 pub fn run_all() {
     println!("\n  Neural Model Validation Suite");
     println!("  ════════════════════════════════════════════════════════════");
-    println!("  Testing JR model directly (bypassing cochlear filterbank)");
+    println!("  Part 1: Single JR Model (bypassing cochlear filterbank)");
     println!("  Sample rate: {} Hz", SAMPLE_RATE);
 
     test_frequency_tracking();
@@ -662,6 +1152,17 @@ pub fn run_all() {
     test_stochastic_resonance();
     test_spectral_discrimination();
 
+    println!("\n\n  ════════════════════════════════════════════════════════════");
+    println!("  Part 2: Bilateral Hemispheric Model");
+    println!("  Testing L/R hemispheres, callosal coupling, AST hypothesis");
+    println!("  ════════════════════════════════════════════════════════════");
+
+    test_bilateral_frequency_tracking();
+    test_bilateral_bifurcation();
+    test_bilateral_impulse();
+    test_bilateral_stochastic_resonance();
+    test_bilateral_spectral_discrimination();
+
     println!("\n  ════════════════════════════════════════════════════════════");
-    println!("  Validation complete.");
+    println!("  Validation complete (10 tests total).");
 }

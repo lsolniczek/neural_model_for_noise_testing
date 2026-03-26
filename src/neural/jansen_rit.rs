@@ -413,7 +413,7 @@ pub fn simulate_tonotopic(
         let detrended: Vec<f64> = band_result.eeg.iter().map(|x| x - band_mean).collect();
 
         let rms = (detrended.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
-        let norm = if rms > 1e-10 { 1.0 / rms } else { 1.0 };
+        let norm = if rms > 1e-10 { 1.0 / rms.sqrt() } else { 0.0 };
 
         let weight = energy_fractions[b];
         for i in 0..n {
@@ -607,11 +607,11 @@ fn run_hemisphere_tonotopic(
 
         let result = jr.simulate(&bands[b]);
 
-        // Detrend + normalise to unit RMS (same as simulate_tonotopic)
+        // Detrend + sqrt-compress RMS (preserves amplitude dynamics for SR)
         let band_mean = result.eeg.iter().sum::<f64>() / n as f64;
         let detrended: Vec<f64> = result.eeg.iter().map(|x| x - band_mean).collect();
         let rms = (detrended.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
-        let norm = if rms > 1e-10 { 1.0 / rms } else { 1.0 };
+        let norm = if rms > 1e-10 { 1.0 / rms.sqrt() } else { 0.0 };
 
         let weight = energy[b];
         for i in 0..n {

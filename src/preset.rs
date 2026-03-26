@@ -27,7 +27,7 @@ pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 23;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModConfig {
-    pub kind: u8, // 0=Flat, 1=SineLfo, 2=Breathing, 3=Stochastic
+    pub kind: u8, // 0=Flat, 1=SineLfo, 2=Breathing, 3=Stochastic, 4=NeuralLfo
     pub param_a: f32,
     pub param_b: f32,
     pub param_c: f32,
@@ -51,7 +51,7 @@ impl ModConfig {
 
     /// Clamp parameters to valid ranges based on kind.
     fn clamp(&mut self) {
-        self.kind = self.kind.min(3);
+        self.kind = self.kind.min(4);
         match self.kind {
             1 => {
                 // SineLfo: freq 0.01–2.0, depth 0.0–1.0
@@ -64,10 +64,15 @@ impl ModConfig {
                 self.param_b = self.param_b.clamp(0.0, 1.0);
             }
             3 => {
-                // Stochastic: lambda 0.1–10, decay_ms 10–2000, min_gain 0.05–0.5
+                // Stochastic: lambda 0.1–10, decay_ms 10–500, min_gain 0.05–0.5
                 self.param_a = self.param_a.clamp(0.1, 10.0);
-                self.param_b = self.param_b.clamp(10.0, 2000.0);
+                self.param_b = self.param_b.clamp(10.0, 500.0);
                 self.param_c = self.param_c.clamp(0.05, 0.5);
+            }
+            4 => {
+                // NeuralLfo: freq 1.0–40.0 Hz, depth 0.0–1.0
+                self.param_a = self.param_a.clamp(1.0, 40.0);
+                self.param_b = self.param_b.clamp(0.0, 1.0);
             }
             _ => {} // Flat: no params
         }
@@ -344,12 +349,12 @@ impl Preset {
             b.push((-5.0, 5.0));    // z
             b.push((0.0, 1.0));     // volume
             b.push((0.0, 1.0));     // reverb_send
-            b.push((0.0, 3.0));     // bass_mod.kind
-            b.push((0.0, 2.0));     // bass_mod.param_a (range depends on kind, use max)
+            b.push((0.0, 4.0));     // bass_mod.kind (0=Flat,1=SineLfo,2=Breathing,3=Stochastic,4=NeuralLfo)
+            b.push((0.0, 40.0));    // bass_mod.param_a (max covers NeuralLfo 40 Hz)
             b.push((0.0, 1.0));     // bass_mod.param_b
             b.push((0.0, 0.5));     // bass_mod.param_c
-            b.push((0.0, 3.0));     // sat_mod.kind
-            b.push((0.0, 2.0));     // sat_mod.param_a
+            b.push((0.0, 4.0));     // sat_mod.kind
+            b.push((0.0, 40.0));    // sat_mod.param_a
             b.push((0.0, 1.0));     // sat_mod.param_b
             b.push((0.0, 0.5));     // sat_mod.param_c
             b.push((0.0, 5.0));     // movement.kind
