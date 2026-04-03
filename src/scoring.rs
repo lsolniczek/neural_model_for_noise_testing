@@ -17,7 +17,7 @@
 /// - Katahira et al. 2018: EEG correlates of flow state
 /// - Engel & Fries 2010: Beta-band oscillations and active maintenance
 
-use crate::neural::{BandPowers, FhnResult, JansenRitResult};
+use crate::neural::{BandPowers, FhnResult, JansenRitResult, PerformanceVector};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -72,8 +72,10 @@ impl GoalKind {
 
 /// Target range for a single EEG band.
 ///
-/// Scoring is triangular: 0 at/below `min`, peaks at 1.0 at `ideal`,
-/// back to 0 at/above `max`. Values outside [min, max] score 0.
+/// Scoring uses a Gaussian curve centred on `ideal` with smooth roll-off.
+/// Unlike the previous triangular function, values at/beyond the boundaries
+/// receive a small nonzero score instead of hard zero, providing continuous
+/// gradients for the optimizer and better matching biological homeostasis.
 #[derive(Debug, Clone, Copy)]
 struct BandTarget {
     min: f64,
@@ -83,13 +85,16 @@ struct BandTarget {
 
 impl BandTarget {
     fn score(&self, power: f64) -> f64 {
-        if power <= self.min || power >= self.max {
-            0.0
-        } else if power <= self.ideal {
-            (power - self.min) / (self.ideal - self.min)
-        } else {
-            (self.max - power) / (self.max - self.ideal)
+        let half_width = (self.max - self.min) / 2.0;
+        if half_width < 1e-12 {
+            return 0.0;
         }
+        // Sigma chosen so that score at min/max ≈ 0.05 (smooth, not hard zero).
+        // At distance = half_width from ideal, exp(-0.5 * (half_width/sigma)^2) ≈ 0.05
+        // => sigma = half_width / sqrt(-2 * ln(0.05)) ≈ half_width / 2.448
+        let sigma = half_width / 2.448;
+        let dist = power - self.ideal;
+        (-0.5 * (dist / sigma).powi(2)).exp()
     }
 
     fn expectation(&self) -> BandExpectation {
@@ -372,7 +377,7 @@ impl Goal {
     }
 
     /// Produce a detailed diagnostic breakdown of how a result matches this goal.
-    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64) -> Diagnosis {
+    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, performance: Option<PerformanceVector>) -> Diagnosis {
         let norm = jansen_rit.band_powers.normalized();
         let t = &self.band_targets;
 
@@ -438,6 +443,7 @@ impl Goal {
             isi_status,
             dominant_freq: jansen_rit.dominant_freq,
             verdict,
+            performance,
         }
     }
 
@@ -561,6 +567,7 @@ pub struct Diagnosis {
     pub isi_status: MetricStatus,
     pub dominant_freq: f64,
     pub verdict: Verdict,
+    pub performance: Option<PerformanceVector>,
 }
 
 impl Diagnosis {

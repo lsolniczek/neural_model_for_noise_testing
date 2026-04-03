@@ -6,17 +6,33 @@
 use crate::auditory::GammatoneFilterbank;
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
-use crate::neural::{FhnModel, simulate_bilateral};
+use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
 use crate::preset::Preset;
 use crate::scoring::Goal;
 use noice_generator_core::NoiseEngine;
 
 use rustfft::{num_complex::Complex, FftPlanner};
 
-const SAMPLE_RATE: u32 = 48_000;
+pub(crate) const SAMPLE_RATE: u32 = 48_000;
+/// Decimation factor: 48 kHz → 1 kHz for neural models.
+pub(crate) const DECIMATION_FACTOR: usize = 48;
+/// Neural model sample rate after decimation.
+pub(crate) const NEURAL_SR: f64 = SAMPLE_RATE as f64 / DECIMATION_FACTOR as f64;
+
+/// Decimate a signal by averaging blocks of `factor` samples (boxcar anti-alias + downsample).
+pub(crate) fn decimate(signal: &[f64], factor: usize) -> Vec<f64> {
+    let out_len = signal.len() / factor;
+    let inv = 1.0 / factor as f64;
+    (0..out_len)
+        .map(|i| {
+            let start = i * factor;
+            signal[start..start + factor].iter().sum::<f64>() * inv
+        })
+        .collect()
+}
 
 /// Deinterleave stereo buffer into separate L/R channels.
-fn deinterleave(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn deinterleave(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
     let num_frames = interleaved.len() / 2;
     let mut left = Vec::with_capacity(num_frames);
     let mut right = Vec::with_capacity(num_frames);
@@ -30,6 +46,9 @@ fn deinterleave(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
 pub struct SimulationConfig {
     /// Duration of audio to render per evaluation (seconds).
     pub duration_secs: f32,
+    /// Initial seconds of neural output to discard before analysis.
+    /// Allows differential-equation models to settle past startup transients.
+    pub warmup_discard_secs: f32,
     /// Brain type profile for neural models.
     pub brain_type: BrainType,
 }
@@ -37,7 +56,8 @@ pub struct SimulationConfig {
 impl Default for SimulationConfig {
     fn default() -> Self {
         SimulationConfig {
-            duration_secs: 3.0,
+            duration_secs: 12.0,
+            warmup_discard_secs: 2.0,
             brain_type: BrainType::Normal,
         }
     }
@@ -63,6 +83,8 @@ pub struct SimulationResult {
     pub right_dominant_freq: f64,
     /// Alpha asymmetry index: (left_alpha - right_alpha) / (left_alpha + right_alpha).
     pub alpha_asymmetry: f64,
+    /// Performance vector: entrainment, E/I stability, spectral centroid.
+    pub performance: PerformanceVector,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -70,7 +92,7 @@ pub struct SimulationResult {
 /// Returns a value in [0, 1] where 0 = very dark (all energy < 200 Hz)
 /// and 1 = very bright (all energy > 4 kHz). Based on the spectral centroid
 /// mapped through the audible range on a log scale.
-fn spectral_brightness(audio: &[f32], sample_rate: f64) -> f64 {
+pub(crate) fn spectral_brightness(audio: &[f32], sample_rate: f64) -> f64 {
     let n = audio.len();
     let fft_len = n.next_power_of_two();
     let mut planner = FftPlanner::<f64>::new();
@@ -215,32 +237,70 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     // 5b. Spectral brightness from audio FFT (psychoacoustic complement)
     let brightness = spectral_brightness(&left, sr);
 
+    // 5c. Decimate band signals from 48 kHz → 1 kHz for neural models.
+    //     Neural models operate at 0.5–50 Hz; feeding 48 kHz wastes ~98% of
+    //     compute on samples that carry no additional information.
+    // Discard initial warm-up samples from decimated signals so the neural
+    // models only analyse the settled portion of the auditory response.
+    let discard_samples = (config.warmup_discard_secs as f64 * NEURAL_SR) as usize;
+
+    let trim = |signal: &[f64]| -> Vec<f64> {
+        let dec = decimate(signal, DECIMATION_FACTOR);
+        let skip = discard_samples.min(dec.len());
+        dec[skip..].to_vec()
+    };
+
+    let left_bands_dec: [Vec<f64>; 4] = [
+        trim(&left_bands[0]),
+        trim(&left_bands[1]),
+        trim(&left_bands[2]),
+        trim(&left_bands[3]),
+    ];
+    let right_bands_dec: [Vec<f64>; 4] = [
+        trim(&right_bands[0]),
+        trim(&right_bands[1]),
+        trim(&right_bands[2]),
+        trim(&right_bands[3]),
+    ];
+
     // 6. Bilateral cortical model: 2×4 parallel Jansen-Rit models
-    //    Left hemisphere (fast, θ/γ) ← mainly right ear (contralateral)
-    //    Right hemisphere (slow, δ/β) ← mainly left ear (contralateral)
+    //    Left hemisphere (fast, α/β) ← mainly right ear (contralateral)
+    //    Right hemisphere (slow, δ/θ) ← mainly left ear (contralateral)
     //    Coupled through corpus callosum with ~10ms delay, ~10% strength.
     let neural_params = config.brain_type.params();
     let bilateral = config.brain_type.bilateral_params();
 
+    let fast_inhib = FastInhibParams {
+        g_fast_gain: neural_params.jansen_rit.g_fast_gain,
+        g_fast_rate: neural_params.jansen_rit.g_fast_rate,
+        c5: neural_params.jansen_rit.c5,
+        c6: neural_params.jansen_rit.c6,
+        c7: neural_params.jansen_rit.c7,
+    };
+
     let bi_result = simulate_bilateral(
-        &left_bands,
-        &right_bands,
+        &left_bands_dec,
+        &right_bands_dec,
         &bands_l.energy_fractions,
         &bands_r.energy_fractions,
         &bilateral,
         neural_params.jansen_rit.c,
         neural_params.jansen_rit.input_scale,
-        sr,
+        NEURAL_SR,
+        &fast_inhib,
+        neural_params.jansen_rit.v0,
     );
 
     let jr_result = &bi_result.combined;
 
     // 7. FHN: single-neuron driven by combined bilateral EEG oscillations.
+    //    Uses the same decimated sample rate as the JR output.
     let fhn = FhnModel::with_params(
-        sr,
+        NEURAL_SR,
         neural_params.fhn.a,
         neural_params.fhn.b,
         neural_params.fhn.epsilon,
+        neural_params.fhn.time_scale,
     );
 
     // Normalise EEG to [-1, 1] range for FHN input
@@ -249,7 +309,26 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let fhn_input: Vec<f64> = jr_result.eeg.iter().map(|x| x * eeg_norm).collect();
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
-    // 8. Score (with reduced brightness modifier — neural model now does most work)
+    // 8. Performance Vector — diagnostic metrics for preset evaluation.
+    //    Extract NeuralLFO target frequency from the preset (kind=4, param_a=freq).
+    let target_lfo_freq = preset.objects.iter()
+        .flat_map(|obj| [&obj.bass_mod, &obj.satellite_mod])
+        .filter(|m| m.kind == 4 && m.param_a > 0.5) // NeuralLfo with freq > 0.5 Hz
+        .map(|m| m.param_a as f64)
+        .next(); // Use first active NeuralLFO frequency
+
+    // Detrend EEG for spectral analysis
+    let eeg_mean = jr_result.eeg.iter().sum::<f64>() / jr_result.eeg.len() as f64;
+    let eeg_detrended: Vec<f64> = jr_result.eeg.iter().map(|x| x - eeg_mean).collect();
+
+    let performance = PerformanceVector::compute(
+        &eeg_detrended,
+        &jr_result.fast_inhib_trace,
+        NEURAL_SR,
+        target_lfo_freq,
+    );
+
+    // 9. Score (with reduced brightness modifier — neural model now does most work)
     let score = goal.evaluate_with_brightness(&fhn_result, jr_result, brightness);
     let norm_bands = jr_result.band_powers.normalized();
 
@@ -268,5 +347,6 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         left_dominant_freq: bi_result.left_dominant_freq,
         right_dominant_freq: bi_result.right_dominant_freq,
         alpha_asymmetry: bi_result.alpha_asymmetry,
+        performance,
     }
 }

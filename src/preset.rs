@@ -6,7 +6,7 @@
 
 use crate::movement::MovementConfig;
 use noice_generator_core::{
-    AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine, SpatialMode,
+    AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -178,12 +178,7 @@ impl Preset {
     pub fn apply_to_engine(&self, engine: &Arc<NoiseEngine>) {
         engine.set_master_gain(self.master_gain);
 
-        let spatial = if self.spatial_mode == 0 {
-            SpatialMode::Stereo
-        } else {
-            SpatialMode::Immersive
-        };
-        engine.set_spatial_mode(spatial, self.source_count);
+        engine.set_source_count(self.source_count);
 
         engine.set_anchor_color(NoiseColor::from_u8(self.anchor_color));
         engine.set_anchor_volume(self.anchor_volume);
@@ -213,14 +208,14 @@ impl Preset {
                 obj.volume,
                 obj.reverb_send,
             );
-            engine.set_stereo_bass_modulator(
+            engine.set_bass_modulator(
                 i as u32,
                 obj.bass_mod.to_modulator_kind(),
                 obj.bass_mod.param_a,
                 obj.bass_mod.param_b,
                 obj.bass_mod.param_c,
             );
-            engine.set_stereo_satellite_modulator(
+            engine.set_satellite_modulator(
                 i as u32,
                 obj.satellite_mod.to_modulator_kind(),
                 obj.satellite_mod.param_a,
@@ -326,6 +321,32 @@ impl Preset {
 
         preset.clamp();
         preset
+    }
+
+    /// Indices of discrete (integer-valued) genes in the genome.
+    ///
+    /// These genes encode categorical parameters (noise color, movement kind,
+    /// modulator kind, etc.) and should be rounded to integers during
+    /// optimisation so the DE algorithm doesn't waste budget exploring
+    /// continuous values that map to the same discrete setting.
+    pub fn discrete_gene_indices() -> Vec<usize> {
+        let mut indices = Vec::new();
+        // Global discrete params
+        indices.push(1); // spatial_mode
+        indices.push(2); // source_count
+        indices.push(3); // anchor_color
+        indices.push(5); // environment
+
+        // Per-object discrete params
+        for i in 0..MAX_OBJECTS {
+            let base = 6 + i * 23;
+            indices.push(base);      // active (0/1)
+            indices.push(base + 1);  // color
+            indices.push(base + 7);  // bass_mod.kind
+            indices.push(base + 11); // satellite_mod.kind
+            indices.push(base + 15); // movement.kind
+        }
+        indices
     }
 
     /// Parameter bounds: (min, max) for each gene.

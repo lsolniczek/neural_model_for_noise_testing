@@ -1,5 +1,6 @@
 mod auditory;
 mod brain_type;
+mod disturb;
 mod export;
 mod movement;
 mod neural;
@@ -7,6 +8,8 @@ mod optimizer;
 mod pipeline;
 mod preset;
 mod scoring;
+mod analyze_preset;
+mod regression_tests;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -94,6 +97,32 @@ enum Commands {
         duration: f32,
     },
 
+    /// Run disturbance resilience test — inject acoustic spike and measure recovery.
+    Disturb {
+        /// Path to preset JSON file
+        preset: PathBuf,
+
+        /// Brain type profile
+        #[arg(long, default_value = "normal")]
+        brain_type: String,
+
+        /// Time of spike injection (seconds into analysis window)
+        #[arg(long, default_value_t = 4.0)]
+        spike_time: f64,
+
+        /// Duration of spike (seconds)
+        #[arg(long, default_value_t = 0.05)]
+        spike_duration: f64,
+
+        /// Spike amplitude gain (0.0–1.0)
+        #[arg(long, default_value_t = 0.8)]
+        spike_gain: f64,
+
+        /// Total simulation duration (seconds)
+        #[arg(long, default_value_t = 15.0)]
+        duration: f32,
+    },
+
     /// Run neural model validation tests (frequency tracking, bifurcation, etc.)
     Validate,
 }
@@ -151,6 +180,16 @@ fn main() {
         } => {
             run_evaluate(&preset, &goal, &brain_type, duration);
         }
+        Commands::Disturb {
+            preset,
+            brain_type,
+            spike_time,
+            spike_duration,
+            spike_gain,
+            duration,
+        } => {
+            run_disturb_cmd(&preset, &brain_type, spike_time, spike_duration, spike_gain, duration);
+        }
         Commands::Validate => {
             validate::run_all();
         }
@@ -192,6 +231,7 @@ fn run_optimize(
     let sim_config = SimulationConfig {
         duration_secs: duration,
         brain_type: bt,
+        ..SimulationConfig::default()
     };
 
     println!();
@@ -206,7 +246,8 @@ fn run_optimize(
     println!();
 
     let bounds = Preset::bounds();
-    let mut de = DifferentialEvolution::new(bounds, population, de_f, de_cr, seed);
+    let discrete_dims = Preset::discrete_gene_indices();
+    let mut de = DifferentialEvolution::with_discrete(bounds, population, de_f, de_cr, seed, discrete_dims);
 
     // Seed population from an existing preset if provided
     if let Some(path) = init_preset {
@@ -349,6 +390,19 @@ fn run_optimize(
     );
     println!("    FHN ISI CV:       {:.3}", best_result.fhn_isi_cv);
     println!();
+    println!("  Performance Vector:");
+    println!("    Spectral centroid:  {:.1} Hz", best_result.performance.spectral_centroid);
+    if let Some(er) = best_result.performance.entrainment_ratio {
+        println!("    Entrainment ratio:  {:.3}", er);
+    } else {
+        println!("    Entrainment ratio:  N/A (no NeuralLFO)");
+    }
+    if let Some(ei) = best_result.performance.ei_stability {
+        println!("    E/I stability (CV): {:.3}", ei);
+    } else {
+        println!("    E/I stability:      N/A (G=0)");
+    }
+    println!();
 
     // Preset summary
     print_preset_summary(&best_preset);
@@ -453,6 +507,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let sim_config = SimulationConfig {
             duration_secs: duration,
             brain_type: bt,
+            ..SimulationConfig::default()
         };
         let result = evaluate_preset(&preset, &goal, &sim_config);
 
@@ -461,7 +516,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let brightness = detailed.brightness;
         let energy_fractions = detailed.energy_fractions;
 
-        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness);
+        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, Some(detailed.performance));
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
@@ -572,33 +627,8 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let bi = &detailed.bilateral;
         println!();
         println!("  Bilateral Cortical Model:");
-        println!("    {:<20} {:<12} {:<12}", "Hemisphere", "Dominant", "Alpha");
-        println!("    {}", "\u{2500}".repeat(44));
         let lh_bp = &bi.left_band_powers;
         let rh_bp = &bi.right_band_powers;
-        println!(
-            "    {:<20} {:.1} Hz      {:.1}%",
-            "Left (fast, \u{03b8}/\u{03b3})",
-            bi.left_dominant_freq,
-            lh_bp.alpha * 100.0,
-        );
-        println!(
-            "    {:<20} {:.1} Hz      {:.1}%",
-            "Right (slow, \u{03b4}/\u{03b2})",
-            bi.right_dominant_freq,
-            rh_bp.alpha * 100.0,
-        );
-        let asym_label = if bi.alpha_asymmetry.abs() < 0.05 {
-            "balanced"
-        } else if bi.alpha_asymmetry > 0.0 {
-            "left-dominant"
-        } else {
-            "right-dominant"
-        };
-        println!(
-            "    Alpha asymmetry: {:+.3} ({})",
-            bi.alpha_asymmetry, asym_label,
-        );
         let coupling = bt.bilateral_params();
         println!(
             "    Callosal: coupling={:.0}%, delay={:.0}ms, contra={:.0}%",
@@ -606,6 +636,51 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
             coupling.callosal_delay_s * 1000.0,
             coupling.contralateral_ratio * 100.0,
         );
+        println!();
+        println!("    {:<8} {:<20} {:<20} {:<20}",
+            "Band", "Left (fast α/β)", "Right (slow δ/θ)", "Combined");
+        println!("    {}", "\u{2500}".repeat(72));
+        let cb = &bi.combined.band_powers.normalized();
+        let bands = [
+            ("Delta", lh_bp.delta, rh_bp.delta, cb.delta),
+            ("Theta", lh_bp.theta, rh_bp.theta, cb.theta),
+            ("Alpha", lh_bp.alpha, rh_bp.alpha, cb.alpha),
+            ("Beta",  lh_bp.beta,  rh_bp.beta,  cb.beta),
+            ("Gamma", lh_bp.gamma, rh_bp.gamma, cb.gamma),
+        ];
+        for (name, lv, rv, cv) in &bands {
+            println!("    {:<8} {:>5.1}%  {}   {:>5.1}%  {}   {:>5.1}%  {}",
+                name,
+                lv * 100.0, bar(*lv, 10),
+                rv * 100.0, bar(*rv, 10),
+                cv * 100.0, bar(*cv, 10),
+            );
+        }
+        println!();
+        println!("    Dominant freq:  Left {:.2} Hz   Right {:.2} Hz   Combined {:.2} Hz",
+            bi.left_dominant_freq, bi.right_dominant_freq, bi.combined.dominant_freq);
+        let asym_label = if bi.alpha_asymmetry.abs() < 0.05 {
+            "balanced"
+        } else if bi.alpha_asymmetry > 0.0 {
+            "left-dominant"
+        } else {
+            "right-dominant"
+        };
+        println!("    Alpha asymmetry: {:+.3} ({})", bi.alpha_asymmetry, asym_label);
+        println!();
+
+        println!("  Performance Vector:");
+        println!("    Spectral centroid:  {:.1} Hz", detailed.performance.spectral_centroid);
+        if let Some(er) = detailed.performance.entrainment_ratio {
+            println!("    Entrainment ratio:  {:.3}", er);
+        } else {
+            println!("    Entrainment ratio:  N/A (no NeuralLFO)");
+        }
+        if let Some(ei) = detailed.performance.ei_stability {
+            println!("    E/I stability (CV): {:.3}", ei);
+        } else {
+            println!("    E/I stability:      N/A (G=0)");
+        }
         println!();
 
         let brightness_label = if brightness > 0.7 {
@@ -647,6 +722,7 @@ struct DetailedResult {
     bilateral: neural::BilateralResult,
     brightness: f64,
     energy_fractions: [f64; 4],
+    performance: neural::PerformanceVector,
 }
 
 fn run_detailed_pipeline(
@@ -770,6 +846,14 @@ fn run_detailed_pipeline(
     let neural_params = brain_type.params();
     let bilateral = brain_type.bilateral_params();
 
+    let fast_inhib = neural::FastInhibParams {
+        g_fast_gain: neural_params.jansen_rit.g_fast_gain,
+        g_fast_rate: neural_params.jansen_rit.g_fast_rate,
+        c5: neural_params.jansen_rit.c5,
+        c6: neural_params.jansen_rit.c6,
+        c7: neural_params.jansen_rit.c7,
+    };
+
     let bi_result = neural::simulate_bilateral(
         &left_bands,
         &right_bands,
@@ -779,6 +863,8 @@ fn run_detailed_pipeline(
         neural_params.jansen_rit.c,
         neural_params.jansen_rit.input_scale,
         sr,
+        &fast_inhib,
+        neural_params.jansen_rit.v0,
     );
 
     // FHN driven by combined bilateral EEG
@@ -787,17 +873,33 @@ fn run_detailed_pipeline(
         neural_params.fhn.a,
         neural_params.fhn.b,
         neural_params.fhn.epsilon,
+        neural_params.fhn.time_scale,
     );
     let eeg_max = bi_result.combined.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
     let eeg_norm = if eeg_max > 1e-10 { 1.0 / eeg_max } else { 1.0 };
     let fhn_input: Vec<f64> = bi_result.combined.eeg.iter().map(|x| x * eeg_norm).collect();
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
+    // Performance Vector
+    let target_lfo_freq = preset.objects.iter()
+        .flat_map(|obj| [&obj.bass_mod, &obj.satellite_mod])
+        .filter(|m| m.kind == 4 && m.param_a > 0.5)
+        .map(|m| m.param_a as f64)
+        .next();
+
+    let jr = &bi_result.combined;
+    let eeg_mean = jr.eeg.iter().sum::<f64>() / jr.eeg.len() as f64;
+    let eeg_detrended: Vec<f64> = jr.eeg.iter().map(|x| x - eeg_mean).collect();
+    let performance = neural::PerformanceVector::compute(
+        &eeg_detrended, &jr.fast_inhib_trace, sr, target_lfo_freq,
+    );
+
     DetailedResult {
         fhn: fhn_result,
         bilateral: bi_result,
         brightness,
         energy_fractions,
+        performance,
     }
 }
 
@@ -828,6 +930,7 @@ fn print_comparison_matrix(
             let sim_config = SimulationConfig {
                 duration_secs: duration,
                 brain_type: *bt,
+                ..SimulationConfig::default()
             };
 
             let result = evaluate_preset(preset, &goal, &sim_config);
@@ -936,4 +1039,176 @@ fn print_preset_summary(preset: &Preset) {
             }
         }
     }
+}
+
+// ── Disturb ─────────────────────────────────────────────────────────────────
+
+fn run_disturb_cmd(
+    preset_path: &PathBuf,
+    brain_type_str: &str,
+    spike_time: f64,
+    spike_duration: f64,
+    spike_gain: f64,
+    duration: f32,
+) {
+    // Load preset
+    let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
+        eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
+        std::process::exit(1);
+    });
+    let exported: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
+        eprintln!("Failed to parse preset JSON: {}", e);
+        std::process::exit(1);
+    });
+    let preset: Preset = if exported.get("preset").is_some() {
+        serde_json::from_value(exported["preset"].clone()).unwrap_or_else(|e| {
+            eprintln!("Failed to parse preset from export format: {}", e);
+            std::process::exit(1);
+        })
+    } else {
+        serde_json::from_value(exported).unwrap_or_else(|e| {
+            eprintln!("Failed to parse preset: {}", e);
+            std::process::exit(1);
+        })
+    };
+
+    let bt = BrainType::from_str(brain_type_str).unwrap_or_else(|| {
+        eprintln!(
+            "Unknown brain type: '{}'. Valid: normal, high_alpha, adhd, aging, anxious",
+            brain_type_str
+        );
+        std::process::exit(1);
+    });
+
+    // Validate spike timing
+    let analysis_duration = duration as f64 - 2.0; // subtract warmup
+    if spike_time + spike_duration > analysis_duration {
+        eprintln!(
+            "Spike at {:.2}s + {:.3}s exceeds analysis window ({:.1}s). Increase --duration.",
+            spike_time, spike_duration, analysis_duration
+        );
+        std::process::exit(1);
+    }
+
+    let config = disturb::DisturbConfig {
+        spike_time_s: spike_time,
+        spike_duration_s: spike_duration,
+        spike_gain,
+        brain_type: bt,
+        duration_secs: duration,
+        warmup_discard_secs: 2.0,
+        window_s: 0.5,
+        hop_s: 0.05,
+    };
+
+    let start = Instant::now();
+    let result = disturb::run_disturb(&preset, &config);
+    let elapsed = start.elapsed();
+
+    // ── Display ─────────────────────────────────────────────────────────
+    println!();
+    println!("  \u{2550}\u{2550}\u{2550} Disturbance Resilience Test \u{2550}\u{2550}\u{2550}");
+    println!();
+    println!("  Brain type:      {}", bt);
+    println!("  Spike:           {:.0}ms white noise burst at t={:.1}s, gain={:.2}",
+        spike_duration * 1000.0, spike_time, spike_gain);
+    if let Some(tf) = result.target_freq {
+        println!("  Target LFO:      {:.1} Hz", tf);
+    }
+    println!("  Brightness:      {:.2}", result.brightness);
+    println!("  Duration:        {:.1}s ({:.2}s elapsed)", duration, elapsed.as_secs_f64());
+    println!();
+
+    // Baseline
+    println!("  \u{2500}\u{2500} Baseline (0 \u{2013} {:.1}s) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", spike_time);
+    println!("    Dominant freq:       {:.2} Hz", result.baseline_dominant_freq);
+    println!("    Spectral centroid:   {:.2} Hz", result.baseline_centroid);
+    if let Some(ent) = result.baseline_entrainment {
+        println!("    Entrainment ratio:   {:.3}", ent);
+    }
+    println!();
+
+    // Spike impact
+    println!("  \u{2500}\u{2500} Spike Impact \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+    if let (Some(nadir), Some(baseline)) = (result.nadir_entrainment, result.baseline_entrainment) {
+        let drop_pct = if baseline > 1e-10 {
+            (1.0 - nadir / baseline) * 100.0
+        } else {
+            0.0
+        };
+        println!("    Entrainment nadir:   {:.3} ({:.0}% drop at t={:.2}s)", nadir, drop_pct, result.nadir_time);
+    }
+    println!("    Peak freq deviation: \u{00b1}{:.2} Hz", result.peak_freq_deviation);
+    println!();
+
+    // Recovery
+    println!("  \u{2500}\u{2500} Recovery \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+    match result.recovery_50_ms {
+        Some(ms) => println!("    50% recovery:        {:.0} ms", ms),
+        None     => println!("    50% recovery:        NOT RECOVERED"),
+    }
+    match result.recovery_90_ms {
+        Some(ms) => println!("    90% recovery:        {:.0} ms", ms),
+        None     => println!("    90% recovery:        NOT RECOVERED"),
+    }
+
+    // Final state (last 2s)
+    let final_windows: Vec<&disturb::WindowMetrics> = result.windows.iter()
+        .filter(|w| w.time_s > (duration as f64 - 2.0 - 2.0)) // last 2s of analysis
+        .collect();
+    if !final_windows.is_empty() {
+        let final_ent: Option<f64> = {
+            let vals: Vec<f64> = final_windows.iter()
+                .filter_map(|w| w.entrainment_ratio)
+                .collect();
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) }
+        };
+        let final_freq = final_windows.iter().map(|w| w.dominant_freq).sum::<f64>() / final_windows.len() as f64;
+
+        println!();
+        println!("    Final entrainment:   {}", match final_ent {
+            Some(e) => format!("{:.3}", e),
+            None    => "N/A".to_string(),
+        });
+        println!("    Final dominant freq: {:.2} Hz", final_freq);
+
+        // Resilience score: weighted combination of recovery speed and entrainment preservation
+        if let (Some(base), Some(fin)) = (result.baseline_entrainment, final_ent) {
+            let preservation = if base > 1e-10 { (fin / base).min(1.0) } else { 0.0 };
+            let speed_score = match result.recovery_90_ms {
+                Some(ms) if ms < 5000.0 => 1.0 - (ms / 5000.0),
+                Some(_) => 0.0,
+                None => 0.0,
+            };
+            let resilience = 0.6 * preservation + 0.4 * speed_score;
+            println!();
+            println!("    \u{2550}\u{2550} Resilience Score: {:.2} \u{2550}\u{2550}", resilience);
+            println!("       (preservation={:.2}, speed={:.2})", preservation, speed_score);
+        }
+    }
+
+    // Timeline (sampled every ~0.5s for compact output)
+    println!();
+    println!("  \u{2500}\u{2500} Timeline \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+    println!("    {:>6}  {:>8}  {:>8}  {:>8}  {}", "Time", "Entrain", "DomFreq", "Centroid", "");
+
+    let step = (0.5 / config.hop_s) as usize; // print every ~0.5s
+    let step = step.max(1);
+    for (i, w) in result.windows.iter().enumerate() {
+        if i % step != 0 { continue; }
+        let marker = if (w.time_s - spike_time).abs() < config.hop_s * 2.0 {
+            " \u{25c0} SPIKE"
+        } else if (w.time_s - result.nadir_time).abs() < config.hop_s * 2.0 {
+            " \u{25c0} NADIR"
+        } else {
+            ""
+        };
+        let ent_str = match w.entrainment_ratio {
+            Some(e) => format!("{:.3}", e),
+            None    => "  N/A".to_string(),
+        };
+        println!("    {:>5.1}s  {:>8}  {:>7.1} Hz  {:>6.1} Hz{}", w.time_s, ent_str, w.dominant_freq, w.spectral_centroid, marker);
+    }
+
+    println!();
 }

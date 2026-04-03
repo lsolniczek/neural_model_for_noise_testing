@@ -3,8 +3,20 @@
 /// impulse response, stochastic resonance, and spectral discrimination.
 
 use crate::brain_type::BrainType;
-use crate::neural::jansen_rit::JansenRitModel;
+use crate::neural::jansen_rit::{FastInhibParams, JansenRitModel};
 use crate::neural::{simulate_bilateral, simulate_tonotopic};
+
+/// Build FastInhibParams from a brain type's JR parameters.
+fn fast_inhib_for(bt: BrainType) -> FastInhibParams {
+    let p = bt.params();
+    FastInhibParams {
+        g_fast_gain: p.jansen_rit.g_fast_gain,
+        g_fast_rate: p.jansen_rit.g_fast_rate,
+        c5: p.jansen_rit.c5,
+        c6: p.jansen_rit.c6,
+        c7: p.jansen_rit.c7,
+    }
+}
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -552,26 +564,27 @@ pub fn test_spectral_discrimination() {
     ];
     let brown_bands_norm = normalise_bands(&brown_bands);
 
+    let fi = fast_inhib_for(BrainType::Normal);
     let result_w = simulate_tonotopic(
         &white_bands_norm,
         &white_fractions,
-        &tono.band_rates,
-        &tono.band_gains,
-        &tono.band_offsets,
+        &tono,
         neural.jansen_rit.c,
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
+        &fi,
+        neural.jansen_rit.v0,
     );
 
     let result_b = simulate_tonotopic(
         &brown_bands_norm,
         &brown_fractions,
-        &tono.band_rates,
-        &tono.band_gains,
-        &tono.band_offsets,
+        &tono,
         neural.jansen_rit.c,
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
+        &fi,
+        neural.jansen_rit.v0,
     );
 
     // Detrend and analyse
@@ -680,6 +693,7 @@ pub fn test_bilateral_frequency_tracking() {
 
     let neural = BrainType::Normal.params();
     let bilateral = BrainType::Normal.bilateral_params();
+    let fi = fast_inhib_for(BrainType::Normal);
     let test_freqs = [10.0, 20.0, 40.0];
     let duration = 5.0;
     let equal_energy = [0.25, 0.25, 0.25, 0.25];
@@ -700,6 +714,8 @@ pub fn test_bilateral_frequency_tracking() {
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
+            &fi,
+            neural.jansen_rit.v0,
         );
 
         let lf = result.left_dominant_freq;
@@ -736,6 +752,8 @@ pub fn test_bilateral_frequency_tracking() {
         neural.jansen_rit.c,
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
+        &fi,
+        neural.jansen_rit.v0,
     );
 
     // Note: asymmetry won't be exactly 0 because L/R hemispheres have different
@@ -756,6 +774,7 @@ pub fn test_bilateral_bifurcation() {
 
     let neural = BrainType::Normal.params();
     let bilateral = BrainType::Normal.bilateral_params();
+    let fi = fast_inhib_for(BrainType::Normal);
     let duration = 3.0;
     let n = (SAMPLE_RATE * duration) as usize;
     let equal_energy = [0.25, 0.25, 0.25, 0.25];
@@ -770,13 +789,9 @@ pub fn test_bilateral_bifurcation() {
     let mut onset_amp = None;
     let mut was_active = false;
 
-    // Scale the normalised bands by amplitude factor to simulate input level.
-    // amplitude=0 → all bands at 0 (p = offset + 0 = offset, some below bifurcation)
-    // amplitude=1 → all bands at full [0,1] (p = offset + input_scale, well above)
     for amp_pct in (0..=100).step_by(10) {
         let amp = amp_pct as f64 / 100.0;
 
-        // Scale each band by amplitude — this controls effective p = offset + amp*signal*input_scale
         let scaled_bands: [Vec<f64>; 4] = [
             base_bands[0].iter().map(|&x| x * amp).collect(),
             base_bands[1].iter().map(|&x| x * amp).collect(),
@@ -791,6 +806,8 @@ pub fn test_bilateral_bifurcation() {
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
+            &fi,
+            neural.jansen_rit.v0,
         );
 
         let mean = result.combined.eeg.iter().sum::<f64>() / n as f64;
@@ -845,6 +862,7 @@ pub fn test_bilateral_impulse() {
 
     let neural = BrainType::Normal.params();
     let bilateral = BrainType::Normal.bilateral_params();
+    let fi = fast_inhib_for(BrainType::Normal);
     let duration = 5.0;
     let n = (SAMPLE_RATE * duration) as usize;
     let impulse_len = (SAMPLE_RATE * 0.05) as usize; // 50ms impulse
@@ -870,6 +888,8 @@ pub fn test_bilateral_impulse() {
         neural.jansen_rit.c,
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
+        &fi,
+        neural.jansen_rit.v0,
     );
 
     // Analyse response in 0.5s windows
@@ -985,6 +1005,13 @@ pub fn test_bilateral_stochastic_resonance() {
                 band_signal.clone(),
             ];
 
+            let fi_inner = FastInhibParams {
+                g_fast_gain: neural.jansen_rit.g_fast_gain,
+                g_fast_rate: neural.jansen_rit.g_fast_rate,
+                c5: neural.jansen_rit.c5,
+                c6: neural.jansen_rit.c6,
+                c7: neural.jansen_rit.c7,
+            };
             let result = simulate_bilateral(
                 &bands, &bands,
                 &energy_frac, &energy_frac,
@@ -992,6 +1019,8 @@ pub fn test_bilateral_stochastic_resonance() {
                 neural.jansen_rit.c,
                 neural.jansen_rit.input_scale,
                 SAMPLE_RATE,
+                &fi_inner,
+                neural.jansen_rit.v0,
             );
 
             let bp_norm = result.combined.band_powers.normalized();
@@ -1067,6 +1096,7 @@ pub fn test_bilateral_spectral_discrimination() {
     for brain in &brain_types {
         let neural = brain.params();
         let bilateral = brain.bilateral_params();
+        let fi = fast_inhib_for(*brain);
 
         let result_w = simulate_bilateral(
             &white_bands_l, &white_bands_r,
@@ -1075,6 +1105,8 @@ pub fn test_bilateral_spectral_discrimination() {
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
+            &fi,
+            neural.jansen_rit.v0,
         );
 
         let result_b = simulate_bilateral(
@@ -1084,6 +1116,8 @@ pub fn test_bilateral_spectral_discrimination() {
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
+            &fi,
+            neural.jansen_rit.v0,
         );
 
         let bpw = result_w.combined.band_powers.normalized();
@@ -1138,6 +1172,605 @@ pub fn test_bilateral_spectral_discrimination() {
     }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Part 3: Wendling 2002 Extension Validation Tests
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Wendling Test 1: Legacy Recovery (G=0 matches JR95) ──────────────────────
+
+pub fn test_wendling_legacy_recovery() {
+    println!("\n  Wendling Test 1: Legacy Recovery (G=0 → JR95)");
+    println!("  ════════════════════════════════════════");
+    println!("  When g_fast_gain=0, Wendling 8-state should produce identical");
+    println!("  output to classic JR95 6-state (y3 stays at zero).\n");
+
+    let duration = 5.0;
+    let input = sine_signal(10.0, duration, 1.0);
+
+    // Classic JR95 via with_params (no fast inhibition)
+    let jr95 = JansenRitModel::with_params(
+        SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0,
+    );
+    let result_jr95 = jr95.simulate(&input);
+
+    // Wendling with G=0 (should degenerate to JR95)
+    let fi_zero = FastInhibParams {
+        g_fast_gain: 0.0,
+        g_fast_rate: 500.0,
+        c5: 40.5,
+        c6: 13.5,
+        c7: 108.0,
+    };
+    let wendling_off = JansenRitModel::with_wendling_params(
+        SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_zero,
+        0.20, 6.0, 0.62,
+    );
+    let result_w0 = wendling_off.simulate(&input);
+
+    // Compare EEG outputs
+    let n = result_jr95.eeg.len().min(result_w0.eeg.len());
+    let mean_abs_diff: f64 = result_jr95.eeg[..n].iter()
+        .zip(result_w0.eeg[..n].iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum::<f64>() / n as f64;
+    let max_abs_diff: f64 = result_jr95.eeg[..n].iter()
+        .zip(result_w0.eeg[..n].iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+
+    let jr95_rms = rms(&result_jr95.eeg);
+
+    println!("    JR95 dominant freq:     {:.1} Hz", result_jr95.dominant_freq);
+    println!("    Wendling(G=0) dom freq: {:.1} Hz", result_w0.dominant_freq);
+    println!("    JR95 EEG RMS:          {:.6}", jr95_rms);
+    println!("    Wendling(G=0) EEG RMS: {:.6}", rms(&result_w0.eeg));
+    println!("    Mean |diff|:           {:.2e}", mean_abs_diff);
+    println!("    Max  |diff|:           {:.2e}", max_abs_diff);
+
+    let pass = mean_abs_diff < 1e-6 && max_abs_diff < 1e-4;
+    println!();
+    println!(
+        "  Result: {} — {}",
+        if pass { "PASS" } else { "FAIL" },
+        if pass {
+            "Wendling with G=0 produces identical output to JR95"
+        } else {
+            "Wendling with G=0 diverges from JR95 — check sub-stepping or derivative changes"
+        }
+    );
+}
+
+// ── Wendling Test 2: Gamma Gate (GABA-A loop verification) ───────────────────
+
+pub fn test_wendling_gamma_gate() {
+    println!("\n  Wendling Test 2: The Gamma Gate");
+    println!("  ════════════════════════════════════════");
+
+    // ── Part A: Verify y[3] (fast inhibitory state) is actually active ──────
+    println!("  Part A: Fast inhibitory state diagnostic");
+    println!("  Checking if y[3] (GABA-A PSP) is non-zero when G > 0.\n");
+
+    let duration = 3.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+    let input_const: Vec<f64> = vec![0.5; n];
+
+    for &g in &[0.0, 10.0, 20.0] {
+        let fi = FastInhibParams {
+            g_fast_gain: g,
+            g_fast_rate: 500.0,
+            c5: 40.5,
+            c6: 13.5,
+            c7: 108.0,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
+            0.20, 6.0, 0.62,
+        );
+        let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input_const);
+
+        let y3_mean = y3_trace.iter().sum::<f64>() / y3_trace.len() as f64;
+        let y3_max = y3_trace.iter().cloned().fold(f64::MIN, f64::max);
+        let y3_min = y3_trace.iter().cloned().fold(f64::MAX, f64::min);
+        let y3_ac = y3_max - y3_min; // AC amplitude of fast inhibition
+
+        // Compute fast inhib contribution as fraction of EEG amplitude
+        let eeg_ac = {
+            let eeg_max = result.eeg.iter().cloned().fold(f64::MIN, f64::max);
+            let eeg_min = result.eeg.iter().cloned().fold(f64::MAX, f64::min);
+            eeg_max - eeg_min
+        };
+
+        println!(
+            "    G={:<4.0}  y3: mean={:.4}, range=[{:.4}, {:.4}], AC={:.4}  |  EEG AC={:.4}  |  y3/EEG ratio={:.2}%",
+            g, y3_mean, y3_min, y3_max, y3_ac, eeg_ac,
+            if eeg_ac > 1e-10 { y3_ac / eeg_ac * 100.0 } else { 0.0 }
+        );
+    }
+
+    // ── Part B: Wendling 2002 protocol — B-reduction with G active ──────────
+    //
+    // Per Wendling et al. 2002 (Figure 6): gamma/fast activity emerges when
+    // slow inhibition B is REDUCED while fast inhibition G stabilises the system.
+    // This is the canonical way to produce fast oscillations in this model.
+    println!();
+    println!("  Part B: Wendling 2002 protocol — B-reduction with G active");
+    println!("  (Per paper: gamma emerges from reduced B, not increased G)");
+    println!("  Sweeping B (slow GABA-B gain) while G=10 provides fast dynamics.\n");
+
+    let input_40hz: Vec<f64> = (0..n)
+        .map(|i| {
+            let t = i as f64 / SAMPLE_RATE;
+            0.5 + 0.3 * (2.0 * PI * 40.0 * t).sin()
+        })
+        .collect();
+
+    let b_values = [22.0, 15.0, 10.0, 7.0, 5.0, 3.0, 1.0];
+
+    println!("    B       Delta   Theta   Alpha   Beta    Gamma   Dom Hz   @40Hz%   EEG RMS  y3 AC");
+    println!("    ──────────────────────────────────────────────────────────────────────────────────");
+
+    let mut gamma_increased = false;
+    let mut dom_freq_shifted = false;
+    let mut baseline_beta_gamma = 0.0_f64;
+
+    for (idx, &b) in b_values.iter().enumerate() {
+        let fi = FastInhibParams {
+            g_fast_gain: 10.0,
+            g_fast_rate: 500.0,
+            c5: 40.5,
+            c6: 13.5,
+            c7: 108.0,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
+            0.20, 6.0, 0.62,
+        );
+        let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input_40hz);
+        let bp = result.band_powers.normalized();
+
+        let y3_max = y3_trace.iter().cloned().fold(f64::MIN, f64::max);
+        let y3_min = y3_trace.iter().cloned().fold(f64::MAX, f64::min);
+        let y3_ac = y3_max - y3_min;
+
+        let mean = result.eeg.iter().sum::<f64>() / result.eeg.len() as f64;
+        let detrended: Vec<f64> = result.eeg.iter().map(|x| x - mean).collect();
+        let (freqs, powers) = power_spectrum(&detrended);
+        let total_power: f64 = powers.iter().sum();
+        let pct_40 = if total_power > 1e-20 { band_power(&freqs, &powers, 38.0, 42.0) / total_power * 100.0 } else { 0.0 };
+
+        if idx == 0 {
+            baseline_beta_gamma = bp.beta + bp.gamma;
+        }
+        if bp.beta + bp.gamma > baseline_beta_gamma + 0.05 {
+            gamma_increased = true;
+        }
+        if idx > 0 && result.dominant_freq > 13.0 {
+            dom_freq_shifted = true;
+        }
+
+        println!(
+            "    {:<5.0}   {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1}    {:>5.2}%   {:.4}   {:.4}",
+            b, bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma,
+            result.dominant_freq, pct_40, rms(&result.eeg), y3_ac
+        );
+    }
+
+    // ── Part C: Same B-reduction WITHOUT G (JR95) — to prove G matters ──────
+    println!();
+    println!("  Part C: Same B-reduction WITHOUT G (JR95 baseline)");
+    println!("  If G=10 produces different results than G=0, fast inhibition IS working.\n");
+
+    println!("    B       Delta   Theta   Alpha   Beta    Gamma   Dom Hz   EEG RMS");
+    println!("    ──────────────────────────────────────────────────────────────────");
+
+    let mut jr95_differs = false;
+
+    for &b in &b_values {
+        let jr = JansenRitModel::with_params(
+            SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0,
+        );
+        let result = jr.simulate(&input_40hz);
+        let bp = result.band_powers.normalized();
+
+        println!(
+            "    {:<5.0}   {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1}    {:.4}",
+            b, bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma,
+            result.dominant_freq, rms(&result.eeg)
+        );
+    }
+
+    // Compare JR95 vs Wendling at low B
+    let fi_on = FastInhibParams {
+        g_fast_gain: 10.0, g_fast_rate: 500.0,
+        c5: 40.5, c6: 13.5, c7: 108.0,
+    };
+    let jr_w_b5 = JansenRitModel::with_wendling_params(
+        SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_on,
+        0.20, 6.0, 0.62,
+    );
+    let jr95_b5 = JansenRitModel::with_params(
+        SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0,
+    );
+    let result_w = jr_w_b5.simulate(&input_40hz);
+    let result_95 = jr95_b5.simulate(&input_40hz);
+
+    let eeg_diff: f64 = result_w.eeg.iter()
+        .zip(result_95.eeg.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum::<f64>() / result_w.eeg.len() as f64;
+
+    if eeg_diff > 0.01 { jr95_differs = true; }
+
+    println!();
+    println!("  Comparison at B=5:");
+    println!("    Wendling (G=10): dom={:.1} Hz, RMS={:.4}", result_w.dominant_freq, rms(&result_w.eeg));
+    println!("    JR95 (G=0):     dom={:.1} Hz, RMS={:.4}", result_95.dominant_freq, rms(&result_95.eeg));
+    println!("    Mean |EEG diff|: {:.4}", eeg_diff);
+
+    // ── Part D: G sweep near bifurcation (offset=120) ──────────────────────
+    println!();
+    println!("  Part D: G sweep near bifurcation boundary (offset=120)");
+    println!("  Near bifurcation the model is more sensitive to perturbation.\n");
+
+    println!("    G       Delta   Theta   Alpha   Beta    Gamma   Dom Hz   EEG RMS  y3 AC");
+    println!("    ────────────────────────────────────────────────────────────────────────");
+
+    let mut near_bif_g0_bg = 0.0_f64;
+    let mut near_bif_gmax_bg = 0.0_f64;
+
+    for &g in &[0.0, 5.0, 10.0, 15.0, 20.0] {
+        let fi = FastInhibParams {
+            g_fast_gain: g,
+            g_fast_rate: 500.0,
+            c5: 40.5,
+            c6: 13.5,
+            c7: 108.0,
+        };
+        // offset=120 — right at the Hopf bifurcation
+        let jr = JansenRitModel::with_wendling_params(
+            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 120.0, 100.0, &fi,
+            0.20, 6.0, 0.62,
+        );
+        let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input_40hz);
+        let bp = result.band_powers.normalized();
+        let y3_ac = y3_trace.iter().cloned().fold(f64::MIN, f64::max)
+            - y3_trace.iter().cloned().fold(f64::MAX, f64::min);
+
+        if g == 0.0 { near_bif_g0_bg = bp.beta + bp.gamma; }
+        if g == 20.0 { near_bif_gmax_bg = bp.beta + bp.gamma; }
+
+        println!(
+            "    {:<5.0}   {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1}    {:.4}   {:.4}",
+            g, bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma,
+            result.dominant_freq, rms(&result.eeg), y3_ac
+        );
+    }
+
+    println!();
+
+    // Final assessment
+    let any_effect = gamma_increased || dom_freq_shifted || jr95_differs
+        || (near_bif_gmax_bg - near_bif_g0_bg).abs() > 0.01;
+
+    println!("  ── Summary ──");
+    println!("    B-reduction shifts dominant freq:    {}", if dom_freq_shifted { "YES" } else { "NO" });
+    println!("    B-reduction increases beta+gamma:    {}", if gamma_increased { "YES" } else { "NO" });
+    println!("    G=10 differs from G=0 at low B:     {}", if jr95_differs { "YES" } else { "NO" });
+    println!("    G effect near bifurcation:           beta+gamma change = {:+.3}", near_bif_gmax_bg - near_bif_g0_bg);
+
+    println!();
+    println!(
+        "  Result: {} — {}",
+        if any_effect { "PASS" } else { "FAIL" },
+        if gamma_increased && jr95_differs {
+            "Wendling fast inhibition produces measurable spectral changes"
+        } else if jr95_differs {
+            "GABA-A loop is active (G=10 ≠ G=0) but gamma not dominant — needs B tuning"
+        } else if gamma_increased {
+            "B-reduction shifts spectrum but G has no additional effect"
+        } else {
+            "fast inhibitory loop has no measurable effect — check implementation"
+        }
+    );
+}
+
+// ── Wendling Test 3: ADHD Sensitivity (brain type differentiation) ───────────
+
+pub fn test_wendling_adhd_sensitivity() {
+    println!("\n  Wendling Test 3: ADHD Sensitivity (Brain Type Differentiation)");
+    println!("  ════════════════════════════════════════");
+    println!("  All 5 brain types through Wendling bilateral model.");
+    println!("  Each should produce distinct spectral signatures.\n");
+
+    let duration = 5.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+    let equal_energy = [0.25, 0.25, 0.25, 0.25];
+
+    // Use a consistent input across brain types
+    let input = white_noise(duration, 777);
+    let bands = make_bands_from_signal(&input, &equal_energy, 500);
+
+    println!("    Brain Type   Delta   Theta   Alpha   Beta    Gamma   Dom Hz   g_rate  G     Asym");
+    println!("    ─────────────────────────────────────────────────────────────────────────────────────");
+
+    let brain_types = [
+        BrainType::Normal,
+        BrainType::HighAlpha,
+        BrainType::Adhd,
+        BrainType::Aging,
+        BrainType::Anxious,
+    ];
+
+    let mut spectral_profiles: Vec<(BrainType, f64, f64, f64, f64, f64)> = Vec::new();
+
+    for &bt in &brain_types {
+        let neural = bt.params();
+        let bilateral = bt.bilateral_params();
+        let fi = fast_inhib_for(bt);
+
+        let result = simulate_bilateral(
+            &bands, &bands,
+            &equal_energy, &equal_energy,
+            &bilateral,
+            neural.jansen_rit.c,
+            neural.jansen_rit.input_scale,
+            SAMPLE_RATE,
+            &fi,
+            neural.jansen_rit.v0,
+        );
+
+        let bp = result.combined.band_powers.normalized();
+        spectral_profiles.push((bt, bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma));
+
+        println!(
+            "    {:<12} {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1}    {:.0}    {:.0}     {:>+.3}",
+            format!("{:?}", bt), bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma,
+            result.combined.dominant_freq,
+            neural.jansen_rit.g_fast_rate, neural.jansen_rit.g_fast_gain,
+            result.alpha_asymmetry
+        );
+    }
+
+    println!();
+
+    // Verify brain types are actually differentiated
+    let mut any_pair_differs = false;
+    for i in 0..spectral_profiles.len() {
+        for j in (i+1)..spectral_profiles.len() {
+            let (bt_i, di, ti, ai, bi_v, gi) = spectral_profiles[i];
+            let (bt_j, dj, tj, aj, bj, gj) = spectral_profiles[j];
+            let max_diff = [
+                (di - dj).abs(),
+                (ti - tj).abs(),
+                (ai - aj).abs(),
+                (bi_v - bj).abs(),
+                (gi - gj).abs(),
+            ].iter().cloned().fold(0.0_f64, f64::max);
+            if max_diff > 0.01 {
+                any_pair_differs = true;
+            }
+        }
+    }
+
+    // Check ADHD-specific expectations
+    let adhd = spectral_profiles.iter().find(|(bt, ..)| *bt == BrainType::Adhd);
+    let normal = spectral_profiles.iter().find(|(bt, ..)| *bt == BrainType::Normal);
+
+    if let (Some(adhd_p), Some(normal_p)) = (adhd, normal) {
+        let adhd_theta_beta = adhd_p.2 / (adhd_p.4 + 1e-10);
+        let normal_theta_beta = normal_p.2 / (normal_p.4 + 1e-10);
+        println!("  ADHD theta/beta ratio:   {:.2}", adhd_theta_beta);
+        println!("  Normal theta/beta ratio: {:.2}", normal_theta_beta);
+        if adhd_theta_beta > normal_theta_beta {
+            println!("  ADHD shows elevated theta/beta — consistent with clinical literature");
+        }
+    }
+
+    println!();
+    println!(
+        "  Result: {} — {}",
+        if any_pair_differs { "PASS" } else { "FAIL" },
+        if any_pair_differs {
+            "brain types produce distinguishable spectral profiles with Wendling model"
+        } else {
+            "brain types produce identical spectra — Wendling parameters may need tuning"
+        }
+    );
+}
+
+// ── Wendling Test 4: Depolarization Resilience (master_gain sweep) ────────────
+
+pub fn test_wendling_numerical_stress() {
+    println!("\n  Wendling Test 4: Depolarization Resilience (Master Gain Sweep)");
+    println!("  ════════════════════════════════════════");
+    println!("  Sweeping effective master_gain from 0.1 to 1.2.");
+    println!("  JR95 (G=0) collapses into delta at high gain (depolarization block).");
+    println!("  Wendling (G=10) should maintain complex oscillations (soft-clipping).\n");
+
+    let duration = 5.0;
+    let n = (SAMPLE_RATE * duration) as usize;
+    let gains = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2];
+
+    // Use broadband noise as input (more realistic than constant)
+    let noise_input = white_noise(duration, 555);
+
+    // Compare JR95 (G=0) vs Wendling (G=10) across gain sweep
+    println!("  Part A: JR95 (G=0) — Classic model (no fast inhibition)");
+    println!("    Gain     Dom Hz   Delta%   Theta%   Alpha%   Beta%    EEG RMS    Stable");
+    println!("    ────────────────────────────────────────────────────────────────────────");
+
+    let mut jr95_delta_collapse_gain = None;
+    let mut jr95_results: Vec<(f64, f64, f64, f64, f64, f64)> = Vec::new();
+
+    for &gain in &gains {
+        // Scale input: higher gain = louder noise = higher p values
+        let input: Vec<f64> = noise_input.iter().map(|&x| (x * gain).clamp(0.0, 1.0)).collect();
+
+        let fi_off = FastInhibParams::default();
+        let jr = JansenRitModel::with_wendling_params(
+            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_off,
+            0.20, 6.0, 0.62,
+        );
+        let result = jr.simulate(&input);
+        let bp = result.band_powers.normalized();
+        let eeg_rms = rms(&result.eeg);
+        let max_eeg = result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        let stable = !result.eeg.iter().any(|x| x.is_nan() || x.is_infinite()) && max_eeg < 1e6;
+
+        // Detect delta collapse: dominant freq drops to < 4 Hz
+        if result.dominant_freq < 4.0 && jr95_delta_collapse_gain.is_none() && gain > 0.3 {
+            jr95_delta_collapse_gain = Some(gain);
+        }
+
+        jr95_results.push((gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta));
+
+        println!(
+            "    {:<6.1}   {:>5.1}    {:.3}    {:.3}    {:.3}    {:.3}    {:.4}    {}",
+            gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta,
+            eeg_rms, if stable { "OK" } else { "UNSTABLE" }
+        );
+    }
+
+    println!();
+    println!("  Part B: Wendling (G=10, g_rate=500) — With fast inhibitory stabilisation");
+    println!("    Gain     Dom Hz   Delta%   Theta%   Alpha%   Beta%    EEG RMS    Stable");
+    println!("    ────────────────────────────────────────────────────────────────────────");
+
+    let mut w02_delta_collapse_gain = None;
+    let mut w02_results: Vec<(f64, f64, f64, f64, f64, f64)> = Vec::new();
+    let mut all_stable = true;
+
+    for &gain in &gains {
+        let input: Vec<f64> = noise_input.iter().map(|&x| (x * gain).clamp(0.0, 1.0)).collect();
+
+        let fi = FastInhibParams {
+            g_fast_gain: 10.0,
+            g_fast_rate: 500.0,
+            c5: 40.5,
+            c6: 13.5,
+            c7: 108.0,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
+            0.20, 6.0, 0.62,
+        );
+        let result = jr.simulate(&input);
+        let bp = result.band_powers.normalized();
+        let eeg_rms = rms(&result.eeg);
+        let max_eeg = result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        let stable = !result.eeg.iter().any(|x| x.is_nan() || x.is_infinite()) && max_eeg < 1e6;
+
+        if !stable { all_stable = false; }
+
+        if result.dominant_freq < 4.0 && w02_delta_collapse_gain.is_none() && gain > 0.3 {
+            w02_delta_collapse_gain = Some(gain);
+        }
+
+        w02_results.push((gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta));
+
+        println!(
+            "    {:<6.1}   {:>5.1}    {:.3}    {:.3}    {:.3}    {:.3}    {:.4}    {}",
+            gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta,
+            eeg_rms, if stable { "OK" } else { "UNSTABLE" }
+        );
+    }
+
+    println!();
+
+    // Compare: how many gains keep the model above 4 Hz (not collapsed to delta)?
+    let jr95_above_4hz = jr95_results.iter().filter(|(_, df, ..)| *df >= 4.0).count();
+    let w02_above_4hz = w02_results.iter().filter(|(_, df, ..)| *df >= 4.0).count();
+
+    // Spectral complexity: average number of bands with >5% power
+    let jr95_complexity: f64 = jr95_results.iter().map(|(_, _, d, t, a, b)| {
+        [*d, *t, *a, *b].iter().filter(|&&x| x > 0.05).count() as f64
+    }).sum::<f64>() / jr95_results.len() as f64;
+    let w02_complexity: f64 = w02_results.iter().map(|(_, _, d, t, a, b)| {
+        [*d, *t, *a, *b].iter().filter(|&&x| x > 0.05).count() as f64
+    }).sum::<f64>() / w02_results.len() as f64;
+
+    println!("  Comparison:");
+    println!("    JR95 (G=0):     gains with dom freq >= 4 Hz: {}/{}", jr95_above_4hz, gains.len());
+    println!("    Wendling (G=10): gains with dom freq >= 4 Hz: {}/{}", w02_above_4hz, gains.len());
+    println!("    JR95 avg spectral bands active (>5%):     {:.1}", jr95_complexity);
+    println!("    Wendling avg spectral bands active (>5%): {:.1}", w02_complexity);
+
+    match (jr95_delta_collapse_gain, w02_delta_collapse_gain) {
+        (Some(jr_g), Some(w_g)) => {
+            println!("    JR95 delta collapse at gain: {:.1}", jr_g);
+            println!("    Wendling delta collapse at gain: {:.1}", w_g);
+            if w_g > jr_g {
+                println!("    Wendling is more resilient (collapses {:.1} gain later)", w_g - jr_g);
+            }
+        }
+        (Some(jr_g), None) => {
+            println!("    JR95 delta collapse at gain: {:.1}", jr_g);
+            println!("    Wendling: NO delta collapse across entire range");
+        }
+        (None, _) => {
+            println!("    Neither model shows delta collapse in this gain range");
+        }
+    }
+
+    println!();
+
+    // Numerical stability check with extreme parameters
+    println!("  Part C: Extreme parameter stress tests:");
+    println!("    Config              EEG RMS    Dom Hz   Stable");
+    println!("    ──────────────────────────────────────────────");
+
+    let extreme_configs = [
+        ("G=0 (JR95)",      0.0,  500.0, 40.5, 13.5, 108.0),
+        ("G=30 (high)",     30.0, 500.0, 40.5, 13.5, 108.0),
+        ("g_rate=1000",     10.0, 1000.0, 40.5, 13.5, 108.0),
+        ("C7=200 (strong)", 10.0, 500.0, 40.5, 13.5, 200.0),
+    ];
+
+    let input_mid: Vec<f64> = vec![0.5; n];
+
+    for &(label, g, gr, c5, c6, c7) in &extreme_configs {
+        let fi = FastInhibParams {
+            g_fast_gain: g,
+            g_fast_rate: gr,
+            c5,
+            c6,
+            c7,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
+            0.20, 6.0, 0.62,
+        );
+        let result = jr.simulate(&input_mid);
+
+        let eeg_rms = rms(&result.eeg);
+        let max_eeg = result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        let stable = !result.eeg.iter().any(|x| x.is_nan() || x.is_infinite()) && max_eeg < 1e6;
+
+        if !stable { all_stable = false; }
+
+        println!(
+            "    {:<19} {:<10.4} {:>5.1}    {}",
+            label, eeg_rms, result.dominant_freq,
+            if stable { "OK" } else { "UNSTABLE" }
+        );
+    }
+
+    println!();
+
+    let resilience_improved = w02_above_4hz >= jr95_above_4hz && w02_complexity >= jr95_complexity;
+    println!(
+        "  Result: {} — {}",
+        if all_stable && resilience_improved { "PASS" } else if all_stable { "PARTIAL" } else { "FAIL" },
+        if !all_stable {
+            "numerical instability detected"
+        } else if resilience_improved {
+            "Wendling model is numerically stable AND more resilient to depolarization"
+        } else {
+            "numerically stable but Wendling does not improve depolarization resilience"
+        }
+    );
+}
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 pub fn run_all() {
@@ -1163,6 +1796,16 @@ pub fn run_all() {
     test_bilateral_stochastic_resonance();
     test_bilateral_spectral_discrimination();
 
+    println!("\n\n  ════════════════════════════════════════════════════════════");
+    println!("  Part 3: Wendling 2002 Extension Validation");
+    println!("  Testing fast inhibitory (GABA-A) loop, legacy compat, stability");
+    println!("  ════════════════════════════════════════════════════════════");
+
+    test_wendling_legacy_recovery();
+    test_wendling_gamma_gate();
+    test_wendling_adhd_sensitivity();
+    test_wendling_numerical_stress();
+
     println!("\n  ════════════════════════════════════════════════════════════");
-    println!("  Validation complete (10 tests total).");
+    println!("  Validation complete (14 tests total).");
 }

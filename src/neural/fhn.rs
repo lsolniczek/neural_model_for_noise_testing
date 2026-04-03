@@ -70,14 +70,14 @@ impl FhnModel {
     }
 
     /// Create with custom parameters (for brain type profiles).
-    pub fn with_params(sample_rate: f64, a: f64, b: f64, epsilon: f64) -> Self {
+    pub fn with_params(sample_rate: f64, a: f64, b: f64, epsilon: f64, time_scale: f64) -> Self {
         FhnModel {
             a,
             b,
             epsilon,
             dt: 1.0 / sample_rate,
             sample_rate,
-            time_scale: 300.0,
+            time_scale,
         }
     }
 

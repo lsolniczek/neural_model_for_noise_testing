@@ -28,6 +28,8 @@ pub struct DifferentialEvolution {
     generation: usize,
     /// RNG
     rng: StdRng,
+    /// Indices of discrete (integer-valued) dimensions to round after mutation.
+    discrete_dims: Vec<usize>,
 }
 
 impl DifferentialEvolution {
@@ -44,6 +46,22 @@ impl DifferentialEvolution {
         f: f64,
         cr: f64,
         seed: u64,
+    ) -> Self {
+        Self::with_discrete(bounds, pop_size, f, cr, seed, Vec::new())
+    }
+
+    /// Create a new DE optimizer with discrete dimension indices.
+    ///
+    /// Genes at `discrete_dims` indices are rounded to the nearest integer
+    /// after mutation and crossover, preventing the algorithm from wasting
+    /// evaluations on continuous values that map to the same discrete setting.
+    pub fn with_discrete(
+        bounds: Vec<(f64, f64)>,
+        pop_size: usize,
+        f: f64,
+        cr: f64,
+        seed: u64,
+        discrete_dims: Vec<usize>,
     ) -> Self {
         let dim = bounds.len();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -67,7 +85,7 @@ impl DifferentialEvolution {
             fitness: f64::NEG_INFINITY,
         };
 
-        DifferentialEvolution {
+        let mut de = DifferentialEvolution {
             population,
             best,
             bounds,
@@ -75,7 +93,12 @@ impl DifferentialEvolution {
             cr,
             generation: 0,
             rng,
-        }
+            discrete_dims,
+        };
+
+        // Round discrete genes in the initial population
+        de.round_discrete_all();
+        de
     }
 
     /// Replace the population with perturbations of a seed genome.
@@ -100,6 +123,7 @@ impl DifferentialEvolution {
             }
             ind.fitness = f64::NEG_INFINITY;
         }
+        self.round_discrete_all();
     }
 
     /// Get all individuals that need evaluation (fitness == NEG_INFINITY).
@@ -142,13 +166,13 @@ impl DifferentialEvolution {
                     let mutant = self.population[a].genome[j]
                         + self.f
                             * (self.population[b].genome[j] - self.population[c].genome[j]);
-                    // Bounce-back boundary handling
-                    trial[j] = self.bounce_back(j, mutant);
+                    trial[j] = self.clamp_to_bounds(j, mutant);
                 } else {
                     trial[j] = self.population[i].genome[j];
                 }
             }
 
+            self.round_discrete(&mut trial);
             trials.push((i, trial));
         }
 
@@ -206,6 +230,24 @@ impl DifferentialEvolution {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /// Round discrete genes in a single genome vector.
+    fn round_discrete(&self, genome: &mut [f64]) {
+        for &d in &self.discrete_dims {
+            genome[d] = genome[d].round();
+        }
+    }
+
+    /// Round discrete genes in the entire population.
+    fn round_discrete_all(&mut self) {
+        let dims: Vec<usize> = self.discrete_dims.clone();
+        for ind in &mut self.population {
+            for &d in &dims {
+                ind.genome[d] = ind.genome[d].round();
+            }
+        }
+    }
+
+
     fn pick_three(&mut self, exclude: usize) -> (usize, usize, usize) {
         let pop_size = self.population.len();
         let mut a = exclude;
@@ -223,16 +265,9 @@ impl DifferentialEvolution {
         (a, b, c)
     }
 
-    /// Bounce-back boundary handling: if mutant is out of bounds,
-    /// reflect it back from the boundary.
-    fn bounce_back(&self, dim: usize, value: f64) -> f64 {
+    /// Clamp value to the bounds for the given dimension.
+    fn clamp_to_bounds(&self, dim: usize, value: f64) -> f64 {
         let (lo, hi) = self.bounds[dim];
-        if value < lo {
-            lo + self.rng.clone().gen::<f64>() * (hi - lo) * 0.1
-        } else if value > hi {
-            hi - self.rng.clone().gen::<f64>() * (hi - lo) * 0.1
-        } else {
-            value
-        }
+        value.clamp(lo, hi)
     }
 }
