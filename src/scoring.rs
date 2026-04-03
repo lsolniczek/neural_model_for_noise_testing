@@ -410,13 +410,17 @@ impl Goal {
         };
 
         let isi_status = if let Some(target_cv) = self.fhn_targets.target_isi_cv {
-            let diff = (fhn.isi_cv - target_cv).abs();
-            if diff < 0.08 {
-                MetricStatus::Pass
-            } else if diff < 0.18 {
-                MetricStatus::Warn
+            if fhn.isi_cv.is_nan() {
+                MetricStatus::Fail // insufficient spikes for ISI analysis
             } else {
-                MetricStatus::Fail
+                let diff = (fhn.isi_cv - target_cv).abs();
+                if diff < 0.08 {
+                    MetricStatus::Pass
+                } else if diff < 0.18 {
+                    MetricStatus::Warn
+                } else {
+                    MetricStatus::Fail
+                }
             }
         } else {
             MetricStatus::Pass
@@ -465,12 +469,17 @@ impl Goal {
         score += rate_score;
         components += 1.0;
 
-        // ISI regularity
+        // ISI regularity (skip if ISI CV is NaN — insufficient spikes)
         if let Some(target_cv) = targets.target_isi_cv {
-            let cv_diff = (fhn.isi_cv - target_cv).abs();
-            let cv_score = (-4.0 * cv_diff).exp(); // slightly softer penalty than before
-            score += cv_score;
-            components += 1.0;
+            if fhn.isi_cv.is_nan() {
+                // No meaningful ISI data → no credit for this component
+                components += 1.0;
+            } else {
+                let cv_diff = (fhn.isi_cv - target_cv).abs();
+                let cv_score = (-4.0 * cv_diff).exp();
+                score += cv_score;
+                components += 1.0;
+            }
         }
 
         if components > 0.0 {

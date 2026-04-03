@@ -62,7 +62,7 @@ pub fn export_preset(
         preset: preset.clone(),
         analysis: ExportAnalysis {
             fhn_firing_rate: result.fhn_firing_rate,
-            fhn_isi_cv: result.fhn_isi_cv,
+            fhn_isi_cv: if result.fhn_isi_cv.is_nan() { -1.0 } else { result.fhn_isi_cv },
             dominant_freq_hz: result.dominant_freq,
             band_powers: ExportBandPowers {
                 delta: result.delta_power,

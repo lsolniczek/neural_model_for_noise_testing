@@ -388,7 +388,11 @@ fn run_optimize(
         "    FHN firing rate:  {:.1} spikes/s",
         best_result.fhn_firing_rate
     );
-    println!("    FHN ISI CV:       {:.3}", best_result.fhn_isi_cv);
+    if best_result.fhn_isi_cv.is_nan() {
+        println!("    FHN ISI CV:       N/A (< 3 spikes)");
+    } else {
+        println!("    FHN ISI CV:       {:.3}", best_result.fhn_isi_cv);
+    }
     println!();
     println!("  Performance Vector:");
     println!("    Spectral centroid:  {:.1} Hz", best_result.performance.spectral_centroid);
@@ -598,22 +602,34 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
 
         if let Some(target_cv) = diagnosis.target_isi_cv {
             let cv_target = format!("CV ~ {:.2}", target_cv);
-            let cv_detail = if diagnosis.isi_cv < 0.1 {
-                "very regular"
-            } else if diagnosis.isi_cv < 0.2 {
-                "regular"
+            if diagnosis.isi_cv.is_nan() {
+                println!(
+                    "    {:<18} {:<16} {:<10} {} {}  ({})",
+                    "ISI regularity",
+                    cv_target,
+                    "N/A",
+                    status_icon(&diagnosis.isi_status),
+                    diagnosis.isi_status,
+                    "< 3 spikes",
+                );
             } else {
-                "irregular"
-            };
-            println!(
-                "    {:<18} {:<16} {:<10.3} {} {}  ({})",
-                "ISI regularity",
-                cv_target,
-                diagnosis.isi_cv,
-                status_icon(&diagnosis.isi_status),
-                diagnosis.isi_status,
-                cv_detail,
-            );
+                let cv_detail = if diagnosis.isi_cv < 0.1 {
+                    "very regular"
+                } else if diagnosis.isi_cv < 0.2 {
+                    "regular"
+                } else {
+                    "irregular"
+                };
+                println!(
+                    "    {:<18} {:<16} {:<10.3} {} {}  ({})",
+                    "ISI regularity",
+                    cv_target,
+                    diagnosis.isi_cv,
+                    status_icon(&diagnosis.isi_status),
+                    diagnosis.isi_status,
+                    cv_detail,
+                );
+            }
         }
         println!();
 

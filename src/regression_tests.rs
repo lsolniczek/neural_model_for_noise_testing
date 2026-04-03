@@ -484,8 +484,9 @@ mod tests {
         // Same input → same output (deterministic)
         assert_eq!(result1.firing_rate, result2.firing_rate,
             "FHN should be deterministic");
-        assert_eq!(result1.isi_cv, result2.isi_cv,
-            "FHN ISI CV should be deterministic");
+        // NaN != NaN in IEEE 754, so use total_cmp for bitwise equality
+        assert!(result1.isi_cv.total_cmp(&result2.isi_cv).is_eq(),
+            "FHN ISI CV should be deterministic: {} vs {}", result1.isi_cv, result2.isi_cv);
 
         println!("REGRESSION SNAPSHOT: FHN 10Hz sine: rate={:.2} cv={:.4}",
             result1.firing_rate, result1.isi_cv);
