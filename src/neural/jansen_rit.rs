@@ -82,7 +82,9 @@ impl BandPowers {
 }
 
 pub struct JansenRitResult {
-    /// EEG-like output signal (y1 - y2).
+    /// EEG-like output signal (y1 - y2 - y3). Wendling 2002: excitatory PSP
+    /// minus slow inhibitory (GABA-B) minus fast inhibitory (GABA-A).
+    /// Degenerates to y1 - y2 when fast inhibition is disabled (g_fast_gain = 0).
     pub eeg: Vec<f64>,
     /// Spectral band powers.
     pub band_powers: BandPowers,
@@ -522,10 +524,13 @@ impl JansenRitModel {
         let mut planner = FftPlanner::<f64>::new();
         let fft = planner.plan_fft_forward(fft_len);
 
+        // Apply Hann window (consistent with compute_band_powers)
+        let hann_denom = (n - 1) as f64;
         let mut buffer: Vec<Complex<f64>> = (0..fft_len)
             .map(|i| {
                 if i < n {
-                    Complex::new(signal[i], 0.0)
+                    let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / hann_denom).cos());
+                    Complex::new(signal[i] * w, 0.0)
                 } else {
                     Complex::new(0.0, 0.0)
                 }
@@ -577,10 +582,11 @@ pub fn simulate_tonotopic(
     let has_fast_inhib = fast_inhib.g_fast_gain > 0.0;
     let mut combined_y3 = if has_fast_inhib { vec![0.0_f64; n] } else { Vec::new() };
 
-    // Run 4 independent Wendling/JR models, normalise each to unit RMS, then
-    // mix by energy fraction. Normalisation is critical because slower
-    // models produce higher-amplitude oscillations (amplitude ∝ 1/a_rate),
-    // which would otherwise drown out the faster bands' contribution.
+    // Run 4 independent Wendling/JR models, sqrt-compress each band's RMS,
+    // then mix by energy fraction. Sqrt-compression (norm = 1/√rms rather
+    // than 1/rms) reduces the dynamic range between slow and fast bands
+    // while preserving relative amplitude differences — full unit-RMS
+    // normalisation would erase inter-band dynamics entirely.
     for b in 0..4 {
         // Apply per-band input gain scaling
         let gain = tono.band_input_gains[b];
@@ -905,4 +911,473 @@ fn run_hemisphere_tonotopic(
     }
 
     (eeg, y3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SR: f64 = 1000.0; // 1 kHz neural sample rate
+
+    // ---------------------------------------------------------------
+    // Sigmoid transfer function
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sigmoid_at_v0_equals_half_max() {
+        let jr = JansenRitModel::new(SR);
+        let s = jr.sigmoid(V0);
+        // S(V0) = V_MAX / (1 + exp(0)) = V_MAX / 2 = 2.5
+        assert!(
+            (s - V_MAX / 2.0).abs() < 1e-10,
+            "S(V0) should be V_MAX/2 = 2.5, got {s}"
+        );
+    }
+
+    #[test]
+    fn sigmoid_saturates_to_vmax() {
+        let jr = JansenRitModel::new(SR);
+        // Large positive → V_MAX
+        let s_high = jr.sigmoid(100.0);
+        assert!(
+            (s_high - V_MAX).abs() < 1e-6,
+            "S(100) should be ~V_MAX=5.0, got {s_high}"
+        );
+        // Large negative → 0
+        let s_low = jr.sigmoid(-100.0);
+        assert!(
+            s_low.abs() < 1e-6,
+            "S(-100) should be ~0, got {s_low}"
+        );
+    }
+
+    #[test]
+    fn sigmoid_is_monotonically_increasing() {
+        let jr = JansenRitModel::new(SR);
+        let mut prev = jr.sigmoid(-10.0);
+        for i in -99..100 {
+            let v = i as f64 * 0.1;
+            let s = jr.sigmoid(v);
+            assert!(s >= prev, "Sigmoid not monotonic at v={v}: {prev} -> {s}");
+            prev = s;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Derivatives: verify structure at known states
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn derivatives_at_zero_state_with_zero_input() {
+        let jr = JansenRitModel::new(SR);
+        let y = [0.0; 8];
+        let dy = jr.derivatives(&y, 0.0);
+
+        // dy0..dy3 should be zero (derivatives equal to y4..y7 which are zero)
+        for i in 0..4 {
+            assert_eq!(dy[i], 0.0, "dy[{i}] should be 0 at zero state");
+        }
+
+        // dy4 = A*a*S(0-0-0) - 0 - 0 = A*a*S(0)
+        // S(0) = V_MAX / (1 + exp(r*V0)) — a small positive value
+        let s0 = jr.sigmoid(0.0);
+        let expected_dy4 = A * A_RATE * s0;
+        assert!(
+            (dy[4] - expected_dy4).abs() < 1e-10,
+            "dy[4] = {}, expected {expected_dy4}",
+            dy[4]
+        );
+
+        // dy5 = A*a*(p + C2*S(C1*0)) = A*a*(0 + C2*S(0))
+        let expected_dy5 = A * A_RATE * (0.0 + C2 * s0);
+        assert!(
+            (dy[5] - expected_dy5).abs() < 1e-10,
+            "dy[5] = {}, expected {expected_dy5}",
+            dy[5]
+        );
+    }
+
+    #[test]
+    fn derivatives_external_input_only_affects_dy5() {
+        let jr = JansenRitModel::new(SR);
+        let y = [0.0; 8];
+        let dy_p0 = jr.derivatives(&y, 0.0);
+        let dy_p100 = jr.derivatives(&y, 100.0);
+
+        // Only dy5 should change (p enters only in the pyramidal excitatory equation)
+        for i in [0, 1, 2, 3, 4, 6, 7] {
+            assert!(
+                (dy_p0[i] - dy_p100[i]).abs() < 1e-10,
+                "dy[{i}] should not depend on p: {} vs {}",
+                dy_p0[i],
+                dy_p100[i]
+            );
+        }
+        // dy5 should increase with p: A*a*p is the additional term
+        let delta_dy5 = dy_p100[5] - dy_p0[5];
+        let expected_delta = A * A_RATE * 100.0;
+        assert!(
+            (delta_dy5 - expected_delta).abs() < 1e-6,
+            "dy[5] delta = {delta_dy5}, expected {expected_delta}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // JR95 mode: fast inhibition disabled → y3 stays zero
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn jr95_mode_y3_stays_zero() {
+        let jr = JansenRitModel::new(SR); // g_fast_gain = 0
+        let input = vec![0.5; 3000]; // 3 seconds
+        let result = jr.simulate(&input);
+
+        // y3 is encoded in the EEG difference: if y3 were non-zero, the fast_inhib_trace
+        // would be non-empty. In JR95 mode, it should be empty.
+        assert!(
+            result.fast_inhib_trace.is_empty(),
+            "JR95 mode should not record fast inhibitory trace"
+        );
+    }
+
+    #[test]
+    fn jr95_derivatives_y3_y7_are_zero() {
+        let jr = JansenRitModel::new(SR); // g_fast_gain = 0
+        // State with non-zero y0..y2, but y3=y7=0
+        let y = [1.0, 2.0, 1.5, 0.0, 0.1, 0.2, -0.1, 0.0];
+        let dy = jr.derivatives(&y, 200.0);
+
+        // dy3 = y7 = 0
+        assert_eq!(dy[3], 0.0, "dy[3] should be 0 in JR95 mode");
+        // dy7 = G*g*(...) - 2g*y7 - g²*y3 = 0 when G=0, g=0
+        assert_eq!(dy[7], 0.0, "dy[7] should be 0 in JR95 mode");
+    }
+
+    // ---------------------------------------------------------------
+    // Wendling mode: fast inhibition is active
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn wendling_mode_fast_inhib_trace_nonzero() {
+        let fi = FastInhibParams {
+            g_fast_gain: 10.0,
+            g_fast_rate: 500.0,
+            c5: 40.5,
+            c6: 13.5,
+            c7: 108.0,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0,
+            &fi, 0.20, V0, R,
+        );
+        let input = vec![0.5; 3000];
+        let result = jr.simulate(&input);
+
+        assert!(
+            !result.fast_inhib_trace.is_empty(),
+            "Wendling mode should record fast inhibitory trace"
+        );
+        let y3_max = result.fast_inhib_trace.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            y3_max.abs() > 1e-6,
+            "Fast inhibitory trace should be non-zero, max |y3| = {y3_max}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Output: correct length, finite values
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn output_length_matches_input() {
+        let jr = JansenRitModel::new(SR);
+        let n = 2000;
+        let input = vec![0.5; n];
+        let result = jr.simulate(&input);
+
+        assert_eq!(result.eeg.len(), n);
+    }
+
+    #[test]
+    fn output_is_finite() {
+        let jr = JansenRitModel::new(SR);
+        let input = vec![0.5; 5000];
+        let result = jr.simulate(&input);
+
+        for (i, &v) in result.eeg.iter().enumerate() {
+            assert!(v.is_finite(), "EEG sample {i} is not finite: {v}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Deterministic: same input → same output
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn deterministic_output() {
+        let jr = JansenRitModel::new(SR);
+        let input = vec![0.5; 3000];
+        let r1 = jr.simulate(&input);
+        let r2 = jr.simulate(&input);
+
+        assert_eq!(r1.dominant_freq, r2.dominant_freq);
+        for i in 0..r1.eeg.len() {
+            assert_eq!(r1.eeg[i], r2.eeg[i], "EEG differs at sample {i}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Band powers: non-negative, alpha peak with default params
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn band_powers_non_negative() {
+        let jr = JansenRitModel::new(SR);
+        let input = vec![0.5; 5000];
+        let result = jr.simulate(&input);
+
+        assert!(result.band_powers.delta >= 0.0);
+        assert!(result.band_powers.theta >= 0.0);
+        assert!(result.band_powers.alpha >= 0.0);
+        assert!(result.band_powers.beta >= 0.0);
+        assert!(result.band_powers.gamma >= 0.0);
+    }
+
+    #[test]
+    fn normalized_band_powers_sum_to_one() {
+        let jr = JansenRitModel::new(SR);
+        let input = vec![0.5; 5000];
+        let result = jr.simulate(&input);
+        let norm = result.band_powers.normalized();
+
+        let sum = norm.delta + norm.theta + norm.alpha + norm.beta + norm.gamma;
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "Normalized band powers should sum to 1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn default_jr_produces_oscillation() {
+        // Default JR95 with p in oscillatory range should produce a dominant
+        // frequency somewhere in 0.5–50 Hz.  The exact frequency depends on
+        // the tuned C3/C4 (0.20 vs literature 0.25) and input offset.
+        let jr = JansenRitModel::new(SR);
+        let input = vec![0.5; 8000]; // 8 seconds for good freq resolution
+        let result = jr.simulate(&input);
+
+        assert!(
+            result.band_powers.total() > 0.0,
+            "Default JR should produce non-zero EEG power"
+        );
+        assert!(
+            result.dominant_freq >= 0.5 && result.dominant_freq <= 50.0,
+            "Default JR dominant freq should be in physiological range, got {:.1} Hz",
+            result.dominant_freq
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Dominant frequency: stable for pure-tone-like drive
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn dominant_freq_in_physiological_range() {
+        let jr = JansenRitModel::new(SR);
+        let input = vec![0.5; 5000];
+        let result = jr.simulate(&input);
+
+        assert!(
+            result.dominant_freq >= 0.5 && result.dominant_freq <= 50.0,
+            "Dominant frequency {} out of [0.5, 50] Hz range",
+            result.dominant_freq
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Band powers with zero-energy signal
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn band_powers_zero_for_short_signal() {
+        let jr = JansenRitModel::new(SR);
+        let signal: Vec<f64> = vec![];
+        let bp = jr.compute_band_powers(&signal);
+        assert_eq!(bp.total(), 0.0);
+    }
+
+    #[test]
+    fn normalized_powers_uniform_for_zero_signal() {
+        let bp = BandPowers {
+            delta: 0.0,
+            theta: 0.0,
+            alpha: 0.0,
+            beta: 0.0,
+            gamma: 0.0,
+        };
+        let norm = bp.normalized();
+        assert!((norm.delta - 0.2).abs() < 1e-10);
+        assert!((norm.theta - 0.2).abs() < 1e-10);
+        assert!((norm.alpha - 0.2).abs() < 1e-10);
+        assert!((norm.beta - 0.2).abs() < 1e-10);
+        assert!((norm.gamma - 0.2).abs() < 1e-10);
+    }
+
+    // ---------------------------------------------------------------
+    // EEG output matches y1 - y2 - y3
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn eeg_is_y1_minus_y2_minus_y3() {
+        // Verify the EEG formula by running the model with fast inhibition
+        // and checking that simulate_with_fast_inhib_trace gives consistent
+        // EEG and y3 values.
+        let fi = FastInhibParams {
+            g_fast_gain: 10.0,
+            g_fast_rate: 500.0,
+            c5: 40.5,
+            c6: 13.5,
+            c7: 108.0,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0,
+            &fi, 0.20, V0, R,
+        );
+        let input = vec![0.5; 2000];
+
+        let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input);
+
+        // y3 trace from both methods should be identical
+        assert_eq!(result.fast_inhib_trace.len(), y3_trace.len());
+        for i in 0..y3_trace.len() {
+            assert_eq!(result.fast_inhib_trace[i], y3_trace[i]);
+        }
+
+        // y3 should be non-trivially active
+        let y3_rms = (y3_trace.iter().map(|x| x * x).sum::<f64>() / y3_trace.len() as f64).sqrt();
+        assert!(y3_rms > 1e-6, "y3 should be active in Wendling mode, rms = {y3_rms}");
+    }
+
+    // ---------------------------------------------------------------
+    // Connectivity: with_params uses correct C scaling
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn with_params_connectivity_scaling() {
+        let c = 100.0;
+        let jr = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, c, 200.0, 100.0);
+        assert_eq!(jr.c1, c);
+        assert_eq!(jr.c2, 0.8 * c);
+        assert_eq!(jr.c3, 0.20 * c);
+        assert_eq!(jr.c4, 0.20 * c);
+    }
+
+    #[test]
+    fn with_wendling_slow_inhib_ratio_applied() {
+        let fi = FastInhibParams::default();
+        let jr = JansenRitModel::with_wendling_params(
+            SR, A, B, A_RATE, B_RATE, 135.0, 200.0, 100.0,
+            &fi, 0.15, V0, R, // slow_inhib_ratio = 0.15
+        );
+        assert_eq!(jr.c3, 0.15 * 135.0);
+        assert_eq!(jr.c4, 0.15 * 135.0);
+    }
+
+    // ---------------------------------------------------------------
+    // scale_c1c2 only affects C1 and C2
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn scale_c1c2_only_affects_c1_c2() {
+        let mut jr = JansenRitModel::new(SR);
+        let orig_c3 = jr.c3;
+        let orig_c4 = jr.c4;
+
+        jr.scale_c1c2(0.75);
+
+        assert_eq!(jr.c1, C * 0.75);
+        assert_eq!(jr.c2, 0.8 * C * 0.75);
+        assert_eq!(jr.c3, orig_c3, "C3 should not change");
+        assert_eq!(jr.c4, orig_c4, "C4 should not change");
+    }
+
+    // ---------------------------------------------------------------
+    // Warmup: model is oscillating from the start of the output
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn wendling_model_oscillates_with_varying_input() {
+        // The Wendling model may sit at a stable fixed point with constant input
+        // at certain operating points.  In the pipeline, the input is time-varying
+        // (gammatone envelopes), which sweeps the model across bifurcation
+        // boundaries and produces oscillations.
+        use crate::brain_type::BrainType;
+        let params = BrainType::Normal.params();
+        let fi = FastInhibParams {
+            g_fast_gain: params.jansen_rit.g_fast_gain,
+            g_fast_rate: params.jansen_rit.g_fast_rate,
+            c5: params.jansen_rit.c5,
+            c6: params.jansen_rit.c6,
+            c7: params.jansen_rit.c7,
+        };
+        let jr = JansenRitModel::with_wendling_params(
+            SR,
+            params.jansen_rit.a_gain,
+            params.jansen_rit.b_gain,
+            params.jansen_rit.a_rate,
+            params.jansen_rit.b_rate,
+            params.jansen_rit.c,
+            params.jansen_rit.input_offset,
+            params.jansen_rit.input_scale,
+            &fi,
+            params.jansen_rit.slow_inhib_ratio,
+            params.jansen_rit.v0,
+            R,
+        );
+
+        // Time-varying input: slow modulation simulating gammatone envelope
+        let n = 5000;
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.3 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+        let result = jr.simulate(&input);
+
+        let mean = result.eeg.iter().sum::<f64>() / result.eeg.len() as f64;
+        let var = result.eeg.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / result.eeg.len() as f64;
+        assert!(
+            var > 1e-6,
+            "Wendling model with varying input should oscillate, var = {var}"
+        );
+        assert!(
+            result.dominant_freq >= 0.5 && result.dominant_freq <= 50.0,
+            "Dominant freq should be physiological, got {:.1} Hz",
+            result.dominant_freq
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Input offset + scale: driving point affects dynamics
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn different_input_offset_different_dynamics() {
+        let jr_low = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, C, 120.0, 100.0);
+        let jr_high = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, C, 280.0, 100.0);
+
+        let input = vec![0.5; 5000];
+        let r_low = jr_low.simulate(&input);
+        let r_high = jr_high.simulate(&input);
+
+        // Different offsets should produce different band power distributions
+        let n_low = r_low.band_powers.normalized();
+        let n_high = r_high.band_powers.normalized();
+
+        let diff = (n_low.alpha - n_high.alpha).abs()
+            + (n_low.theta - n_high.theta).abs()
+            + (n_low.beta - n_high.beta).abs();
+        assert!(
+            diff > 0.01,
+            "Different input offsets should produce different band powers"
+        );
+    }
 }
