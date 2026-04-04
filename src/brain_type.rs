@@ -127,7 +127,7 @@ impl BrainType {
                     b: 0.8,
                     epsilon: 0.10,
                     input_scale: 1.8,
-                    time_scale: 300.0,
+                    time_scale: 350.0, // Faster FHN — dopamine-driven temporal processing
                 },
                 jansen_rit: JansenRitParams {
                     a_gain: 3.5,
@@ -154,7 +154,7 @@ impl BrainType {
                     b: 0.8,
                     epsilon: 0.06,
                     input_scale: 1.2,
-                    time_scale: 300.0,
+                    time_scale: 250.0, // Slower FHN — reduced neural sustain with age
                 },
                 jansen_rit: JansenRitParams {
                     a_gain: 3.25,
@@ -177,6 +177,9 @@ impl BrainType {
 
             // Anxious: overdriven cortex, elevated beta, always oscillating
             // Wendling: hyperactive fast inhibitory loop → excessive beta
+            // b_gain raised from 19→20: hyperexcitability driven by a_gain=3.5
+            // and c=145; slightly more GABA-B tone matches anxiety phenotypes
+            // with increased (not decreased) GABAergic activity.
             BrainType::Anxious => NeuralParams {
                 fhn: FhnParams {
                     a: 0.7,
@@ -187,7 +190,7 @@ impl BrainType {
                 },
                 jansen_rit: JansenRitParams {
                     a_gain: 3.5,
-                    b_gain: 19.0,
+                    b_gain: 20.0,
                     a_rate: 100.0,
                     b_rate: 50.0,
                     c: 145.0,
@@ -347,9 +350,9 @@ impl BrainType {
                 ],
                 band_gains: [
                     (3.4, 20.0),
-                    (3.5, 19.0),
-                    (3.5, 19.0),
-                    (3.5, 19.0),
+                    (3.5, 20.0),
+                    (3.5, 20.0),
+                    (3.5, 20.0),
                 ],
                 // Deep in oscillatory regime → persistent high-frequency activity
                 band_offsets: [190.0, 210.0, 230.0, 240.0],
@@ -597,8 +600,10 @@ impl BrainType {
                     band_v0: [6.0; 4],
                     band_model_types: [BandModelType::JansenRit; 4],
                 },
-                // Weaker callosal transfer — white matter degradation
-                callosal_coupling: 0.07,
+                // ~25% reduction from Normal (0.15) per age-related white-matter
+                // degradation (Sullivan & Pfefferbaum 2006). Literature supports
+                // 20-30% reduction, not 50%.
+                callosal_coupling: 0.11,
                 callosal_delay_s: 0.012,  // Slower transfer
                 contralateral_ratio: 0.65,
                 left_weight: 0.5,
@@ -613,7 +618,7 @@ impl BrainType {
                         (130.0, 65.0),   // Strong β bias
                         (145.0, 72.0),   // β-high
                     ],
-                    band_gains: [(3.5, 19.0); 4],
+                    band_gains: [(3.5, 20.0); 4],
                     // Deep in oscillatory regime → persistent beta overactivation
                     band_offsets: [195.0, 215.0, 235.0, 245.0],
                     band_input_gains: [1.0; 4],
@@ -634,7 +639,7 @@ impl BrainType {
                         (100.0, 50.0),
                         (115.0, 57.0),
                     ],
-                    band_gains: [(3.5, 19.0); 4],
+                    band_gains: [(3.5, 20.0); 4],
                     band_offsets: [185.0, 205.0, 220.0, 230.0],
                     band_input_gains: [1.0; 4],
                     band_output_weights: [1.0; 4],
@@ -820,4 +825,313 @@ pub struct BilateralParams {
     /// Left hemisphere weight in combined EEG (right = 1 - left_weight).
     /// Default: 0.5 (symmetric). AST-biased: 0.55 (left-fast for beta access).
     pub left_weight: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // All brain types produce structurally valid params
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn all_types_params_finite_and_positive() {
+        for &bt in BrainType::all() {
+            let p = bt.params();
+
+            // FHN: all positive
+            assert!(p.fhn.a > 0.0, "{bt:?} fhn.a");
+            assert!(p.fhn.b > 0.0, "{bt:?} fhn.b");
+            assert!(p.fhn.epsilon > 0.0, "{bt:?} fhn.epsilon");
+            assert!(p.fhn.input_scale > 0.0, "{bt:?} fhn.input_scale");
+            assert!(p.fhn.time_scale > 0.0, "{bt:?} fhn.time_scale");
+
+            // JR: gains, rates, connectivity all positive
+            assert!(p.jansen_rit.a_gain > 0.0, "{bt:?} jr.a_gain");
+            assert!(p.jansen_rit.b_gain > 0.0, "{bt:?} jr.b_gain");
+            assert!(p.jansen_rit.a_rate > 0.0, "{bt:?} jr.a_rate");
+            assert!(p.jansen_rit.b_rate > 0.0, "{bt:?} jr.b_rate");
+            assert!(p.jansen_rit.c > 0.0, "{bt:?} jr.c");
+            assert!(p.jansen_rit.input_offset > 0.0, "{bt:?} jr.input_offset");
+            assert!(p.jansen_rit.input_scale > 0.0, "{bt:?} jr.input_scale");
+            assert!(p.jansen_rit.v0 > 0.0, "{bt:?} jr.v0");
+            assert!(p.jansen_rit.g_fast_gain >= 0.0, "{bt:?} jr.g_fast_gain");
+            assert!(p.jansen_rit.g_fast_rate >= 0.0, "{bt:?} jr.g_fast_rate");
+            assert!(p.jansen_rit.c5 >= 0.0, "{bt:?} jr.c5");
+            assert!(p.jansen_rit.c6 >= 0.0, "{bt:?} jr.c6");
+            assert!(p.jansen_rit.c7 >= 0.0, "{bt:?} jr.c7");
+            assert!(p.jansen_rit.slow_inhib_ratio > 0.0, "{bt:?} jr.slow_inhib_ratio");
+        }
+    }
+
+    #[test]
+    fn all_types_tonotopic_params_valid() {
+        for &bt in BrainType::all() {
+            let t = bt.tonotopic_params();
+            for b in 0..4 {
+                let (a_rate, b_rate) = t.band_rates[b];
+                assert!(a_rate > 0.0, "{bt:?} band {b} a_rate");
+                assert!(b_rate > 0.0, "{bt:?} band {b} b_rate");
+
+                let (a_gain, b_gain) = t.band_gains[b];
+                assert!(a_gain > 0.0, "{bt:?} band {b} a_gain");
+                assert!(b_gain > 0.0, "{bt:?} band {b} b_gain");
+
+                assert!(t.band_offsets[b] > 0.0, "{bt:?} band {b} offset");
+                assert!(t.band_input_gains[b] > 0.0, "{bt:?} band {b} input_gain");
+                assert!(t.band_output_weights[b] > 0.0, "{bt:?} band {b} output_weight");
+                assert!(t.band_slow_inhib_ratios[b] > 0.0, "{bt:?} band {b} slow_inhib");
+                assert!(t.band_c7[b] > 0.0, "{bt:?} band {b} c7");
+                assert!(t.band_sigmoid_r[b] > 0.0, "{bt:?} band {b} sigmoid_r");
+                assert!(t.band_c1c2_scale[b] > 0.0, "{bt:?} band {b} c1c2_scale");
+                assert!(t.band_g_fast_rate[b] > 0.0, "{bt:?} band {b} g_fast_rate");
+                assert!(t.band_v0[b] > 0.0, "{bt:?} band {b} v0");
+            }
+        }
+    }
+
+    #[test]
+    fn all_types_bilateral_params_valid() {
+        for &bt in BrainType::all() {
+            let bi = bt.bilateral_params();
+
+            assert!(bi.callosal_coupling >= 0.0 && bi.callosal_coupling <= 1.0,
+                "{bt:?} callosal_coupling = {}", bi.callosal_coupling);
+            assert!(bi.callosal_delay_s > 0.0 && bi.callosal_delay_s < 0.1,
+                "{bt:?} callosal_delay_s = {}", bi.callosal_delay_s);
+            assert!(bi.contralateral_ratio > 0.5 && bi.contralateral_ratio < 1.0,
+                "{bt:?} contralateral_ratio = {}", bi.contralateral_ratio);
+            assert!(bi.left_weight > 0.0 && bi.left_weight <= 1.0,
+                "{bt:?} left_weight = {}", bi.left_weight);
+
+            // Both hemispheres should have valid tonotopic params
+            for b in 0..4 {
+                assert!(bi.left.band_offsets[b] > 0.0, "{bt:?} left band {b} offset");
+                assert!(bi.right.band_offsets[b] > 0.0, "{bt:?} right band {b} offset");
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Cross-type scientific invariants
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn adhd_weaker_inhibition_than_normal() {
+        let normal = BrainType::Normal.params();
+        let adhd = BrainType::Adhd.params();
+
+        assert!(
+            adhd.jansen_rit.b_gain < normal.jansen_rit.b_gain,
+            "ADHD b_gain ({}) should be < Normal ({})",
+            adhd.jansen_rit.b_gain, normal.jansen_rit.b_gain
+        );
+    }
+
+    #[test]
+    fn adhd_hypoaroused_lower_offset() {
+        let normal = BrainType::Normal.params();
+        let adhd = BrainType::Adhd.params();
+
+        assert!(
+            adhd.jansen_rit.input_offset < normal.jansen_rit.input_offset,
+            "ADHD input_offset ({}) should be < Normal ({})",
+            adhd.jansen_rit.input_offset, normal.jansen_rit.input_offset
+        );
+    }
+
+    #[test]
+    fn high_alpha_stronger_inhibition() {
+        let normal = BrainType::Normal.params();
+        let ha = BrainType::HighAlpha.params();
+
+        assert!(
+            ha.jansen_rit.b_gain >= normal.jansen_rit.b_gain,
+            "HighAlpha b_gain ({}) should be >= Normal ({})",
+            ha.jansen_rit.b_gain, normal.jansen_rit.b_gain
+        );
+    }
+
+    #[test]
+    fn aging_slower_time_constants() {
+        let normal = BrainType::Normal.params();
+        let aging = BrainType::Aging.params();
+
+        assert!(
+            aging.jansen_rit.a_rate < normal.jansen_rit.a_rate,
+            "Aging a_rate ({}) should be < Normal ({})",
+            aging.jansen_rit.a_rate, normal.jansen_rit.a_rate
+        );
+        assert!(
+            aging.jansen_rit.b_rate < normal.jansen_rit.b_rate,
+            "Aging b_rate ({}) should be < Normal ({})",
+            aging.jansen_rit.b_rate, normal.jansen_rit.b_rate
+        );
+    }
+
+    #[test]
+    fn aging_reduced_connectivity() {
+        let normal = BrainType::Normal.params();
+        let aging = BrainType::Aging.params();
+
+        assert!(
+            aging.jansen_rit.c < normal.jansen_rit.c,
+            "Aging c ({}) should be < Normal ({})",
+            aging.jansen_rit.c, normal.jansen_rit.c
+        );
+    }
+
+    #[test]
+    fn anxious_hyperaroused_higher_offset() {
+        let normal = BrainType::Normal.params();
+        let anxious = BrainType::Anxious.params();
+
+        assert!(
+            anxious.jansen_rit.input_offset > normal.jansen_rit.input_offset,
+            "Anxious input_offset ({}) should be > Normal ({})",
+            anxious.jansen_rit.input_offset, normal.jansen_rit.input_offset
+        );
+    }
+
+    #[test]
+    fn anxious_stronger_connectivity() {
+        let normal = BrainType::Normal.params();
+        let anxious = BrainType::Anxious.params();
+
+        assert!(
+            anxious.jansen_rit.c > normal.jansen_rit.c,
+            "Anxious c ({}) should be > Normal ({})",
+            anxious.jansen_rit.c, normal.jansen_rit.c
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Callosal coupling ordering
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn callosal_coupling_ordering() {
+        let aging = BrainType::Aging.bilateral_params().callosal_coupling;
+        let adhd = BrainType::Adhd.bilateral_params().callosal_coupling;
+        let normal = BrainType::Normal.bilateral_params().callosal_coupling;
+
+        assert!(aging < adhd, "Aging ({aging}) < ADHD ({adhd})");
+        assert!(adhd < normal, "ADHD ({adhd}) < Normal ({normal})");
+    }
+
+    // ---------------------------------------------------------------
+    // FHN epsilon ordering (stability)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn fhn_epsilon_ordering() {
+        let ha = BrainType::HighAlpha.params().fhn.epsilon;
+        let normal = BrainType::Normal.params().fhn.epsilon;
+        let adhd = BrainType::Adhd.params().fhn.epsilon;
+
+        assert!(ha < normal, "HighAlpha ε ({ha}) < Normal ε ({normal})");
+        assert!(normal < adhd, "Normal ε ({normal}) < ADHD ε ({adhd})");
+    }
+
+    // ---------------------------------------------------------------
+    // FHN time_scale ordering (brain-type-dependent)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn fhn_time_scale_ordering() {
+        let aging = BrainType::Aging.params().fhn.time_scale;
+        let normal = BrainType::Normal.params().fhn.time_scale;
+        let adhd = BrainType::Adhd.params().fhn.time_scale;
+
+        assert!(
+            aging < normal,
+            "Aging time_scale ({aging}) should be < Normal ({normal})"
+        );
+        assert!(
+            normal < adhd,
+            "Normal time_scale ({normal}) should be < ADHD ({adhd})"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Bilateral: left hemisphere has faster rates than right (AST)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bilateral_left_faster_than_right() {
+        for &bt in BrainType::all() {
+            let bi = bt.bilateral_params();
+
+            // Compare band 0 (lowest, purely JR in all types) a_rate
+            let left_rate = bi.left.band_rates[0].0;
+            let right_rate = bi.right.band_rates[0].0;
+
+            assert!(
+                left_rate >= right_rate,
+                "{bt:?} left a_rate ({left_rate}) should be >= right ({right_rate}) per AST"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // All brain types are enumerated in all()
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn all_returns_five_types() {
+        assert_eq!(BrainType::all().len(), 5);
+    }
+
+    // ---------------------------------------------------------------
+    // from_str round-trip
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn from_str_canonical_names() {
+        assert_eq!(BrainType::from_str("normal"), Some(BrainType::Normal));
+        assert_eq!(BrainType::from_str("adhd"), Some(BrainType::Adhd));
+        assert_eq!(BrainType::from_str("aging"), Some(BrainType::Aging));
+        assert_eq!(BrainType::from_str("anxious"), Some(BrainType::Anxious));
+        assert_eq!(BrainType::from_str("highalpha"), Some(BrainType::HighAlpha));
+        assert_eq!(BrainType::from_str("unknown"), None);
+    }
+
+    // ---------------------------------------------------------------
+    // Input offset in oscillatory regime
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn input_offset_in_oscillatory_regime() {
+        // JR oscillates for p ∈ [~120, ~320]. With input in [0,1]:
+        // p_min = offset + 0 * scale = offset
+        // p_max = offset + 1 * scale = offset + scale
+        // Both should be within or near the oscillatory regime.
+        for &bt in BrainType::all() {
+            let p = bt.params();
+            let p_min = p.jansen_rit.input_offset;
+            let p_max = p.jansen_rit.input_offset + p.jansen_rit.input_scale;
+
+            assert!(
+                p_min >= 50.0 && p_max <= 400.0,
+                "{bt:?}: p range [{p_min}, {p_max}] outside safe oscillatory bounds [50, 400]"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Contralateral ratio is consistent across all types
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn contralateral_ratio_uniform() {
+        for &bt in BrainType::all() {
+            let bi = bt.bilateral_params();
+            assert!(
+                (bi.contralateral_ratio - 0.65).abs() < 1e-10,
+                "{bt:?} contralateral_ratio = {} (expected 0.65)",
+                bi.contralateral_ratio
+            );
+        }
+    }
 }

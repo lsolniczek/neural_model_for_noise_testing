@@ -44,6 +44,30 @@ impl Default for ModConfig {
     }
 }
 
+/// Stochastic decay_ms range [10, 500] doesn't fit the shared genome param_b
+/// bounds [0, 1]. These helpers remap between the two spaces so the optimizer
+/// can explore the full range without widening bounds for other modulator kinds.
+const STOCHASTIC_DECAY_MIN: f64 = 10.0;
+const STOCHASTIC_DECAY_RANGE: f64 = 490.0; // 500 - 10
+
+fn encode_mod_param_b(kind: u8, param_b: f32) -> f64 {
+    if kind == 3 {
+        // Stochastic: remap decay_ms [10, 500] → [0, 1]
+        ((param_b as f64 - STOCHASTIC_DECAY_MIN) / STOCHASTIC_DECAY_RANGE).clamp(0.0, 1.0)
+    } else {
+        param_b as f64
+    }
+}
+
+fn decode_mod_param_b(kind: u8, genome_val: f64) -> f32 {
+    if kind == 3 {
+        // Stochastic: remap [0, 1] → decay_ms [10, 500]
+        (STOCHASTIC_DECAY_MIN + genome_val.clamp(0.0, 1.0) * STOCHASTIC_DECAY_RANGE) as f32
+    } else {
+        genome_val as f32
+    }
+}
+
 impl ModConfig {
     fn to_modulator_kind(&self) -> ModulatorKind {
         ModulatorKind::from_u8(self.kind)
@@ -250,11 +274,11 @@ impl Preset {
             g.push(obj.reverb_send as f64);
             g.push(obj.bass_mod.kind as f64);
             g.push(obj.bass_mod.param_a as f64);
-            g.push(obj.bass_mod.param_b as f64);
+            g.push(encode_mod_param_b(obj.bass_mod.kind, obj.bass_mod.param_b));
             g.push(obj.bass_mod.param_c as f64);
             g.push(obj.satellite_mod.kind as f64);
             g.push(obj.satellite_mod.param_a as f64);
-            g.push(obj.satellite_mod.param_b as f64);
+            g.push(encode_mod_param_b(obj.satellite_mod.kind, obj.satellite_mod.param_b));
             g.push(obj.satellite_mod.param_c as f64);
             g.push(obj.movement.kind as f64);
             g.push(obj.movement.radius as f64);
@@ -293,17 +317,23 @@ impl Preset {
                 z: g[base + 4] as f32,
                 volume: g[base + 5] as f32,
                 reverb_send: g[base + 6] as f32,
-                bass_mod: ModConfig {
-                    kind: g[base + 7].round() as u8,
-                    param_a: g[base + 8] as f32,
-                    param_b: g[base + 9] as f32,
-                    param_c: g[base + 10] as f32,
+                bass_mod: {
+                    let bk = g[base + 7].round() as u8;
+                    ModConfig {
+                        kind: bk,
+                        param_a: g[base + 8] as f32,
+                        param_b: decode_mod_param_b(bk, g[base + 9]),
+                        param_c: g[base + 10] as f32,
+                    }
                 },
-                satellite_mod: ModConfig {
-                    kind: g[base + 11].round() as u8,
-                    param_a: g[base + 12] as f32,
-                    param_b: g[base + 13] as f32,
-                    param_c: g[base + 14] as f32,
+                satellite_mod: {
+                    let sk = g[base + 11].round() as u8;
+                    ModConfig {
+                        kind: sk,
+                        param_a: g[base + 12] as f32,
+                        param_b: decode_mod_param_b(sk, g[base + 13]),
+                        param_c: g[base + 14] as f32,
+                    }
                 },
                 movement: MovementConfig {
                     kind: g[base + 15].round() as u8,
@@ -389,5 +419,275 @@ impl Preset {
         }
 
         b
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // GENOME_LEN
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn genome_len_is_190() {
+        assert_eq!(GENOME_LEN, 6 + MAX_OBJECTS * 23);
+        assert_eq!(GENOME_LEN, 190);
+    }
+
+    // ---------------------------------------------------------------
+    // bounds length
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bounds_length_matches_genome() {
+        let b = Preset::bounds();
+        assert_eq!(b.len(), GENOME_LEN);
+    }
+
+    #[test]
+    fn bounds_min_less_than_max() {
+        for (i, (lo, hi)) in Preset::bounds().iter().enumerate() {
+            assert!(lo <= hi, "Gene {i}: min {lo} > max {hi}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // discrete_gene_indices
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn discrete_indices_within_genome() {
+        let indices = Preset::discrete_gene_indices();
+        for &idx in &indices {
+            assert!(idx < GENOME_LEN, "Discrete index {idx} >= GENOME_LEN");
+        }
+    }
+
+    #[test]
+    fn discrete_indices_count() {
+        // 4 global + 8 * 5 per-object = 44
+        let indices = Preset::discrete_gene_indices();
+        assert_eq!(indices.len(), 4 + MAX_OBJECTS * 5);
+    }
+
+    // ---------------------------------------------------------------
+    // to_genome / from_genome round-trip
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn genome_roundtrip_default_preset() {
+        let original = Preset::default();
+        let genome = original.to_genome();
+        assert_eq!(genome.len(), GENOME_LEN);
+
+        let decoded = Preset::from_genome(&genome);
+        let re_encoded = decoded.to_genome();
+
+        // After clamp, re-encoding should give identical genome
+        for (i, (a, b)) in genome.iter().zip(re_encoded.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "Gene {i} differs: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn genome_roundtrip_active_objects() {
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].color = 3;
+        preset.objects[0].volume = 0.75;
+        preset.objects[0].x = 2.0;
+        preset.objects[0].y = -1.5;
+        preset.objects[0].z = 3.0;
+        preset.objects[0].bass_mod = ModConfig { kind: 1, param_a: 0.5, param_b: 0.8, param_c: 0.0 };
+        preset.objects[0].satellite_mod = ModConfig { kind: 4, param_a: 10.0, param_b: 0.6, param_c: 0.0 };
+
+        let genome = preset.to_genome();
+        let decoded = Preset::from_genome(&genome);
+
+        assert!(decoded.objects[0].active);
+        assert_eq!(decoded.objects[0].color, 3);
+        assert!((decoded.objects[0].volume - 0.75).abs() < 1e-5);
+        assert_eq!(decoded.objects[0].bass_mod.kind, 1);
+        assert!((decoded.objects[0].bass_mod.param_a - 0.5).abs() < 1e-5);
+    }
+
+    // ---------------------------------------------------------------
+    // Stochastic param_b encode/decode
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn stochastic_param_b_encode_decode_roundtrip() {
+        // decay_ms = 255 (midpoint) → genome ≈ 0.5 → back to 255
+        let decay_ms = 255.0_f32;
+        let encoded = encode_mod_param_b(3, decay_ms);
+        assert!(
+            encoded >= 0.0 && encoded <= 1.0,
+            "Encoded stochastic param_b should be in [0, 1], got {encoded}"
+        );
+
+        let decoded = decode_mod_param_b(3, encoded);
+        assert!(
+            (decoded - decay_ms).abs() < 0.1,
+            "Stochastic param_b roundtrip: {decay_ms} → {encoded:.4} → {decoded}"
+        );
+    }
+
+    #[test]
+    fn stochastic_param_b_at_boundaries() {
+        // Min: 10 → 0.0
+        let enc_min = encode_mod_param_b(3, 10.0);
+        assert!((enc_min - 0.0).abs() < 1e-6, "decay_ms=10 should encode to ~0, got {enc_min}");
+
+        // Max: 500 → 1.0
+        let enc_max = encode_mod_param_b(3, 500.0);
+        assert!((enc_max - 1.0).abs() < 1e-6, "decay_ms=500 should encode to ~1, got {enc_max}");
+
+        // Decode back
+        let dec_min = decode_mod_param_b(3, 0.0);
+        assert!((dec_min - 10.0).abs() < 0.1, "genome=0 should decode to ~10, got {dec_min}");
+
+        let dec_max = decode_mod_param_b(3, 1.0);
+        assert!((dec_max - 500.0).abs() < 0.1, "genome=1 should decode to ~500, got {dec_max}");
+    }
+
+    #[test]
+    fn non_stochastic_param_b_passes_through() {
+        // For kind != 3, encode/decode should be identity (f32↔f64 rounding aside)
+        for kind in [0_u8, 1, 2, 4] {
+            let val = 0.73_f32;
+            let encoded = encode_mod_param_b(kind, val);
+            assert!(
+                (encoded - val as f64).abs() < 1e-6,
+                "kind={kind}: non-stochastic should pass through, got {encoded}"
+            );
+            let decoded = decode_mod_param_b(kind, encoded);
+            assert!(
+                (decoded - val).abs() < 1e-5,
+                "kind={kind}: decode should pass through, got {decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn stochastic_mod_full_genome_roundtrip() {
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].bass_mod = ModConfig {
+            kind: 3,
+            param_a: 5.0,     // lambda
+            param_b: 250.0,   // decay_ms (midrange)
+            param_c: 0.2,     // min_gain
+        };
+
+        let genome = preset.to_genome();
+
+        // The genome param_b slot should be in [0, 1]
+        let bass_param_b_idx = 6 + 0 * 23 + 9; // base + 9
+        assert!(
+            genome[bass_param_b_idx] >= 0.0 && genome[bass_param_b_idx] <= 1.0,
+            "Stochastic genome param_b should be [0,1], got {}",
+            genome[bass_param_b_idx]
+        );
+
+        let decoded = Preset::from_genome(&genome);
+        assert_eq!(decoded.objects[0].bass_mod.kind, 3);
+        assert!(
+            (decoded.objects[0].bass_mod.param_b - 250.0).abs() < 1.0,
+            "Stochastic decay_ms should roundtrip: got {}",
+            decoded.objects[0].bass_mod.param_b
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // clamp enforces bounds
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn clamp_enforces_master_gain_bounds() {
+        let mut p = Preset::default();
+        p.master_gain = 2.0;
+        p.clamp();
+        assert_eq!(p.master_gain, 1.0);
+
+        p.master_gain = 0.0;
+        p.clamp();
+        assert_eq!(p.master_gain, 0.1);
+    }
+
+    #[test]
+    fn clamp_enforces_color_bounds() {
+        let mut p = Preset::default();
+        p.anchor_color = 10;
+        p.clamp();
+        assert_eq!(p.anchor_color, 6);
+    }
+
+    #[test]
+    fn clamp_enforces_object_position_bounds() {
+        let mut p = Preset::default();
+        p.objects[0].x = 100.0;
+        p.objects[0].y = -100.0;
+        p.clamp();
+        assert_eq!(p.objects[0].x, 5.0);
+        assert_eq!(p.objects[0].y, -3.0);
+    }
+
+    #[test]
+    fn clamp_enforces_mod_params() {
+        let mut p = Preset::default();
+        p.objects[0].bass_mod = ModConfig { kind: 1, param_a: 100.0, param_b: -1.0, param_c: 0.0 };
+        p.clamp();
+        // SineLfo: freq clamped to [0.01, 2.0], depth to [0, 1]
+        assert_eq!(p.objects[0].bass_mod.param_a, 2.0);
+        assert_eq!(p.objects[0].bass_mod.param_b, 0.0);
+    }
+
+    // ---------------------------------------------------------------
+    // from_genome with out-of-bounds values → clamp corrects
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn from_genome_clamps_out_of_bounds() {
+        let mut genome = vec![999.0; GENOME_LEN];
+        // Set discrete values to valid-ish ranges so they don't overflow u8
+        genome[1] = 1.0;  // spatial_mode
+        genome[3] = 6.0;  // anchor_color
+        genome[5] = 4.0;  // environment
+        for i in 0..MAX_OBJECTS {
+            let base = 6 + i * 23;
+            genome[base + 1] = 6.0;  // color
+            genome[base + 7] = 0.0;  // bass kind (Flat)
+            genome[base + 11] = 0.0; // sat kind (Flat)
+            genome[base + 15] = 0.0; // movement kind (Static)
+        }
+
+        let p = Preset::from_genome(&genome);
+        assert!(p.master_gain <= 1.0);
+        assert!(p.source_count <= 8);
+        for obj in &p.objects {
+            assert!(obj.volume <= 1.0);
+            assert!(obj.x <= 5.0);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Default preset structure
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn default_preset_has_max_objects() {
+        let p = Preset::default();
+        assert_eq!(p.objects.len(), MAX_OBJECTS);
+    }
+
+    #[test]
+    fn default_preset_no_active_objects() {
+        let p = Preset::default();
+        assert_eq!(p.active_object_count(), 0);
     }
 }

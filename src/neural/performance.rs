@@ -8,6 +8,7 @@
 /// 3. **Spectral Centroid**: Where is the EEG's "centre of gravity"?
 
 use rustfft::{num_complex::Complex, FftPlanner};
+use std::f64::consts::PI;
 
 /// Performance vector returned alongside the scalar score.
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +62,9 @@ impl PerformanceVector {
 }
 
 /// Entrainment Ratio: power in [target_freq - 1, target_freq + 1] Hz / total power.
+///
+/// A Hann window is applied before the FFT to reduce spectral leakage,
+/// consistent with all other FFT paths in the codebase.
 fn compute_entrainment_ratio(eeg: &[f64], sample_rate: f64, target_freq: f64) -> f64 {
     let n = eeg.len();
     if n < 2 {
@@ -71,10 +75,12 @@ fn compute_entrainment_ratio(eeg: &[f64], sample_rate: f64, target_freq: f64) ->
     let mut planner = FftPlanner::<f64>::new();
     let fft = planner.plan_fft_forward(fft_len);
 
+    let hann_denom = if n > 1 { (n - 1) as f64 } else { 1.0 };
     let mut buffer: Vec<Complex<f64>> = (0..fft_len)
         .map(|i| {
             if i < n {
-                Complex::new(eeg[i], 0.0)
+                let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / hann_denom).cos());
+                Complex::new(eeg[i] * w, 0.0)
             } else {
                 Complex::new(0.0, 0.0)
             }
@@ -133,6 +139,9 @@ fn compute_ei_stability(y3: &[f64]) -> f64 {
 }
 
 /// Spectral centroid of the EEG in the 1–50 Hz range.
+///
+/// A Hann window is applied before the FFT to reduce spectral leakage,
+/// consistent with all other FFT paths in the codebase.
 fn compute_spectral_centroid(eeg: &[f64], sample_rate: f64) -> f64 {
     let n = eeg.len();
     if n < 2 {
@@ -143,10 +152,12 @@ fn compute_spectral_centroid(eeg: &[f64], sample_rate: f64) -> f64 {
     let mut planner = FftPlanner::<f64>::new();
     let fft = planner.plan_fft_forward(fft_len);
 
+    let hann_denom = if n > 1 { (n - 1) as f64 } else { 1.0 };
     let mut buffer: Vec<Complex<f64>> = (0..fft_len)
         .map(|i| {
             if i < n {
-                Complex::new(eeg[i], 0.0)
+                let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / hann_denom).cos());
+                Complex::new(eeg[i] * w, 0.0)
             } else {
                 Complex::new(0.0, 0.0)
             }
@@ -175,5 +186,217 @@ fn compute_spectral_centroid(eeg: &[f64], sample_rate: f64) -> f64 {
         weighted_sum / total_power
     } else {
         10.0 // default alpha baseline
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    const SR: f64 = 1000.0; // 1 kHz neural sample rate
+
+    /// Generate a pure sine at `freq` Hz for `duration_secs` at `sample_rate`.
+    fn sine(freq: f64, sample_rate: f64, duration_secs: f64) -> Vec<f64> {
+        let n = (sample_rate * duration_secs) as usize;
+        (0..n)
+            .map(|i| (2.0 * PI * freq * i as f64 / sample_rate).sin())
+            .collect()
+    }
+
+    // ---------------------------------------------------------------
+    // PerformanceVector::compute — structural tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn compute_no_lfo_no_fast_inhib() {
+        let eeg = sine(10.0, SR, 5.0);
+        let pv = PerformanceVector::compute(&eeg, &[], SR, None);
+
+        assert!(pv.entrainment_ratio.is_none(), "No LFO → entrainment should be None");
+        assert!(pv.ei_stability.is_none(), "Empty fast_inhib → ei_stability should be None");
+        assert!(pv.spectral_centroid > 0.0, "Centroid should be positive");
+    }
+
+    #[test]
+    fn compute_with_lfo_and_fast_inhib() {
+        let eeg = sine(10.0, SR, 5.0);
+        let y3 = vec![1.0; 5000]; // constant y3
+        let pv = PerformanceVector::compute(&eeg, &y3, SR, Some(10.0));
+
+        assert!(pv.entrainment_ratio.is_some());
+        assert!(pv.ei_stability.is_some());
+    }
+
+    // ---------------------------------------------------------------
+    // Entrainment Ratio
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn entrainment_pure_sine_at_target() {
+        // Pure 10 Hz sine → almost all power at 10 Hz → high entrainment ratio
+        let eeg = sine(10.0, SR, 5.0);
+        let ratio = compute_entrainment_ratio(&eeg, SR, 10.0);
+        assert!(
+            ratio > 0.8,
+            "Pure 10 Hz sine should have high entrainment at 10 Hz, got {ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn entrainment_off_target_is_low() {
+        // Pure 10 Hz sine → low entrainment at 30 Hz (no power there)
+        let eeg = sine(10.0, SR, 5.0);
+        let ratio = compute_entrainment_ratio(&eeg, SR, 30.0);
+        assert!(
+            ratio < 0.1,
+            "10 Hz sine should have low entrainment at 30 Hz, got {ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn entrainment_in_zero_to_one() {
+        let eeg = sine(10.0, SR, 5.0);
+        let ratio = compute_entrainment_ratio(&eeg, SR, 10.0);
+        assert!(ratio >= 0.0 && ratio <= 1.0, "Ratio out of [0,1]: {ratio}");
+    }
+
+    #[test]
+    fn entrainment_zero_for_silence() {
+        let eeg = vec![0.0; 5000];
+        let ratio = compute_entrainment_ratio(&eeg, SR, 10.0);
+        assert_eq!(ratio, 0.0, "Silence should give 0 entrainment");
+    }
+
+    #[test]
+    fn entrainment_zero_for_short_signal() {
+        let eeg = vec![1.0]; // only 1 sample
+        let ratio = compute_entrainment_ratio(&eeg, SR, 10.0);
+        assert_eq!(ratio, 0.0, "Signal < 2 samples should return 0");
+    }
+
+    // ---------------------------------------------------------------
+    // E/I Stability Index
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn ei_stability_zero_for_constant_signal() {
+        // Constant y3 → std_dev = 0 → CV = 0
+        let y3 = vec![5.0; 1000];
+        let cv = compute_ei_stability(&y3);
+        assert!(cv.abs() < 1e-10, "Constant signal should give CV=0, got {cv}");
+    }
+
+    #[test]
+    fn ei_stability_positive_for_varying_signal() {
+        // Oscillating y3 → positive CV
+        let y3: Vec<f64> = (0..1000)
+            .map(|i| 5.0 + 2.0 * (2.0 * PI * 10.0 * i as f64 / SR).sin())
+            .collect();
+        let cv = compute_ei_stability(&y3);
+        assert!(cv > 0.0, "Oscillating signal should give positive CV, got {cv}");
+    }
+
+    #[test]
+    fn ei_stability_known_value() {
+        // Known: [1, 3] → mean=2, var=(1+1)/1=2, std=√2, CV=√2/2 ≈ 0.707
+        let y3 = vec![1.0, 3.0];
+        let cv = compute_ei_stability(&y3);
+        let expected = (2.0_f64).sqrt() / 2.0;
+        assert!(
+            (cv - expected).abs() < 1e-10,
+            "CV of [1,3] should be {expected:.4}, got {cv:.4}"
+        );
+    }
+
+    #[test]
+    fn ei_stability_near_zero_mean_returns_std() {
+        // Mean ≈ 0, should return raw std_dev
+        let y3: Vec<f64> = (0..1000)
+            .map(|i| (2.0 * PI * 10.0 * i as f64 / SR).sin())
+            .collect();
+        let cv = compute_ei_stability(&y3);
+        // For a sine wave with mean≈0, the result should be the std_dev
+        // which is amp/√2 ≈ 1/√2 ≈ 0.707
+        assert!(
+            cv > 0.5 && cv < 0.9,
+            "Near-zero mean sine: expected std≈0.707, got {cv:.3}"
+        );
+    }
+
+    #[test]
+    fn ei_stability_zero_for_single_sample() {
+        let y3 = vec![42.0];
+        let cv = compute_ei_stability(&y3);
+        assert_eq!(cv, 0.0, "Single sample should return 0");
+    }
+
+    // ---------------------------------------------------------------
+    // Spectral Centroid
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn centroid_pure_10hz_near_10() {
+        let eeg = sine(10.0, SR, 5.0);
+        let c = compute_spectral_centroid(&eeg, SR);
+        assert!(
+            (c - 10.0).abs() < 2.0,
+            "Pure 10 Hz sine centroid should be near 10 Hz, got {c:.1}"
+        );
+    }
+
+    #[test]
+    fn centroid_pure_40hz_near_40() {
+        let eeg = sine(40.0, SR, 5.0);
+        let c = compute_spectral_centroid(&eeg, SR);
+        assert!(
+            (c - 40.0).abs() < 3.0,
+            "Pure 40 Hz sine centroid should be near 40 Hz, got {c:.1}"
+        );
+    }
+
+    #[test]
+    fn centroid_higher_freq_higher_centroid() {
+        let eeg_low = sine(5.0, SR, 5.0);
+        let eeg_high = sine(30.0, SR, 5.0);
+        let c_low = compute_spectral_centroid(&eeg_low, SR);
+        let c_high = compute_spectral_centroid(&eeg_high, SR);
+        assert!(
+            c_high > c_low,
+            "Higher frequency should give higher centroid: {c_low:.1} vs {c_high:.1}"
+        );
+    }
+
+    #[test]
+    fn centroid_default_for_silence() {
+        let eeg = vec![0.0; 5000];
+        let c = compute_spectral_centroid(&eeg, SR);
+        assert_eq!(c, 10.0, "Silence should return default 10 Hz");
+    }
+
+    #[test]
+    fn centroid_default_for_short_signal() {
+        let eeg = vec![1.0]; // only 1 sample
+        let c = compute_spectral_centroid(&eeg, SR);
+        assert_eq!(c, 10.0, "Signal < 2 samples should return default 10 Hz");
+    }
+
+    #[test]
+    fn centroid_in_physiological_range() {
+        // Mixed signal with components in 5, 15, 35 Hz
+        let n = 5000;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / SR;
+                (2.0 * PI * 5.0 * t).sin()
+                    + (2.0 * PI * 15.0 * t).sin()
+                    + (2.0 * PI * 35.0 * t).sin()
+            })
+            .collect();
+        let c = compute_spectral_centroid(&eeg, SR);
+        assert!(
+            c >= 1.0 && c <= 50.0,
+            "Centroid should be in [1, 50] Hz, got {c:.1}"
+        );
     }
 }

@@ -271,3 +271,314 @@ impl DifferentialEvolution {
         value.clamp(lo, hi)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn simple_bounds(dim: usize) -> Vec<(f64, f64)> {
+        vec![(-5.0, 5.0); dim]
+    }
+
+    // ---------------------------------------------------------------
+    // Construction
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn population_has_correct_size() {
+        let de = DifferentialEvolution::new(simple_bounds(3), 20, 0.8, 0.9, 42);
+        assert_eq!(de.population.len(), 20);
+    }
+
+    #[test]
+    fn initial_population_within_bounds() {
+        let bounds = vec![(-2.0, 3.0), (0.0, 10.0), (-1.0, 1.0)];
+        let de = DifferentialEvolution::new(bounds.clone(), 50, 0.8, 0.9, 42);
+        for ind in &de.population {
+            for (j, &g) in ind.genome.iter().enumerate() {
+                let (lo, hi) = bounds[j];
+                assert!(
+                    g >= lo && g <= hi,
+                    "Gene {j} = {g} out of [{lo}, {hi}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn initial_fitness_is_neg_infinity() {
+        let de = DifferentialEvolution::new(simple_bounds(3), 10, 0.8, 0.9, 42);
+        for ind in &de.population {
+            assert_eq!(ind.fitness, f64::NEG_INFINITY);
+        }
+    }
+
+    #[test]
+    fn best_starts_at_neg_infinity() {
+        let de = DifferentialEvolution::new(simple_bounds(3), 10, 0.8, 0.9, 42);
+        assert_eq!(de.best().fitness, f64::NEG_INFINITY);
+    }
+
+    // ---------------------------------------------------------------
+    // Discrete gene rounding
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn discrete_genes_are_integers() {
+        let bounds = vec![(0.0, 5.0), (-3.0, 3.0), (0.0, 4.0)];
+        let discrete = vec![0, 2]; // genes 0 and 2 are discrete
+        let de = DifferentialEvolution::with_discrete(bounds, 30, 0.8, 0.9, 42, discrete);
+
+        for ind in &de.population {
+            assert!(
+                (ind.genome[0] - ind.genome[0].round()).abs() < 1e-10,
+                "Discrete gene 0 = {} should be integer",
+                ind.genome[0]
+            );
+            assert!(
+                (ind.genome[2] - ind.genome[2].round()).abs() < 1e-10,
+                "Discrete gene 2 = {} should be integer",
+                ind.genome[2]
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // report_fitness updates best
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn report_fitness_updates_best() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        de.report_fitness(3, 0.75);
+        assert_eq!(de.best().fitness, 0.75);
+
+        de.report_fitness(7, 0.90);
+        assert_eq!(de.best().fitness, 0.90);
+
+        // Lower fitness doesn't replace best
+        de.report_fitness(1, 0.50);
+        assert_eq!(de.best().fitness, 0.90);
+    }
+
+    // ---------------------------------------------------------------
+    // generate_trials produces correct count
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn trials_count_equals_pop_size() {
+        let mut de = DifferentialEvolution::new(simple_bounds(3), 15, 0.8, 0.9, 42);
+        // Must evaluate initial pop first
+        for i in 0..15 {
+            de.report_fitness(i, 0.5);
+        }
+        let trials = de.generate_trials();
+        assert_eq!(trials.len(), 15);
+    }
+
+    #[test]
+    fn trials_within_bounds() {
+        let bounds = vec![(-2.0, 3.0), (0.0, 10.0), (-1.0, 1.0)];
+        let mut de = DifferentialEvolution::new(bounds.clone(), 20, 0.8, 0.9, 42);
+        for i in 0..20 {
+            de.report_fitness(i, 0.5);
+        }
+
+        let trials = de.generate_trials();
+        for (idx, trial) in &trials {
+            for (j, &g) in trial.iter().enumerate() {
+                let (lo, hi) = bounds[j];
+                assert!(
+                    g >= lo && g <= hi,
+                    "Trial for target {idx}, gene {j} = {g} out of [{lo}, {hi}]"
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Greedy selection: trial replaces parent if >=
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn greedy_selection_replaces_on_equal() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        de.report_fitness(0, 0.5);
+
+        let new_genome = vec![1.0, 2.0];
+        de.report_trial_result(0, new_genome.clone(), 0.5); // equal fitness
+
+        // Should replace (>= selection)
+        assert_eq!(de.population[0].genome, new_genome);
+    }
+
+    #[test]
+    fn greedy_selection_keeps_parent_if_worse() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        de.report_fitness(0, 0.5);
+
+        let old_genome = de.population[0].genome.clone();
+        de.report_trial_result(0, vec![9.0, 9.0], 0.3); // worse
+
+        assert_eq!(de.population[0].genome, old_genome);
+        assert_eq!(de.population[0].fitness, 0.5);
+    }
+
+    // ---------------------------------------------------------------
+    // Convergence on a simple 1D function
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn converges_on_1d_quadratic() {
+        // Maximize f(x) = -(x-3)^2 + 10.  Optimum at x=3, f=10.
+        let bounds = vec![(0.0, 6.0)];
+        let mut de = DifferentialEvolution::new(bounds, 10, 0.8, 0.9, 42);
+
+        // Evaluate initial population
+        for (i, genome) in de.pending_evaluations() {
+            let x = genome[0];
+            let fitness = -(x - 3.0).powi(2) + 10.0;
+            de.report_fitness(i, fitness);
+        }
+
+        // Run 50 generations
+        for _ in 0..50 {
+            let trials = de.generate_trials();
+            for (target, trial) in trials {
+                let x = trial[0];
+                let fitness = -(x - 3.0).powi(2) + 10.0;
+                de.report_trial_result(target, trial, fitness);
+            }
+        }
+
+        let best = de.best();
+        assert!(
+            (best.genome[0] - 3.0).abs() < 0.1,
+            "Should converge near x=3, got x={:.4}",
+            best.genome[0]
+        );
+        assert!(
+            best.fitness > 9.9,
+            "Should achieve fitness near 10, got {:.4}",
+            best.fitness
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Determinism: same seed → same results
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn deterministic_with_same_seed() {
+        let make_de = || {
+            let mut de = DifferentialEvolution::new(simple_bounds(3), 10, 0.8, 0.9, 123);
+            for i in 0..10 {
+                de.report_fitness(i, i as f64 * 0.1);
+            }
+            de.generate_trials()
+        };
+
+        let trials1 = make_de();
+        let trials2 = make_de();
+
+        for ((i1, t1), (i2, t2)) in trials1.iter().zip(trials2.iter()) {
+            assert_eq!(i1, i2);
+            assert_eq!(t1, t2);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // seed_from_genome
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn seed_from_genome_places_seed_at_index_0() {
+        let mut de = DifferentialEvolution::new(simple_bounds(3), 10, 0.8, 0.9, 42);
+        let seed = vec![1.0, 2.0, 3.0];
+        de.seed_from_genome(&seed, 0.1);
+
+        assert_eq!(de.population[0].genome, seed);
+    }
+
+    #[test]
+    fn seed_from_genome_resets_fitness() {
+        let mut de = DifferentialEvolution::new(simple_bounds(3), 10, 0.8, 0.9, 42);
+        de.report_fitness(0, 0.9);
+        de.seed_from_genome(&vec![0.0; 3], 0.1);
+
+        for ind in &de.population {
+            assert_eq!(ind.fitness, f64::NEG_INFINITY);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // mean_fitness and fitness_std
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn mean_fitness_excludes_unevaluated() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        de.report_fitness(0, 0.4);
+        de.report_fitness(1, 0.6);
+        // 8 others are NEG_INFINITY
+
+        let mean = de.mean_fitness();
+        assert!((mean - 0.5).abs() < 1e-10, "Mean should be 0.5, got {mean}");
+    }
+
+    #[test]
+    fn fitness_std_zero_for_uniform_pop() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 5, 0.8, 0.9, 42);
+        for i in 0..5 {
+            de.report_fitness(i, 0.7);
+        }
+        assert!(de.fitness_std() < 1e-10, "Uniform fitness should have std=0");
+    }
+
+    #[test]
+    fn fitness_std_positive_for_varied_pop() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 4, 0.8, 0.9, 42);
+        de.report_fitness(0, 0.2);
+        de.report_fitness(1, 0.4);
+        de.report_fitness(2, 0.6);
+        de.report_fitness(3, 0.8);
+        assert!(de.fitness_std() > 0.1);
+    }
+
+    // ---------------------------------------------------------------
+    // Generation counter
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn generation_increments() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        assert_eq!(de.generation(), 0);
+
+        for i in 0..10 {
+            de.report_fitness(i, 0.5);
+        }
+        let _ = de.generate_trials();
+        assert_eq!(de.generation(), 1);
+
+        let _ = de.generate_trials();
+        assert_eq!(de.generation(), 2);
+    }
+
+    // ---------------------------------------------------------------
+    // pending_evaluations
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn pending_evaluations_initially_all() {
+        let de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        assert_eq!(de.pending_evaluations().len(), 10);
+    }
+
+    #[test]
+    fn pending_evaluations_shrinks_after_report() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 10, 0.8, 0.9, 42);
+        de.report_fitness(0, 0.5);
+        de.report_fitness(1, 0.5);
+        assert_eq!(de.pending_evaluations().len(), 8);
+    }
+}

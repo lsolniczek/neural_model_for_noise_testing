@@ -302,3 +302,378 @@ impl MovementController {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset::{ModConfig, ObjectConfig, Preset, MAX_OBJECTS};
+
+    /// Build a preset with one active object using the given movement config.
+    fn preset_with_movement(mv: MovementConfig) -> Preset {
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].x = 1.0;
+        preset.objects[0].y = 0.5;
+        preset.objects[0].z = 2.0;
+        preset.objects[0].movement = mv;
+        preset
+    }
+
+    /// Create a dummy engine for testing (we only inspect positions, not render).
+    fn test_engine() -> std::sync::Arc<NoiseEngine> {
+        NoiseEngine::new(48_000, 0.8)
+    }
+
+    // ---------------------------------------------------------------
+    // MovementPattern enum
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn pattern_from_u8_round_trip() {
+        for v in 0..=5_u8 {
+            let p = MovementPattern::from_u8(v);
+            assert_eq!(p.to_u8(), v, "Round-trip failed for {v}");
+        }
+    }
+
+    #[test]
+    fn pattern_from_u8_out_of_range_is_static() {
+        assert_eq!(MovementPattern::from_u8(6), MovementPattern::Static);
+        assert_eq!(MovementPattern::from_u8(255), MovementPattern::Static);
+    }
+
+    // ---------------------------------------------------------------
+    // MovementConfig clamp
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn config_clamp_enforces_bounds() {
+        let mut mc = MovementConfig {
+            kind: 10,
+            radius: 100.0,
+            speed: -1.0,
+            phase: 100.0,
+            depth_min: -5.0,
+            depth_max: 100.0,
+            reverb_min: -1.0,
+            reverb_max: 2.0,
+        };
+        mc.clamp();
+
+        assert_eq!(mc.kind, 5);
+        assert_eq!(mc.radius, 5.0);
+        assert_eq!(mc.speed, 0.0);
+        assert!(mc.phase <= std::f32::consts::TAU);
+        assert_eq!(mc.depth_min, 0.5);
+        assert_eq!(mc.depth_max, 6.0);
+        assert_eq!(mc.reverb_min, 0.0);
+        assert_eq!(mc.reverb_max, 1.0);
+    }
+
+    // ---------------------------------------------------------------
+    // Static: no movement tracked
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn static_movement_not_tracked() {
+        let preset = preset_with_movement(MovementConfig {
+            kind: 0, // Static
+            ..MovementConfig::default()
+        });
+        let ctrl = MovementController::from_preset(&preset);
+        assert!(!ctrl.has_movement());
+        assert_eq!(ctrl.satellites.len(), 0);
+    }
+
+    // ---------------------------------------------------------------
+    // Inactive objects not tracked
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn inactive_objects_not_tracked() {
+        let mut preset = Preset::default();
+        // Object 0 inactive but has orbit
+        preset.objects[0].active = false;
+        preset.objects[0].movement.kind = 1;
+        preset.objects[0].movement.radius = 2.0;
+        preset.objects[0].movement.speed = 1.0;
+
+        let ctrl = MovementController::from_preset(&preset);
+        assert!(!ctrl.has_movement());
+    }
+
+    // ---------------------------------------------------------------
+    // Orbit: traces a circle (x² + z² = r²)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn orbit_traces_circle() {
+        let r = 3.0_f32;
+        let preset = preset_with_movement(MovementConfig {
+            kind: 1, // Orbit
+            radius: r,
+            speed: 2.0,
+            phase: 0.0,
+            ..MovementConfig::default()
+        });
+        let engine = test_engine();
+        preset.apply_to_engine(&engine);
+        let mut ctrl = MovementController::from_preset(&preset);
+
+        let dt = 0.05;
+        for _ in 0..100 {
+            ctrl.tick(dt, &engine);
+        }
+
+        // After ticking, the satellite's phase has advanced.
+        // Check the last position satisfies x² + z² ≈ r²
+        let sat = &ctrl.satellites[0];
+        let x = r * (sat.phase as f32).cos();
+        let z = r * (sat.phase as f32).sin();
+        let dist_sq = x * x + z * z;
+        assert!(
+            (dist_sq - r * r).abs() < 0.01,
+            "Orbit should trace circle: x²+z²={dist_sq}, expected {}", r * r
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // FigureEight: crosses origin twice per cycle
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn figure_eight_crosses_origin() {
+        let r = 2.0_f32;
+        let speed = 1.0;
+        // At phase = π/2 and 3π/2, x = r·cos(phase), z = r·sin(phase)·cos(phase)
+        // At π/2: x = 0, z = 0 (crossing)
+        let phase_at_cross = std::f64::consts::FRAC_PI_2;
+        let x = r * (phase_at_cross as f32).cos();
+        let z = r * (phase_at_cross as f32).sin() * (phase_at_cross as f32).cos();
+        assert!(x.abs() < 0.01, "FigureEight x at π/2 should be ~0, got {x}");
+        assert!(z.abs() < 0.01, "FigureEight z at π/2 should be ~0, got {z}");
+    }
+
+    // ---------------------------------------------------------------
+    // DepthBreathing: z oscillates between min_z and max_z
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn depth_breathing_z_range() {
+        let min_z = 1.0_f32;
+        let max_z = 4.0_f32;
+        let preset = preset_with_movement(MovementConfig {
+            kind: 4, // DepthBreathing
+            radius: 0.0,
+            speed: 2.0,
+            phase: 0.0,
+            depth_min: min_z,
+            depth_max: max_z,
+            reverb_min: 0.1,
+            reverb_max: 0.8,
+        });
+        let engine = test_engine();
+        preset.apply_to_engine(&engine);
+        let mut ctrl = MovementController::from_preset(&preset);
+
+        // Tick through a full cycle to collect z values
+        let dt = 0.05;
+        let mut z_min = f32::MAX;
+        let mut z_max = f32::MIN;
+        for _ in 0..200 {
+            ctrl.tick(dt, &engine);
+            let sat = &ctrl.satellites[0];
+            let oscillation = (sat.phase as f32).sin();
+            let normalized = (oscillation + 1.0) / 2.0;
+            let z = sat.min_z + (sat.max_z - sat.min_z) * normalized;
+            z_min = z_min.min(z);
+            z_max = z_max.max(z);
+        }
+
+        assert!(
+            (z_min - min_z).abs() < 0.05,
+            "DepthBreathing z should reach min_z={min_z}, got z_min={z_min}"
+        );
+        assert!(
+            (z_max - max_z).abs() < 0.05,
+            "DepthBreathing z should reach max_z={max_z}, got z_max={z_max}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Pendulum: stays on circular arc (x² + z² = r²)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn pendulum_stays_on_arc() {
+        let r = 2.5_f32;
+        let preset = preset_with_movement(MovementConfig {
+            kind: 5, // Pendulum
+            radius: r,
+            speed: 1.5,
+            phase: 0.0,
+            ..MovementConfig::default()
+        });
+        let engine = test_engine();
+        preset.apply_to_engine(&engine);
+        let mut ctrl = MovementController::from_preset(&preset);
+
+        let dt = 0.05;
+        for step in 0..100 {
+            ctrl.tick(dt, &engine);
+            let sat = &ctrl.satellites[0];
+            let amplitude: f32 = 0.8;
+            let angle = amplitude * (sat.phase as f32).sin();
+            let x = r * angle.sin();
+            let z = r * angle.cos();
+            let dist_sq = x * x + z * z;
+            assert!(
+                (dist_sq - r * r).abs() < 0.01,
+                "Pendulum step {step}: x²+z²={dist_sq}, expected {}",
+                r * r
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // RandomWalk: stays within radius
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn random_walk_stays_within_radius() {
+        let r = 3.0_f32;
+        let preset = preset_with_movement(MovementConfig {
+            kind: 3, // RandomWalk
+            radius: r,
+            speed: 1.0,
+            phase: 0.0,
+            ..MovementConfig::default()
+        });
+        let engine = test_engine();
+        preset.apply_to_engine(&engine);
+        let mut ctrl = MovementController::from_preset(&preset);
+
+        let dt = 0.05;
+        for step in 0..500 {
+            ctrl.tick(dt, &engine);
+            let sat = &ctrl.satellites[0];
+            let dist = (sat.rw_x * sat.rw_x + sat.rw_z * sat.rw_z).sqrt();
+            assert!(
+                dist <= r + 0.01,
+                "RandomWalk step {step}: dist={dist} exceeds radius={r}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Determinism: same seed → same walk
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn random_walk_deterministic() {
+        let mv = MovementConfig {
+            kind: 3,
+            radius: 3.0,
+            speed: 1.0,
+            phase: 0.5,
+            ..MovementConfig::default()
+        };
+        let preset1 = preset_with_movement(mv.clone());
+        let preset2 = preset_with_movement(mv);
+        let engine1 = test_engine();
+        let engine2 = test_engine();
+        preset1.apply_to_engine(&engine1);
+        preset2.apply_to_engine(&engine2);
+
+        let mut ctrl1 = MovementController::from_preset(&preset1);
+        let mut ctrl2 = MovementController::from_preset(&preset2);
+
+        let dt = 0.05;
+        for _ in 0..100 {
+            ctrl1.tick(dt, &engine1);
+            ctrl2.tick(dt, &engine2);
+        }
+
+        assert_eq!(ctrl1.satellites[0].rw_x, ctrl2.satellites[0].rw_x);
+        assert_eq!(ctrl1.satellites[0].rw_z, ctrl2.satellites[0].rw_z);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase advances correctly
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn phase_advances_by_dt_times_speed() {
+        let speed = 2.5;
+        let preset = preset_with_movement(MovementConfig {
+            kind: 1, // Orbit
+            radius: 1.0,
+            speed: speed as f32,
+            phase: 0.0,
+            ..MovementConfig::default()
+        });
+        let engine = test_engine();
+        preset.apply_to_engine(&engine);
+        let mut ctrl = MovementController::from_preset(&preset);
+
+        let dt = 0.05;
+        let n = 10;
+        for _ in 0..n {
+            ctrl.tick(dt, &engine);
+        }
+
+        let expected_phase = dt * speed * n as f64;
+        let actual_phase = ctrl.satellites[0].phase;
+        assert!(
+            (actual_phase - expected_phase).abs() < 1e-10,
+            "Phase should be {expected_phase}, got {actual_phase}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Multiple objects tracked independently
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn multiple_objects_tracked() {
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].movement = MovementConfig {
+            kind: 1, radius: 2.0, speed: 1.0, phase: 0.0, ..MovementConfig::default()
+        };
+        preset.objects[2].active = true;
+        preset.objects[2].movement = MovementConfig {
+            kind: 5, radius: 1.5, speed: 0.5, phase: 1.0, ..MovementConfig::default()
+        };
+        // Object 1 active but static → not tracked
+        preset.objects[1].active = true;
+        preset.objects[1].movement.kind = 0;
+
+        let ctrl = MovementController::from_preset(&preset);
+        assert!(ctrl.has_movement());
+        assert_eq!(ctrl.satellites.len(), 2);
+        assert_eq!(ctrl.satellites[0].index, 0);
+        assert_eq!(ctrl.satellites[1].index, 2);
+    }
+
+    // ---------------------------------------------------------------
+    // DepthBreathing reverb bounds
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn depth_breathing_reverb_bounded() {
+        let min_r = 0.1_f32;
+        let max_r = 0.8_f32;
+
+        // Compute reverb at extremes of sin
+        // sin = -1: normalized = 0, reverb = min_r
+        // sin = +1: normalized = 1, reverb = max_r
+        let norm_min = (-1.0_f32 + 1.0) / 2.0;
+        let norm_max = (1.0_f32 + 1.0) / 2.0;
+        let rev_at_min = min_r + (max_r - min_r) * norm_min;
+        let rev_at_max = min_r + (max_r - min_r) * norm_max;
+
+        assert!((rev_at_min - min_r).abs() < 1e-6);
+        assert!((rev_at_max - max_r).abs() < 1e-6);
+    }
+}

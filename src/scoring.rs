@@ -5,9 +5,10 @@
 /// the score returned by `Goal::evaluate()`.
 ///
 /// ## Scoring formula
-/// Band score = triangular function peaked at `ideal`, zero at/beyond `min`/`max`.
-/// This prevents gaming by ensuring values above the physiological maximum reduce
-/// the score just as much as values below the minimum.
+/// Band score = Gaussian function peaked at `ideal`, with smooth roll-off toward
+/// `min`/`max` (≈ 5% score at boundaries). This prevents gaming by ensuring values
+/// above the physiological maximum reduce the score just as much as values below
+/// the minimum, while providing continuous gradients for the optimizer.
 ///
 /// ## Scientific references
 /// - Klimesch 1999: Alpha power and memory performance
@@ -178,6 +179,9 @@ impl Goal {
                     theta: BandTarget { min: 0.08, ideal: 0.18, max: 0.32 },
                     alpha: BandTarget { min: 0.18, ideal: 0.33, max: 0.50 },
                     beta:  BandTarget { min: 0.25, ideal: 0.42, max: 0.60 },
+                    // NOTE: The Jansen-Rit model cannot produce >17 Hz oscillations,
+                    // so gamma power (30-50 Hz) comes from the WilsonCowan oscillators
+                    // in tonotopic bands 2-3 (see BandModelType::WilsonCowan in brain_type.rs).
                     gamma: BandTarget { min: 0.02, ideal: 0.06, max: 0.15 },
                 },
                 fhn_targets: FhnTargets {
@@ -189,18 +193,19 @@ impl Goal {
             },
 
             // ── Sleep Onset ──────────────────────────────────────────────────
-            // NREM stage 1–2: theta dominant, alpha fading, delta beginning.
+            // NREM stage 1–2: theta dominant, delta emerging, alpha fading.
             // Models the transition into sleep — noise machines target this
             // phase, not deep slow-wave sleep.
+            // Ideals sum ≈ 0.94 for achievable band scores on normalized powers.
             // Ref: Ogilvie 2001 (sleep onset EEG), Carskadon & Dement 2011.
             GoalKind::Sleep => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.05, ideal: 0.22, max: 0.42 },
-                    theta: BandTarget { min: 0.28, ideal: 0.46, max: 0.65 },
-                    alpha: BandTarget { min: 0.00, ideal: 0.07, max: 0.20 },
-                    beta:  BandTarget { min: 0.00, ideal: 0.01, max: 0.08 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.01, max: 0.04 },
+                    delta: BandTarget { min: 0.08, ideal: 0.30, max: 0.50 },
+                    theta: BandTarget { min: 0.28, ideal: 0.48, max: 0.68 },
+                    alpha: BandTarget { min: 0.00, ideal: 0.12, max: 0.25 },
+                    beta:  BandTarget { min: 0.00, ideal: 0.02, max: 0.08 },
+                    gamma: BandTarget { min: 0.00, ideal: 0.02, max: 0.06 },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (0.5, 4.0),
@@ -346,7 +351,7 @@ impl Goal {
         }
     }
 
-    /// Score EEG band powers against targets using range-based triangular scoring.
+    /// Score EEG band powers against targets using Gaussian scoring.
     fn score_bands(&self, powers: &BandPowers) -> f64 {
         let norm = powers.normalized();
         let t = &self.band_targets;
@@ -588,5 +593,363 @@ impl Diagnosis {
         else if f < 13.0 { "Alpha" }
         else if f < 30.0 { "Beta" }
         else { "Gamma" }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::neural::{BandPowers, FhnResult, JansenRitResult};
+
+    /// Build a synthetic FhnResult with given firing_rate and isi_cv.
+    fn make_fhn(firing_rate: f64, isi_cv: f64) -> FhnResult {
+        FhnResult {
+            voltage: vec![],
+            recovery: vec![],
+            spike_times: vec![],
+            firing_rate,
+            isi_cv,
+            mean_voltage: 0.0,
+            voltage_variance: 0.0,
+        }
+    }
+
+    /// Build a synthetic JansenRitResult with given band powers.
+    fn make_jr(delta: f64, theta: f64, alpha: f64, beta: f64, gamma: f64) -> JansenRitResult {
+        JansenRitResult {
+            eeg: vec![0.0; 100],
+            band_powers: BandPowers { delta, theta, alpha, beta, gamma },
+            dominant_freq: 10.0,
+            fast_inhib_trace: vec![],
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // BandTarget::score — Gaussian formula
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn band_score_at_ideal_is_one() {
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let s = t.score(0.30);
+        assert!((s - 1.0).abs() < 1e-10, "Score at ideal should be 1.0, got {s}");
+    }
+
+    #[test]
+    fn band_score_at_boundaries_near_005() {
+        // Centered ideal: boundaries should give ≈ 0.05
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let s_min = t.score(0.10);
+        let s_max = t.score(0.50);
+        assert!(
+            (s_min - 0.05).abs() < 0.01,
+            "Score at min should be ~0.05, got {s_min:.4}"
+        );
+        assert!(
+            (s_max - 0.05).abs() < 0.01,
+            "Score at max should be ~0.05, got {s_max:.4}"
+        );
+    }
+
+    #[test]
+    fn band_score_symmetric_around_ideal() {
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let above = t.score(0.35);
+        let below = t.score(0.25);
+        assert!(
+            (above - below).abs() < 1e-10,
+            "Gaussian should be symmetric: above={above}, below={below}"
+        );
+    }
+
+    #[test]
+    fn band_score_decreases_away_from_ideal() {
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let close = t.score(0.28);
+        let far = t.score(0.15);
+        assert!(close > far, "Closer to ideal should score higher: {close} vs {far}");
+    }
+
+    #[test]
+    fn band_score_beyond_boundaries_near_zero() {
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let beyond = t.score(0.70); // well beyond max
+        assert!(beyond < 0.01, "Score well beyond boundary should be ~0, got {beyond}");
+    }
+
+    #[test]
+    fn band_score_zero_half_width_returns_zero() {
+        let t = BandTarget { min: 0.30, ideal: 0.30, max: 0.30 };
+        let s = t.score(0.30);
+        assert_eq!(s, 0.0, "Zero-width target should return 0.0");
+    }
+
+    // ---------------------------------------------------------------
+    // Weight balance
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn all_goals_weights_sum_to_one() {
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            let sum = goal.band_weight + goal.fhn_targets.weight;
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "{kind}: band_weight + fhn_weight = {sum} (expected 1.0)"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Ideal values sum close to 1.0 for normalized band scoring
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn all_goals_ideal_sum_near_one() {
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            let t = &goal.band_targets;
+            let sum = t.delta.ideal + t.theta.ideal + t.alpha.ideal
+                + t.beta.ideal + t.gamma.ideal;
+            assert!(
+                sum >= 0.90 && sum <= 1.10,
+                "{kind}: ideal sum = {sum:.3} (expected 0.90–1.10 for achievable max score)"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Score range [0, 1]
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn score_in_valid_range_for_all_goals() {
+        let fhn = make_fhn(5.0, 0.35);
+        let jr = make_jr(0.2, 0.2, 0.2, 0.2, 0.2); // flat
+
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            let score = goal.evaluate_with_brightness(&fhn, &jr, 0.5);
+            assert!(
+                score >= 0.0 && score <= 1.0,
+                "{kind}: score = {score} out of [0, 1]"
+            );
+        }
+    }
+
+    #[test]
+    fn score_in_range_with_extreme_inputs() {
+        // Zero band powers
+        let fhn_zero = make_fhn(0.0, f64::NAN);
+        let jr_zero = make_jr(0.0, 0.0, 0.0, 0.0, 0.0);
+
+        // Very high firing rate
+        let fhn_high = make_fhn(100.0, 0.01);
+        let jr_high = make_jr(1.0, 0.0, 0.0, 0.0, 0.0);
+
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+
+            let s1 = goal.evaluate_with_brightness(&fhn_zero, &jr_zero, 0.0);
+            assert!(s1 >= 0.0 && s1 <= 1.0, "{kind} zero: {s1}");
+
+            let s2 = goal.evaluate_with_brightness(&fhn_high, &jr_high, 1.0);
+            assert!(s2 >= 0.0 && s2 <= 1.0, "{kind} extreme: {s2}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Perfect band powers → high score
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn ideal_band_powers_score_high() {
+        // Use Focus ideals: δ=0.01, θ=0.18, α=0.33, β=0.42, γ=0.06
+        let fhn = make_fhn(12.0, 0.30); // within Focus FHN range
+        let jr = make_jr(0.01, 0.18, 0.33, 0.42, 0.06); // Focus ideals
+
+        let goal = Goal::new(GoalKind::Focus);
+        let score = goal.evaluate_with_brightness(&fhn, &jr, 0.55); // optimal brightness
+
+        assert!(
+            score > 0.80,
+            "Focus with ideal bands + FHN should score > 0.80, got {score:.3}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Isolation: flat spectrum scores high
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn isolation_flat_spectrum_scores_high() {
+        let fhn = make_fhn(5.0, 0.35);
+        let jr = make_jr(0.2, 0.2, 0.2, 0.2, 0.2); // perfectly flat
+
+        let goal = Goal::new(GoalKind::Isolation);
+        let score = goal.evaluate_with_brightness(&fhn, &jr, 0.8);
+
+        assert!(
+            score > 0.70,
+            "Isolation with flat spectrum should score > 0.70, got {score:.3}"
+        );
+    }
+
+    #[test]
+    fn isolation_concentrated_spectrum_scores_lower() {
+        let fhn = make_fhn(5.0, 0.35);
+        let jr_flat = make_jr(0.2, 0.2, 0.2, 0.2, 0.2);
+        let jr_concentrated = make_jr(1.0, 0.0, 0.0, 0.0, 0.0);
+
+        let goal = Goal::new(GoalKind::Isolation);
+        let flat_score = goal.evaluate_with_brightness(&fhn, &jr_flat, 0.5);
+        let conc_score = goal.evaluate_with_brightness(&fhn, &jr_concentrated, 0.5);
+
+        assert!(
+            flat_score > conc_score,
+            "Flat spectrum ({flat_score:.3}) should beat concentrated ({conc_score:.3})"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Brightness modifier
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sleep_prefers_dark_sounds() {
+        let goal = Goal::new(GoalKind::Sleep);
+        let dark = goal.brightness_modifier(0.1);
+        let bright = goal.brightness_modifier(0.9);
+        assert!(dark > bright, "Sleep should prefer dark: {dark:.3} vs {bright:.3}");
+    }
+
+    #[test]
+    fn isolation_prefers_bright_sounds() {
+        let goal = Goal::new(GoalKind::Isolation);
+        let dark = goal.brightness_modifier(0.1);
+        let bright = goal.brightness_modifier(0.9);
+        assert!(bright > dark, "Isolation should prefer bright: {bright:.3} vs {dark:.3}");
+    }
+
+    #[test]
+    fn brightness_modifier_in_zero_to_one() {
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            for &b in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+                let m = goal.brightness_modifier(b);
+                assert!(
+                    m >= 0.0 && m <= 1.0,
+                    "{kind} brightness={b}: modifier = {m}"
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // FHN scoring
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn fhn_in_range_scores_high() {
+        let goal = Goal::new(GoalKind::Focus);
+        // Focus: rate 8–20, CV 0.30
+        let fhn = make_fhn(12.0, 0.30);
+        let s = goal.score_fhn(&fhn);
+        assert!(s > 0.9, "FHN in range should score > 0.9, got {s:.3}");
+    }
+
+    #[test]
+    fn fhn_out_of_range_scores_lower() {
+        let goal = Goal::new(GoalKind::Focus);
+        let fhn_good = make_fhn(12.0, 0.30);
+        let fhn_bad = make_fhn(0.5, 0.80); // way below range, wrong CV
+
+        let good = goal.score_fhn(&fhn_good);
+        let bad = goal.score_fhn(&fhn_bad);
+        assert!(good > bad, "In-range FHN ({good:.3}) should beat out-of-range ({bad:.3})");
+    }
+
+    #[test]
+    fn fhn_nan_isi_cv_gives_zero_cv_credit() {
+        let goal = Goal::new(GoalKind::Focus);
+        let fhn_nan = make_fhn(12.0, f64::NAN); // good rate, NaN CV
+        let fhn_good = make_fhn(12.0, 0.30); // good rate, good CV
+
+        let s_nan = goal.score_fhn(&fhn_nan);
+        let s_good = goal.score_fhn(&fhn_good);
+
+        // NaN CV gives 0 credit for CV component → lower total
+        assert!(
+            s_good > s_nan,
+            "Good CV ({s_good:.3}) should beat NaN CV ({s_nan:.3})"
+        );
+        // But rate component still scores well
+        assert!(s_nan > 0.3, "NaN CV with good rate should still score > 0.3, got {s_nan:.3}");
+    }
+
+    // ---------------------------------------------------------------
+    // GoalKind utilities
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn goal_kind_all_returns_six() {
+        assert_eq!(GoalKind::all().len(), 6);
+    }
+
+    #[test]
+    fn goal_kind_from_str_round_trip() {
+        for &kind in GoalKind::all() {
+            let s = kind.to_string();
+            let parsed = GoalKind::from_str(&s);
+            assert_eq!(parsed, Some(kind), "Round-trip failed for {kind}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Diagnosis
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn diagnose_produces_five_bands() {
+        let fhn = make_fhn(5.0, 0.35);
+        let jr = make_jr(0.2, 0.2, 0.2, 0.2, 0.2);
+
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            let diag = goal.diagnose(&fhn, &jr, 0.5, None);
+            assert_eq!(diag.bands.len(), 5, "{kind} diagnosis should have 5 bands");
+        }
+    }
+
+    #[test]
+    fn diagnose_verdict_good_for_high_score() {
+        let fhn = make_fhn(12.0, 0.30);
+        let jr = make_jr(0.01, 0.18, 0.33, 0.42, 0.06); // Focus ideals
+
+        let goal = Goal::new(GoalKind::Focus);
+        let diag = goal.diagnose(&fhn, &jr, 0.55, None);
+
+        assert!(
+            matches!(diag.verdict, Verdict::Good),
+            "Focus with ideal inputs should get Good verdict, got {:?} (score={:.3})",
+            diag.verdict, diag.score
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // BandTarget status
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn band_status_pass_near_ideal() {
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        assert!(matches!(t.status(0.30), MetricStatus::Pass));
+    }
+
+    #[test]
+    fn band_status_fail_outside_range() {
+        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        assert!(matches!(t.status(0.05), MetricStatus::Fail));
+        assert!(matches!(t.status(0.60), MetricStatus::Fail));
     }
 }

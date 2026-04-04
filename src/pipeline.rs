@@ -350,3 +350,221 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         performance,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    // ---------------------------------------------------------------
+    // Constants
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn neural_sr_is_1000() {
+        assert_eq!(NEURAL_SR, 1000.0);
+        assert_eq!(SAMPLE_RATE as f64 / DECIMATION_FACTOR as f64, 1000.0);
+    }
+
+    // ---------------------------------------------------------------
+    // decimate
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn decimate_constant_signal_unchanged() {
+        let signal = vec![3.0; 480]; // 480 samples / 48 = 10 output
+        let dec = decimate(&signal, 48);
+        assert_eq!(dec.len(), 10);
+        for &v in &dec {
+            assert!((v - 3.0).abs() < 1e-12, "Constant signal should decimate to same value");
+        }
+    }
+
+    #[test]
+    fn decimate_averages_blocks() {
+        // Block of [0, 1, 2, 3] averaged = 1.5
+        let signal: Vec<f64> = (0..8).map(|i| i as f64).collect();
+        let dec = decimate(&signal, 4);
+        assert_eq!(dec.len(), 2);
+        assert!((dec[0] - 1.5).abs() < 1e-12); // (0+1+2+3)/4
+        assert!((dec[1] - 5.5).abs() < 1e-12); // (4+5+6+7)/4
+    }
+
+    #[test]
+    fn decimate_output_length() {
+        let signal = vec![0.0; 4800];
+        let dec = decimate(&signal, 48);
+        assert_eq!(dec.len(), 100); // 4800 / 48
+    }
+
+    #[test]
+    fn decimate_discards_remainder() {
+        // 100 samples / 48 = 2 full blocks (96 samples), 4 remainder discarded
+        let signal = vec![1.0; 100];
+        let dec = decimate(&signal, 48);
+        assert_eq!(dec.len(), 2);
+    }
+
+    #[test]
+    fn decimate_preserves_low_frequency() {
+        // A 10 Hz sine at 48 kHz, decimated to 1 kHz, should still be ~10 Hz
+        let n = 48_000; // 1 second
+        let signal: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 10.0 * i as f64 / 48_000.0).sin())
+            .collect();
+        let dec = decimate(&signal, 48);
+        assert_eq!(dec.len(), 1000);
+
+        // The decimated signal should still oscillate at ~10 Hz
+        // Check it crosses zero multiple times (10 Hz → ~20 crossings/sec)
+        let mut crossings = 0;
+        for w in dec.windows(2) {
+            if w[0] * w[1] < 0.0 {
+                crossings += 1;
+            }
+        }
+        assert!(
+            crossings >= 15 && crossings <= 25,
+            "10 Hz sine should have ~20 zero crossings after decimation, got {crossings}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // deinterleave
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn deinterleave_splits_correctly() {
+        let interleaved = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (left, right) = deinterleave(&interleaved);
+        assert_eq!(left, vec![1.0, 3.0, 5.0]);
+        assert_eq!(right, vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn deinterleave_empty() {
+        let (left, right) = deinterleave(&[]);
+        assert!(left.is_empty());
+        assert!(right.is_empty());
+    }
+
+    #[test]
+    fn deinterleave_output_length() {
+        let interleaved = vec![0.0_f32; 200];
+        let (left, right) = deinterleave(&interleaved);
+        assert_eq!(left.len(), 100);
+        assert_eq!(right.len(), 100);
+    }
+
+    // ---------------------------------------------------------------
+    // spectral_brightness
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn brightness_dark_for_low_freq_sine() {
+        // 100 Hz sine → centroid ≈ 100 Hz → brightness ≈ 0.0
+        let n = 48_000;
+        let sr = 48_000.0;
+        let audio: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 100.0 * i as f64 / sr).sin() as f32)
+            .collect();
+        let b = spectral_brightness(&audio, sr);
+        assert!(b < 0.15, "100 Hz sine should be dark, got brightness={b:.3}");
+    }
+
+    #[test]
+    fn brightness_bright_for_high_freq_sine() {
+        // 8000 Hz sine → centroid ≈ 8000 Hz → brightness ≈ 0.95
+        let n = 48_000;
+        let sr = 48_000.0;
+        let audio: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 8000.0 * i as f64 / sr).sin() as f32)
+            .collect();
+        let b = spectral_brightness(&audio, sr);
+        assert!(b > 0.80, "8 kHz sine should be bright, got brightness={b:.3}");
+    }
+
+    #[test]
+    fn brightness_in_zero_to_one() {
+        let sr = 48_000.0;
+        // Test with various signals
+        for &freq in &[50.0, 500.0, 5000.0, 15000.0] {
+            let n = 48_000;
+            let audio: Vec<f32> = (0..n)
+                .map(|i| (2.0 * PI * freq * i as f64 / sr).sin() as f32)
+                .collect();
+            let b = spectral_brightness(&audio, sr);
+            assert!(
+                b >= 0.0 && b <= 1.0,
+                "Brightness should be [0,1] for {freq} Hz, got {b:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn brightness_higher_for_higher_freq() {
+        let n = 48_000;
+        let sr = 48_000.0;
+        let low: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 200.0 * i as f64 / sr).sin() as f32)
+            .collect();
+        let high: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 5000.0 * i as f64 / sr).sin() as f32)
+            .collect();
+        let b_low = spectral_brightness(&low, sr);
+        let b_high = spectral_brightness(&high, sr);
+        assert!(
+            b_high > b_low,
+            "Higher freq should be brighter: {b_low:.3} vs {b_high:.3}"
+        );
+    }
+
+    #[test]
+    fn brightness_silence_returns_mid_range() {
+        let audio = vec![0.0_f32; 48_000];
+        let b = spectral_brightness(&audio, 48_000.0);
+        // Default centroid 500 Hz → brightness ≈ 0.35
+        assert!(
+            b >= 0.0 && b <= 1.0,
+            "Silence brightness should be in [0,1], got {b:.3}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // SimulationConfig defaults
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn default_config_values() {
+        let config = SimulationConfig::default();
+        assert_eq!(config.duration_secs, 12.0);
+        assert_eq!(config.warmup_discard_secs, 2.0);
+        assert_eq!(config.brain_type, BrainType::Normal);
+    }
+
+    #[test]
+    fn warmup_discard_samples_count() {
+        let config = SimulationConfig::default();
+        let discard = (config.warmup_discard_secs as f64 * NEURAL_SR) as usize;
+        assert_eq!(discard, 2000); // 2s × 1000 Hz
+    }
+
+    // ---------------------------------------------------------------
+    // Pipeline data flow: signal lengths
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn decimation_then_trim_length() {
+        // 12 seconds at 48 kHz = 576000 samples
+        // Decimated by 48 = 12000 samples at 1 kHz
+        // Discard 2000 (2s warmup) = 10000 samples
+        let n = 576_000;
+        let signal = vec![0.5; n];
+        let dec = decimate(&signal, DECIMATION_FACTOR);
+        assert_eq!(dec.len(), 12_000);
+
+        let discard = 2000_usize;
+        let trimmed = &dec[discard..];
+        assert_eq!(trimmed.len(), 10_000);
+    }
+}
