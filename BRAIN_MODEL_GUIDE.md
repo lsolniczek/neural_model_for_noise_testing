@@ -146,22 +146,42 @@ brightness_modifier = 0.3 + 0.7 × brightness
 
 So going from brown noise (brightness ≈ 0.0) to white noise (brightness ≈ 0.95) is worth +0.066 score points just from this term alone.
 
-### 7. Master gain and object volume — DOES NOT MATTER
+### Same-frequency on both bass and satellite — stronger entrainment
 
-This is counterintuitive: **master_gain and object volumes do not affect the neural score.**
+When you want to drive a specific EEG band reliably, putting the same frequency NeuralLfo on **both bass_mod and satellite_mod** of one source is more effective than putting it on just one slot:
 
-The pipeline does max-normalization per tonotopic band before feeding the JR model:
+```
+bass_mod: NeuralLfo at 10 Hz, depth 0.60   (acts on <250 Hz content)
+satellite_mod: NeuralLfo at 10 Hz, depth 0.50  (acts on >250 Hz content)
+```
 
+The two modulators combined act on the source's full spectrum, creating a coherent envelope at the target frequency that the cochlear filterbank passes through to all tonotopic bands. We found this produces ~5% better entrainment than either modulator alone for the same depth budget.
+
+This works best when:
+- The source's color has content in both <250 Hz and >250 Hz ranges (White, Pink, Grey work well; Green/Blue have less bass content so the bass mod is wasted)
+- The target frequency is at the edge of an EEG band you want to lift (e.g., 10 Hz to drive alpha, 14 Hz to drive beta-edge)
+- You want the dominant frequency to actually shift to your target (we observed dominant freq shifting from 7.2 Hz theta-lock to 10.0 Hz alpha when applied to an ADHD Deep Work preset)
+
+### 7. Master gain and object volume — partial story
+
+This needs nuance — the relationship is more subtle than "volume doesn't matter":
+
+**`master_gain` truly does not affect the score.** It's a global scalar applied after all source mixing and the band-normalization step. Two presets identical except for master_gain produce identical neural simulation results.
+
+**Per-object volume DOES affect the score, but indirectly.** Per-object volumes are applied *before* band normalization. So per-object volumes affect the **spectral balance** of the mixed audio reaching the cochlear filterbank — not the absolute amplitude (which gets normalized away), but the *ratio* of contributions from different sources.
+
+For example: if you have a Pink lead at vol 0.85 and a White counter at vol 0.55, the mix is dominated by Pink's 1/f spectrum. If you change to Pink at 0.55 and White at 0.85, the mix is now dominated by White's flat spectrum. The resulting brightness, tonotopic distribution, and neural response are different — even though `master_gain` is unchanged.
+
+**Practical implication:**
+- Don't tune `master_gain` to chase score — it does nothing
+- Per-object volumes ARE worth tuning, especially when sources have different colors. The volume ratios change the effective spectral mix
+- For same-color presets (e.g., all White), per-object volume has minimal effect on the score (it just shifts the spatial mix slightly via HRTF)
+
+The pipeline still does max-normalization per tonotopic band before feeding the JR model:
 ```rust
 normalized_band = raw_band / max(band)  // Always [0, 1]
 ```
-
-This means a preset at master_gain = 0.10 and one at master_gain = 0.90 produce identical neural responses. Volume only affects:
-- What you actually hear (perceived loudness)
-- Reverb tail behavior (slightly)
-- Brightness calculation (subtly, via the master limiter)
-
-**Practical implication:** Don't waste optimization budget on volume parameters. They're audio-engineering knobs, not neural-stimulation knobs.
+But this normalizes only the absolute amplitude — the relative spectral shape (which depends on per-object volumes when colors differ) is preserved.
 
 ---
 
@@ -179,6 +199,22 @@ What you *can* do is redistribute power away from alpha by:
 - Using asymmetric placement so the two hemispheres run different rhythms
 
 But you'll never see alpha drop below ~30-40% for a Normal brain type, no matter what you do. **Stop trying after a few iterations** — accept the floor and optimize the rest.
+
+### Theta is nearly unreachable on Normal brain
+
+Just like gamma, **theta (4-8 Hz) is severely limited on Normal brain type**. The JR Normal model with input_offset=175 sits deep in the alpha attractor, and the strongest theta-driving mechanism we have (Breathing pattern 3 on the lead) only produces ~5-7% theta — far short of any goal that wants 15-30% theta (Deep Work, Meditation, Sleep onset).
+
+This means goals with high theta targets are **fundamentally unreachable on Normal brain**:
+
+| Goal | Theta target | Best achievable on Normal |
+|---|:-:|:-:|
+| Deep Work | 15-46% | ~5-7% |
+| Meditation | 25-56% | ~5-7% |
+| Sleep | 28-68% | ~5-7% |
+
+**Practical implication**: For these goals, **the ADHD brain type achieves them more naturally** because ADHD's hypersensitive bifurcation (input_offset=135) over-produces slow waves. A Deep Work preset on ADHD typically scores 0.05-0.10 higher than the same preset on Normal because ADHD is naturally closer to the target band distribution.
+
+If your product needs to support a slow-wave-heavy goal across brain types, accept that **Normal brain will plateau around 0.60-0.66** while ADHD can reach 0.70+ — and design the perceptual quality first, scores second.
 
 ### Gamma is essentially impossible
 
@@ -406,6 +442,28 @@ It's easy to spend hours pushing from 0.78 to 0.82. The marginal value to a real
 
 ---
 
+## Goal-specific brightness targets
+
+Each goal applies a brightness modifier worth 10% of the total score. The targets are **very different per goal** and are easy to overlook:
+
+| Goal | Brightness curve | Peak | Practical color |
+|---|---|:-:|---|
+| **Isolation** | Linear `0.3 + 0.7×brightness` | **1.0** (brighter = better) | White / Blue / Grey |
+| **Focus** | Inverted-U around 0.55 | **0.55** | White-Pink mix |
+| **Sleep** | `1.0 - 0.8×brightness` | **0.0** (darker = better) | Brown / Black |
+| **Deep Relaxation** | `0.9 - 0.6×brightness` | **0.0** | Brown / Pink |
+| **Meditation** | `0.85 - 0.5×brightness` | **0.0** | Pink / Brown |
+| **Deep Work** | Inverted-U around 0.35 | **0.35** | Pink-dominant |
+
+This explains why the same color works for some goals and not others:
+
+- **White noise** is perfect for Isolation but terrible for Sleep / Deep Work / Deep Relaxation — it's too bright
+- **Brown noise** is great for Sleep but kills Isolation (also crashes alpha)
+- **Pink** is the universal middle-of-the-road — works decently for Deep Work, Meditation, and Deep Relaxation
+- **Pink-dominant with one brighter source** hits Focus's 0.55 target naturally
+
+**Practical implication**: when starting a new goal, **pick your dominant color based on the goal's brightness target** before tuning anything else. Trying to make White work for Sleep, or Brown work for Isolation, fights against a 10% built-in penalty you can't recover with neural tuning.
+
 ## Designing brain-type pairs (Normal + ADHD)
 
 A common product requirement is to ship a preset that "works for both Normal and ADHD users." Don't try to satisfy both in one preset — the brain types have fundamentally different operating regimes and require opposite modulation strategies. Instead, build a **pair**: a base preset that works for one brain type, plus a "satellite layer" that adapts it for the other.
@@ -419,18 +477,56 @@ ADHD preset   = base (same 4 sources) + 1-2 added "satellite" sources
 
 The base provides the structural skeleton (positioning, main modulators, environment, anchor). The satellites are activated only for the variant brain type. The engine can switch between presets by toggling the satellite source(s) on/off.
 
-### Why ADHD needs added energy, not different base
+### Different goals reverse the brain-type difficulty
 
-ADHD's input_offset (135) sits right at the JR bifurcation boundary. Any modulation in the audio gets dramatically amplified in the neural model because the system is hyper-sensitive. This means:
+The Isolation goal we designed first happens to be **harder for ADHD than Normal** because ADHD over-produces slow waves while Isolation wants flat bands. But this is goal-specific:
+
+| Goal | Easier on | Why |
+|---|---|---|
+| Isolation | Normal | Wants flat bands; ADHD over-produces slow waves |
+| Focus | Normal | Wants beta dominance; ADHD has weaker beta |
+| Deep Work | **ADHD** | Wants alpha+theta; ADHD naturally produces both |
+| Meditation | **ADHD** | Wants theta+alpha co-dominant; ADHD's natural state is close |
+| Sleep | **ADHD** | Wants slow-wave dominant; ADHD over-produces this |
+| Deep Relaxation | **ADHD** | Wants slow-wave focus; ADHD's strength |
+
+**Practical implication**: When designing a brain-type pair, identify which brain type is the "natural fit" for the goal first, then design the *harder* brain type's adaptation as the satellite layer. For Deep Work / Meditation / Sleep / Relaxation, this means **building for ADHD as the base and adding satellites for Normal** — the inverse of the Isolation pattern.
+
+For Deep Work specifically, we observed Normal hitting a ~0.66 ceiling while ADHD reaches 0.67+ on the same base preset. Same architecture, different scores, because the goal aligns with ADHD's natural EEG distribution.
+
+### Right-hemisphere theta-lock on ADHD with Breathing modulator
+
+If you put Breathing pattern 3 (Wim Hof) on the lead source of an ADHD preset, you'll likely see the **right hemisphere lock at 60%+ theta** while the left hemisphere stays balanced. The bilateral split looks like:
+
+```
+Left (fast α/β):   theta 30%, alpha 30%, beta 28%  ← balanced
+Right (slow δ/θ):  theta 64%, alpha 29%, beta  5%  ← LOCKED
+Combined:          theta 50%, alpha 30%, beta 12%
+```
+
+This is because:
+1. ADHD's right hemisphere has slow-wave bias (band_offsets pushed lower)
+2. ADHD's hypersensitive bifurcation amplifies any slow modulation
+3. Breathing pattern 3's 0.33 Hz cycle creates harmonic content that the right hemi locks onto
+
+**Fix**: Add a satellite source on the **LEFT side** (which drives the right hemi via 65% contralateral routing) with NeuralLfo at alpha frequency (10 Hz). This drives the right hemisphere out of theta-lock toward alpha. We measured combined alpha jumping from 30% to 44% with this single satellite, and the dominant frequency shifting from 7.2 Hz (theta) to 10.0 Hz (alpha).
+
+The pattern: **to fix a hemisphere, drive it from the opposite side** (because of the 65% contralateral routing).
+
+### Why ADHD needs added energy for fast-band goals
+
+For goals that want **alpha-light or beta-rich** brain states (Isolation, Focus), ADHD's slow-wave bias is a problem. ADHD's input_offset (135) sits right at the JR bifurcation boundary, so any modulation in the audio gets dramatically amplified. This means:
 
 - **Normal-tuned slow modulators** (Breathing, SineLfo at 1.5-3 Hz) that produce ~12% theta in Normal will produce **~37% theta in ADHD** — runaway slow-wave excess
-- The base preset's strengths for Normal (delta+theta promotion via slow modulation, reverb tails, etc.) become **liabilities for ADHD**
+- The base preset's strengths for Normal (delta+theta promotion via slow modulation, reverb tails, etc.) become **liabilities for ADHD when targeting fast bands**
 
-So an ADHD variant needs to **inject opposing energy** to counter-balance the over-driven slow waves:
+So an ADHD variant for Isolation/Focus needs to **inject opposing energy** to counter-balance the over-driven slow waves:
 
 - **Beta drivers** — NeuralLfo at 18-25 Hz on satellite_mod, positioned on the right side (drives left hemisphere via 65% contralateral routing). The left hemisphere is fast/β-prone and accepts beta entrainment readily.
 - **Broadband disruption** — Stochastic at moderate rate breaks up the rhythmic coherence of the slow waves
 - **Foreground positioning** — put satellites at z > +1 so they sit above the base preset's background, audibly competing with it
+
+For **slow-band goals** (Deep Work, Meditation, Sleep), the opposite is true: ADHD doesn't need slow-wave addition (it has plenty), it needs **alpha rebalancing** to bring its over-produced theta into the target range. See the right-hemisphere theta-lock fix above.
 
 ### The pleasantness vs strength tradeoff for ADHD
 
