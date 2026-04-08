@@ -146,21 +146,38 @@ brightness_modifier = 0.3 + 0.7 × brightness
 
 So going from brown noise (brightness ≈ 0.0) to white noise (brightness ≈ 0.95) is worth +0.066 score points just from this term alone.
 
-### Same-frequency on both bass and satellite — stronger entrainment
+### Same-frequency on both bass and satellite — the most powerful entrainment lever we found
 
-When you want to drive a specific EEG band reliably, putting the same frequency NeuralLfo on **both bass_mod and satellite_mod** of one source is more effective than putting it on just one slot:
+When you want to drive a specific EEG band reliably, putting the same frequency NeuralLfo on **both bass_mod and satellite_mod** of one source — and pushing depths toward maximum — is the strongest entrainment mechanism we've found.
 
 ```
-bass_mod: NeuralLfo at 10 Hz, depth 0.60   (acts on <250 Hz content)
-satellite_mod: NeuralLfo at 10 Hz, depth 0.50  (acts on >250 Hz content)
+bass_mod:      NeuralLfo at 10 Hz, depth 1.0
+satellite_mod: NeuralLfo at 10 Hz, depth 0.90
 ```
 
-The two modulators combined act on the source's full spectrum, creating a coherent envelope at the target frequency that the cochlear filterbank passes through to all tonotopic bands. We found this produces ~5% better entrainment than either modulator alone for the same depth budget.
+The two modulators combined act on the source's full spectrum, creating a coherent envelope at the target frequency that the cochlear filterbank passes through to all tonotopic bands.
+
+**The depth scaling is dramatic.** We measured score progression on a Deep Work ADHD preset where the only change was the same-freq bass+sat depths on a single satellite source:
+
+| Depth (bass / sat) | ADHD Deep Work score |
+|---|:-:|
+| 0.60 / 0.50 | 0.587 |
+| 0.70 / 0.55 | 0.630 |
+| 0.85 / 0.70 | 0.743 |
+| 0.95 / 0.80 | 0.794 |
+| **1.0 / 0.90** | **0.809** |
+
+**That's a +0.22 score swing from depth alone.** Applying this to BOTH a left-positioned satellite AND an overhead satellite (each at max depth) pushed the score to **0.814** with all four lower bands hitting their ideal targets (delta 3%, theta 31%, alpha 55%, beta 10%) — essentially landing on the goal's nominal targets.
 
 This works best when:
-- The source's color has content in both <250 Hz and >250 Hz ranges (White, Pink, Grey work well; Green/Blue have less bass content so the bass mod is wasted)
+- The source's color has content in both <250 Hz and >250 Hz ranges (White, Pink, SSN, Grey work well; Green/Blue have less bass content so the bass mod is wasted)
 - The target frequency is at the edge of an EEG band you want to lift (e.g., 10 Hz to drive alpha, 14 Hz to drive beta-edge)
-- You want the dominant frequency to actually shift to your target (we observed dominant freq shifting from 7.2 Hz theta-lock to 10.0 Hz alpha when applied to an ADHD Deep Work preset)
+- The brain type's natural attractor is *opposite* the target — this trick is most powerful when fighting against a natural bias (e.g., driving alpha on ADHD which over-produces theta)
+- You're willing to use depth ≥ 0.85 — below that, the lever is weak
+
+**Common gotcha**: setting `param_b` (depth) on a `satellite_mod` whose `kind` is 0 (Flat) does nothing. The mod must have `kind: 4` (NeuralLfo) explicitly set. Always set both fields when enabling a modulator.
+
+**Result observation**: with both satellites at max same-freq alpha drive on ADHD, the model's dominant frequency shifted from 7.2 Hz (theta-locked) to 10.0 Hz (alpha) — meaning the neural simulation actually moved out of its theta attractor into the alpha regime, not just rebalanced the band powers.
 
 ### 7. Master gain and object volume — partial story
 
@@ -214,7 +231,7 @@ This means goals with high theta targets are **fundamentally unreachable on Norm
 
 **Practical implication**: For these goals, **the ADHD brain type achieves them more naturally** because ADHD's hypersensitive bifurcation (input_offset=135) over-produces slow waves. A Deep Work preset on ADHD typically scores 0.05-0.10 higher than the same preset on Normal because ADHD is naturally closer to the target band distribution.
 
-If your product needs to support a slow-wave-heavy goal across brain types, accept that **Normal brain will plateau around 0.60-0.66** while ADHD can reach 0.70+ — and design the perceptual quality first, scores second.
+If your product needs to support a slow-wave-heavy goal across brain types, accept that **Normal brain will plateau around 0.60-0.66** while ADHD can reach **0.80+** with the right satellite design (specifically, max same-freq bass+sat NeuralLfo at alpha frequency on close foreground satellites — see "Same-frequency on both bass and satellite" above). Design the perceptual quality first, scores second on Normal — but on ADHD, this technique can land you at goal-ideal band powers.
 
 ### Gamma is essentially impossible
 
