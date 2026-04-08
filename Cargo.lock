@@ -259,7 +259,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "noice_generator_core",
+ "noise_generator_core",
  "rand",
  "rand_distr",
  "rustfft",
@@ -268,7 +268,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "noice_generator_core"
+name = "noise_generator_core"
 version = "0.1.0"
 dependencies = [
  "fastrand",

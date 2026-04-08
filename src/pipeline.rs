@@ -9,7 +9,7 @@ use crate::movement::MovementController;
 use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
 use crate::preset::Preset;
 use crate::scoring::Goal;
-use noice_generator_core::NoiseEngine;
+use noise_generator_core::NoiseEngine;
 
 use rustfft::{num_complex::Complex, FftPlanner};
 

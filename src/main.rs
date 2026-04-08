@@ -747,7 +747,7 @@ fn run_detailed_pipeline(
     duration: f32,
 ) -> DetailedResult {
     use crate::auditory::GammatoneFilterbank;
-    use noice_generator_core::NoiseEngine;
+    use noise_generator_core::NoiseEngine;
     use rustfft::{num_complex::Complex, FftPlanner};
 
     let sample_rate = 48_000_u32;

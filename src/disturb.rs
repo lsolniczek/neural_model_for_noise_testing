@@ -14,7 +14,7 @@ use crate::pipeline::{
     decimate, deinterleave, spectral_brightness, SimulationConfig,
 };
 use crate::preset::Preset;
-use noice_generator_core::NoiseEngine;
+use noise_generator_core::NoiseEngine;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 // ── Sliding-window metrics ──────────────────────────────────────────────────

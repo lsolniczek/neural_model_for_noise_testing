@@ -5,7 +5,7 @@
 /// of mixed continuous and discrete parameters.
 
 use crate::movement::MovementConfig;
-use noice_generator_core::{
+use noise_generator_core::{
     AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine,
 };
 use serde::{Deserialize, Serialize};

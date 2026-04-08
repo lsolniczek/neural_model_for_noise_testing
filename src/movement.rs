@@ -8,7 +8,7 @@
 /// (matching the render chunk size) so that the rendered audio reflects
 /// object motion through the HRTF pipeline.
 
-use noice_generator_core::NoiseEngine;
+use noise_generator_core::NoiseEngine;
 use serde::{Deserialize, Serialize};
 
 // ── Movement pattern enum ───────────────────────────────────────────────────
