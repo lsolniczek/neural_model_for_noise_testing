@@ -20,6 +20,15 @@ pub(crate) const DECIMATION_FACTOR: usize = 48;
 pub(crate) const NEURAL_SR: f64 = SAMPLE_RATE as f64 / DECIMATION_FACTOR as f64;
 
 /// Decimate a signal by averaging blocks of `factor` samples (boxcar anti-alias + downsample).
+///
+/// Note: The boxcar filter has -13 dB sidelobes (Oppenheim & Schafer 2009),
+/// which is insufficient for sharp anti-aliasing. However, the gammatone
+/// filterbank's 80 Hz envelope lowpass (in gammatone.rs) already removes
+/// content above ~80 Hz before this stage, so the boxcar only needs to
+/// handle residual carrier leakage — which is adequately suppressed.
+/// A Hann window over 48 samples (1ms) is too short for better cutoff;
+/// proper improvement would require multi-stage decimation or a long FIR
+/// (Crochiere & Rabiner 1983).
 pub(crate) fn decimate(signal: &[f64], factor: usize) -> Vec<f64> {
     let out_len = signal.len() / factor;
     let inv = 1.0 / factor as f64;

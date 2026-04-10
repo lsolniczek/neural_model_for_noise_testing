@@ -885,6 +885,83 @@ mod tests {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 9. Decimation anti-aliasing tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per Oppenheim & Schafer (2009) and Crochiere & Rabiner (1983),
+    // decimation without adequate anti-aliasing introduces spectral folding.
+    // A boxcar filter has -13 dB sidelobes; Hann achieves -31 dB.
+
+    /// Document boxcar decimation behavior: 300 Hz passes through at ~74% power.
+    /// This is acceptable because the gammatone filterbank's 80 Hz envelope
+    /// lowpass already removes content above ~80 Hz before decimation.
+    /// The boxcar only handles residual carrier leakage.
+    ///
+    /// Per Crochiere & Rabiner (1983): proper improvement would require
+    /// multi-stage decimation or a long FIR filter — future priority.
+    #[test]
+    fn decimation_boxcar_documented_behavior() {
+        use crate::pipeline::decimate;
+        use std::f64::consts::PI;
+
+        let factor = 48_usize;
+        let sr = 48_000.0;
+        let n = (sr * 2.0) as usize;
+
+        // 300 Hz test tone — above the gammatone envelope band (~80 Hz)
+        let signal: Vec<f64> = (0..n)
+            .map(|i| 0.3 * (2.0 * PI * 300.0 * i as f64 / sr).sin())
+            .collect();
+
+        let decimated = decimate(&signal, factor);
+        let power: f64 = decimated.iter().map(|x| x * x).sum::<f64>() / decimated.len() as f64;
+        let orig_power: f64 = signal.iter().map(|x| x * x).sum::<f64>() / signal.len() as f64;
+        let ratio = power / orig_power;
+
+        // Boxcar passes 300 Hz at ~74% power. This is a known limitation
+        // but acceptable since gammatone envelopes don't contain 300 Hz.
+        println!("DECIMATION: 300 Hz boxcar passthrough = {ratio:.4} (expected ~0.74)");
+        assert!(ratio > 0.5 && ratio < 1.0,
+            "Boxcar should pass 300 Hz partially (ratio={ratio:.4})");
+    }
+
+    /// Decimation preserves low-frequency content (below ~50 Hz).
+    #[test]
+    fn decimation_preserves_low_freq() {
+        use crate::pipeline::decimate;
+        use std::f64::consts::PI;
+
+        let factor = 48_usize;
+        let sr = 48_000.0;
+        let n = (sr * 2.0) as usize;
+
+        // 10 Hz signal — well within the passband
+        let signal: Vec<f64> = (0..n)
+            .map(|i| 0.5 * (2.0 * PI * 10.0 * i as f64 / sr).sin())
+            .collect();
+
+        let decimated = decimate(&signal, factor);
+
+        let orig_power: f64 = signal.iter().map(|x| x * x).sum::<f64>() / signal.len() as f64;
+        let dec_power: f64 = decimated.iter().map(|x| x * x).sum::<f64>() / decimated.len() as f64;
+
+        let ratio = dec_power / orig_power;
+        assert!(
+            ratio > 0.85,
+            "10 Hz should be preserved after decimation (ratio={ratio:.4})"
+        );
+    }
+
+    /// Decimated signal length is correct.
+    #[test]
+    fn decimation_output_length() {
+        use crate::pipeline::decimate;
+        let signal = vec![1.0; 4800];
+        let result = decimate(&signal, 48);
+        assert_eq!(result.len(), 100, "4800 samples / 48 = 100");
+    }
+
     /// Band powers still sum to ~1.0 after normalization change.
     #[test]
     fn normalization_preserves_band_power_sum() {

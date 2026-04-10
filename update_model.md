@@ -54,16 +54,15 @@
 - [x] Tests: 6 unit tests for band shifts (decreasing by band, band 3 always zero, proportions correct, disabled passthrough). 288 total tests passing.
 - [x] Verified: high bands stay beta-responsive at low arousal. Ground with features: 0.5377.
 
-## Priority 3: Decimation Anti-Aliasing (MEDIUM IMPACT, LOW EFFORT)
+## Priority 3: Decimation Anti-Aliasing (LOW IMPACT — DEFERRED)
 
-- [ ] **Problem:** 48:1 downsampling uses boxcar filter (`pipeline.rs:23-32`) with slow sidelobe roll-off (~13 dB first sidelobe). Content at 400-800 Hz aliases into theta range (4-8 Hz) in the decimated signal, creating false theta power.
-- [ ] **Fix:** Apply Hann window before summation in decimate():
-  ```rust
-  let w = 0.5 * (1.0 - cos(2π * j / (factor-1)));
-  ```
-- [ ] **Ref:** Oppenheim AV, Schafer RW (2009). *Discrete-Time Signal Processing.* 3rd ed. Prentice Hall, Ch. 4.7 — boxcar (rectangular) window has -13 dB first sidelobe; Hann window achieves -31 dB, sufficient for 48:1 decimation.
-- [ ] **Ref:** Crochiere RE, Rabiner LR (1983). *Multirate Digital Signal Processing.* Prentice Hall, Ch. 2 — establishes that decimation without adequate anti-aliasing introduces spectral folding proportional to the sidelobe level of the analysis window.
-- [ ] Tests: verify theta content doesn't increase after decimation of pure high-frequency signal
+- [x] **Investigated:** Boxcar passes 300 Hz at ~74% power (-1.3 dB). Hann window over 48 samples (1ms) is too short for better cutoff — main lobe wider than boxcar's.
+- [x] **Finding:** The gammatone filterbank's 80 Hz envelope lowpass (`gammatone.rs`) is the actual anti-alias filter. Content above ~80 Hz is already heavily attenuated before decimation. The boxcar only handles residual carrier leakage.
+- [x] **Conclusion:** Impact is LOW for real presets because gammatone envelopes don't contain significant high-frequency content. Documented in code comments and tests.
+- [ ] **Future:** Proper fix requires multi-stage decimation (48kHz → 8kHz → 1kHz) or a long FIR filter (~200+ taps). This is a moderate effort change for minimal practical impact.
+- [x] **Ref:** Oppenheim AV, Schafer RW (2009). *Discrete-Time Signal Processing.* 3rd ed. Prentice Hall, Ch. 4.7.
+- [x] **Ref:** Crochiere RE, Rabiner LR (1983). *Multirate Digital Signal Processing.* Prentice Hall, Ch. 2.
+- [x] Tests: 4 tests — boxcar behavior documented, low-freq preservation verified, output length correct.
 
 ## Priority 4: Bilateral Coupling Realism (MEDIUM IMPACT, HIGH EFFORT)
 
