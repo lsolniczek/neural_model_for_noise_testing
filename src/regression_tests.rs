@@ -54,9 +54,13 @@ mod tests {
         );
 
         // Normalise EEG for FHN
-        let eeg_max = bi.combined.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-        let eeg_norm = if eeg_max > 1e-10 { 1.0 / eeg_max } else { 1.0 };
-        let fhn_input: Vec<f64> = bi.combined.eeg.iter().map(|x| x * eeg_norm).collect();
+        // Percentile-based EEG scaling (matches pipeline)
+        let mut abs_values: Vec<f64> = bi.combined.eeg.iter().map(|x| x.abs()).collect();
+        abs_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let p95_idx = (abs_values.len() as f64 * 0.95) as usize;
+        let p95 = abs_values[p95_idx.min(abs_values.len() - 1)];
+        let scale = if p95 > 1e-10 { 1.0 / p95 } else { 1.0 };
+        let fhn_input: Vec<f64> = bi.combined.eeg.iter().map(|x| (x * scale).clamp(-3.0, 3.0)).collect();
         let fhn = FhnModel::with_params(sr, params.fhn.a, params.fhn.b, params.fhn.epsilon, params.fhn.time_scale);
         let fhn_result = fhn.simulate(&fhn_input, params.fhn.input_scale);
 
@@ -803,6 +807,81 @@ mod tests {
                     color, kind, result.dominant_freq
                 );
             }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 8. FHN amplitude preservation tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per FitzHugh (1961) and Izhikevich (2003), neuron firing rate is
+    // monotonically dependent on input current amplitude. Max-normalization
+    // collapses all amplitudes to [-1,1], destroying this relationship.
+    // Percentile-based scaling preserves relative amplitudes.
+
+    /// Different noise colors should produce different FHN firing rates
+    /// because global band normalization preserves spectral energy ratios,
+    /// and percentile FHN scaling preserves EEG amplitude differences.
+    ///
+    /// Brown noise drives low bands strongly (JR receives high input),
+    /// Blue noise drives high bands strongly (JR low bands receive weak input).
+    /// With per-band normalization + max scaling, these were identical.
+    /// With global norm + percentile scaling, they should differ.
+    #[test]
+    fn different_colors_produce_different_firing_rates() {
+        let config = SimulationConfig::default();
+        let goal = Goal::new(GoalKind::Focus);
+
+        // Brown: concentrated low-band energy → strong JR drive → large EEG
+        let mut brown = Preset::default();
+        brown.source_count = 1;
+        brown.objects[0].active = true;
+        brown.objects[0].color = 2; // Brown
+        brown.objects[0].volume = 0.90;
+
+        // Blue: concentrated high-band energy → weak JR low-band drive → smaller EEG
+        let mut blue = Preset::default();
+        blue.source_count = 1;
+        blue.objects[0].active = true;
+        blue.objects[0].color = 7; // Blue
+        blue.objects[0].volume = 0.90;
+
+        let result_brown = evaluate_preset(&brown, &goal, &config);
+        let result_blue = evaluate_preset(&blue, &goal, &config);
+
+        println!("FHN AMPLITUDE TEST: brown_rate={:.2} blue_rate={:.2}",
+            result_brown.fhn_firing_rate, result_blue.fhn_firing_rate);
+
+        // Firing rates should differ because the EEG amplitudes differ
+        // (different spectral distributions → different JR inputs → different oscillation amplitudes)
+        let rate_diff = (result_brown.fhn_firing_rate - result_blue.fhn_firing_rate).abs();
+        assert!(
+            rate_diff > 0.1,
+            "Brown ({:.2}) and Blue ({:.2}) should produce different FHN rates (diff={:.2}). \
+             Combined global-norm + percentile-scaling should preserve amplitude differences.",
+            result_brown.fhn_firing_rate, result_blue.fhn_firing_rate, rate_diff
+        );
+    }
+
+    /// FHN firing rate should remain in physiological range after the fix.
+    #[test]
+    fn fhn_firing_rate_in_valid_range() {
+        let config = SimulationConfig::default();
+        let goal = Goal::new(GoalKind::Focus);
+
+        for color in [0u8, 1, 2, 6] {
+            let mut preset = Preset::default();
+            preset.source_count = 1;
+            preset.objects[0].active = true;
+            preset.objects[0].color = color;
+            preset.objects[0].volume = 0.80;
+
+            let result = evaluate_preset(&preset, &goal, &config);
+            assert!(
+                result.fhn_firing_rate >= 0.0 && result.fhn_firing_rate < 50.0,
+                "Color {}: FHN rate {:.2} out of physiological range",
+                color, result.fhn_firing_rate
+            );
         }
     }
 

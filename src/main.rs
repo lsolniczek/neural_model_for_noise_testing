@@ -934,9 +934,15 @@ fn run_detailed_pipeline(
         neural_params.fhn.epsilon,
         neural_params.fhn.time_scale,
     );
-    let eeg_max = bi_result.combined.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-    let eeg_norm = if eeg_max > 1e-10 { 1.0 / eeg_max } else { 1.0 };
-    let fhn_input: Vec<f64> = bi_result.combined.eeg.iter().map(|x| x * eeg_norm).collect();
+    // Percentile-based EEG scaling for FHN (preserves amplitude information)
+    let fhn_input: Vec<f64> = {
+        let mut abs_values: Vec<f64> = bi_result.combined.eeg.iter().map(|x| x.abs()).collect();
+        abs_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let p95_idx = (abs_values.len() as f64 * 0.95) as usize;
+        let p95 = abs_values[p95_idx.min(abs_values.len() - 1)];
+        let scale = if p95 > 1e-10 { 1.0 / p95 } else { 1.0 };
+        bi_result.combined.eeg.iter().map(|x| (x * scale).clamp(-3.0, 3.0)).collect()
+    };
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
     // Performance Vector

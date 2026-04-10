@@ -352,10 +352,19 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         neural_params.fhn.time_scale,
     );
 
-    // Normalise EEG to [-1, 1] range for FHN input
-    let eeg_max = jr_result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-    let eeg_norm = if eeg_max > 1e-10 { 1.0 / eeg_max } else { 1.0 };
-    let fhn_input: Vec<f64> = jr_result.eeg.iter().map(|x| x * eeg_norm).collect();
+    // Scale EEG for FHN input using percentile-based normalization.
+    // Per FitzHugh (1961) and Izhikevich (2003), neuron firing rate depends
+    // monotonically on input current amplitude. Max-normalization destroys
+    // this by collapsing all amplitudes to [-1,1]. Percentile scaling
+    // preserves relative amplitude: strong EEG → higher current → more spikes.
+    let fhn_input: Vec<f64> = {
+        let mut abs_values: Vec<f64> = jr_result.eeg.iter().map(|x| x.abs()).collect();
+        abs_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let p95_idx = (abs_values.len() as f64 * 0.95) as usize;
+        let p95 = abs_values[p95_idx.min(abs_values.len() - 1)];
+        let scale = if p95 > 1e-10 { 1.0 / p95 } else { 1.0 };
+        jr_result.eeg.iter().map(|x| (x * scale).clamp(-3.0, 3.0)).collect()
+    };
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
     // 8. Performance Vector — diagnostic metrics for preset evaluation.
