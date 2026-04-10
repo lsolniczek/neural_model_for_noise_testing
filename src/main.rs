@@ -528,7 +528,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let result = evaluate_preset(&preset, &goal, &sim_config);
 
         // Re-run pipeline for detailed diagnosis (need FHN/JR results)
-        let detailed = run_detailed_pipeline(&preset, bt, duration);
+        let detailed = run_detailed_pipeline(&preset, bt, duration, assr, thalamic_gate);
         let brightness = detailed.brightness;
         let energy_fractions = detailed.energy_fractions;
 
@@ -757,6 +757,8 @@ fn run_detailed_pipeline(
     preset: &Preset,
     brain_type: BrainType,
     duration: f32,
+    assr_enabled: bool,
+    thalamic_gate_enabled: bool,
 ) -> DetailedResult {
     use crate::auditory::GammatoneFilterbank;
     use noise_generator_core::NoiseEngine;
@@ -870,9 +872,32 @@ fn run_detailed_pipeline(
     let log_high = 10000.0_f64.ln();
     let brightness = ((centroid.max(100.0).ln() - log_low) / (log_high - log_low)).clamp(0.0, 1.0);
 
+    // (Optional) ASSR: compute input_scale modifier from preset's modulation frequencies
+    let assr_scale_modifier = if assr_enabled {
+        let assr = crate::auditory::AssrTransfer::new();
+        assr.compute_input_scale_modifier(preset)
+    } else {
+        1.0
+    };
+
     // Bilateral cortical model
     let neural_params = brain_type.params();
-    let bilateral = brain_type.bilateral_params();
+    let mut bilateral = brain_type.bilateral_params();
+
+    // (Optional) Thalamic gate: shift JR operating point based on arousal
+    if thalamic_gate_enabled {
+        let arousal = crate::auditory::ThalamicGate::compute_arousal(preset, brightness);
+        let gate = crate::auditory::ThalamicGate::new(arousal);
+        let shift = gate.offset_shift();
+        if shift.abs() > 1e-10 {
+            for offset in bilateral.left.band_offsets.iter_mut() {
+                *offset += shift;
+            }
+            for offset in bilateral.right.band_offsets.iter_mut() {
+                *offset += shift;
+            }
+        }
+    }
 
     let fast_inhib = neural::FastInhibParams {
         g_fast_gain: neural_params.jansen_rit.g_fast_gain,
@@ -882,6 +907,8 @@ fn run_detailed_pipeline(
         c7: neural_params.jansen_rit.c7,
     };
 
+    let effective_input_scale = neural_params.jansen_rit.input_scale * assr_scale_modifier;
+
     let bi_result = neural::simulate_bilateral(
         &left_bands,
         &right_bands,
@@ -889,7 +916,7 @@ fn run_detailed_pipeline(
         &bands_r.energy_fractions,
         &bilateral,
         neural_params.jansen_rit.c,
-        neural_params.jansen_rit.input_scale,
+        effective_input_scale,
         sr,
         &fast_inhib,
         neural_params.jansen_rit.v0,

@@ -269,29 +269,43 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         trim(&right_bands[3]),
     ];
 
-    // 5d. (Optional) ASSR transfer function — attenuates modulation
-    //     frequencies that don't efficiently reach cortex via auditory pathway.
-    if config.assr_enabled {
+    // 5d. (Optional) ASSR: compute input_scale modifier from preset's modulation frequencies.
+    //     Modulation at 40 Hz reaches cortex strongly → full input_scale.
+    //     Modulation at 5 Hz barely reaches cortex → reduced input_scale.
+    let assr_scale_modifier = if config.assr_enabled {
         let assr = AssrTransfer::new();
-        assr.apply(&mut left_bands_dec, NEURAL_SR);
-        assr.apply(&mut right_bands_dec, NEURAL_SR);
-    }
+        assr.compute_input_scale_modifier(preset)
+    } else {
+        1.0
+    };
 
-    // 5e. (Optional) Thalamic gate — arousal-dependent filtering.
-    //     Dark, reverberant, gentle presets → low arousal → passes slow rhythms.
-    if config.thalamic_gate_enabled {
+    // 5e. (Optional) Thalamic gate — modulates cortical operating point.
+    //     Dark, reverberant, gentle presets → low arousal → lower input_offset
+    //     → JR model shifts toward bifurcation → theta/delta possible.
+    let thalamic_offset_shift = if config.thalamic_gate_enabled {
         let arousal = ThalamicGate::compute_arousal(preset, brightness);
         let gate = ThalamicGate::new(arousal);
-        gate.apply(&mut left_bands_dec, NEURAL_SR);
-        gate.apply(&mut right_bands_dec, NEURAL_SR);
-    }
+        gate.offset_shift()
+    } else {
+        0.0
+    };
 
     // 6. Bilateral cortical model: 2×4 parallel Jansen-Rit models
     //    Left hemisphere (fast, α/β) ← mainly right ear (contralateral)
     //    Right hemisphere (slow, δ/θ) ← mainly left ear (contralateral)
     //    Coupled through corpus callosum with ~10ms delay, ~10% strength.
     let neural_params = config.brain_type.params();
-    let bilateral = config.brain_type.bilateral_params();
+    let mut bilateral = config.brain_type.bilateral_params();
+    // Apply thalamic gate: shift all band_offsets toward bifurcation at low arousal.
+    // This modulates the JR operating point — lower offset → near bifurcation → theta/delta.
+    if thalamic_offset_shift.abs() > 1e-10 {
+        for offset in bilateral.left.band_offsets.iter_mut() {
+            *offset += thalamic_offset_shift;
+        }
+        for offset in bilateral.right.band_offsets.iter_mut() {
+            *offset += thalamic_offset_shift;
+        }
+    }
 
     let fast_inhib = FastInhibParams {
         g_fast_gain: neural_params.jansen_rit.g_fast_gain,
@@ -301,6 +315,8 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         c7: neural_params.jansen_rit.c7,
     };
 
+    let effective_input_scale = neural_params.jansen_rit.input_scale * assr_scale_modifier;
+
     let bi_result = simulate_bilateral(
         &left_bands_dec,
         &right_bands_dec,
@@ -308,7 +324,7 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         &bands_r.energy_fractions,
         &bilateral,
         neural_params.jansen_rit.c,
-        neural_params.jansen_rit.input_scale,
+        effective_input_scale,
         NEURAL_SR,
         &fast_inhib,
         neural_params.jansen_rit.v0,

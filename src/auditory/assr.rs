@@ -18,6 +18,8 @@
 
 use rustfft::{num_complex::Complex, FftPlanner};
 
+use crate::preset::Preset;
+
 /// ASSR transfer function that attenuates modulation frequencies based on
 /// their empirical cortical penetration strength.
 pub struct AssrTransfer {
@@ -142,11 +144,69 @@ impl AssrTransfer {
             }
         }
     }
+
+    /// Compute an input_scale modifier based on the preset's modulation frequencies.
+    ///
+    /// Scans all active NeuralLfo modulators, computes ASSR gain at each frequency,
+    /// weights by modulation depth, and returns a multiplier for input_scale.
+    ///
+    /// Returns a value in [min_gain, 1.0]:
+    ///   - Preset with 40 Hz NeuralLfo → modifier ~1.0 (full entrainment)
+    ///   - Preset with 5 Hz NeuralLfo → modifier ~0.15 (weak entrainment)
+    ///   - Preset with no NeuralLfo → modifier = 1.0 (no change)
+    ///
+    /// The modifier scales how strongly amplitude modulation drives the cortical
+    /// model, reflecting the auditory pathway's frequency-dependent transmission.
+    pub fn compute_input_scale_modifier(&self, preset: &Preset) -> f64 {
+        if !self.enabled {
+            return 1.0;
+        }
+
+        let mut weighted_gain_sum = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
+
+        for obj in &preset.objects {
+            if !obj.active {
+                continue;
+            }
+
+            // Check bass_mod — NeuralLfo (kind 4)
+            if obj.bass_mod.kind == 4 && obj.bass_mod.param_a > 0.5 {
+                let freq = obj.bass_mod.param_a as f64;
+                let depth = obj.bass_mod.param_b as f64; // modulation depth [0, 1]
+                let vol = obj.volume as f64;
+                let weight = depth * vol;
+                weighted_gain_sum += self.gain(freq) * weight;
+                weight_sum += weight;
+            }
+
+            // Check satellite_mod — NeuralLfo (kind 4)
+            if obj.satellite_mod.kind == 4 && obj.satellite_mod.param_a > 0.5 {
+                let freq = obj.satellite_mod.param_a as f64;
+                let depth = obj.satellite_mod.param_b as f64;
+                let vol = obj.volume as f64;
+                let weight = depth * vol;
+                weighted_gain_sum += self.gain(freq) * weight;
+                weight_sum += weight;
+            }
+        }
+
+        if weight_sum < 1e-10 {
+            return 1.0; // no NeuralLfo modulators → no ASSR effect
+        }
+
+        // Weighted average ASSR gain across all modulators
+        let avg_gain = weighted_gain_sum / weight_sum;
+
+        // Scale: avg_gain is already in [min_gain, 1.0] from self.gain()
+        avg_gain
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::Preset;
     use std::f64::consts::PI;
 
     const TOLERANCE: f64 = 0.05;
@@ -397,5 +457,115 @@ mod tests {
         let assr = AssrTransfer::new();
         let mut bands = [vec![], vec![], vec![], vec![]];
         assr.apply(&mut bands, 1000.0); // should not panic
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // input_scale modifier tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn modifier_40hz_neurallfo_near_unity() {
+        let assr = AssrTransfer::new();
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.80;
+        preset.objects[0].bass_mod.kind = 4; // NeuralLfo
+        preset.objects[0].bass_mod.param_a = 40.0;
+        preset.objects[0].bass_mod.param_b = 0.90;
+
+        let modifier = assr.compute_input_scale_modifier(&preset);
+        assert!(
+            modifier > 0.90,
+            "40 Hz NeuralLfo should give modifier ~1.0, got {modifier}"
+        );
+    }
+
+    #[test]
+    fn modifier_5hz_neurallfo_weak() {
+        let assr = AssrTransfer::new();
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.80;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 5.0;
+        preset.objects[0].bass_mod.param_b = 0.90;
+
+        let modifier = assr.compute_input_scale_modifier(&preset);
+        assert!(
+            modifier < 0.35,
+            "5 Hz NeuralLfo should give weak modifier (<0.35), got {modifier}"
+        );
+    }
+
+    #[test]
+    fn modifier_no_neurallfo_is_unity() {
+        let assr = AssrTransfer::new();
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].bass_mod.kind = 2; // Breathing, not NeuralLfo
+        preset.objects[0].satellite_mod.kind = 0; // Flat
+
+        let modifier = assr.compute_input_scale_modifier(&preset);
+        assert_eq!(modifier, 1.0, "No NeuralLfo should give modifier 1.0");
+    }
+
+    #[test]
+    fn modifier_mixed_freqs_weighted_average() {
+        let assr = AssrTransfer::new();
+        let mut preset = Preset::default();
+        // Obj 0: 40 Hz at high depth → high ASSR gain
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.80;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 40.0;
+        preset.objects[0].bass_mod.param_b = 0.90;
+        // Obj 1: 5 Hz at high depth → low ASSR gain
+        preset.objects[1].active = true;
+        preset.objects[1].volume = 0.80;
+        preset.objects[1].bass_mod.kind = 4;
+        preset.objects[1].bass_mod.param_a = 5.0;
+        preset.objects[1].bass_mod.param_b = 0.90;
+
+        let modifier = assr.compute_input_scale_modifier(&preset);
+        let pure_40 = assr.gain(40.0);
+        let pure_5 = assr.gain(5.0);
+        // Should be between the two extremes
+        assert!(
+            modifier > pure_5 && modifier < pure_40,
+            "Mixed preset: modifier {modifier} should be between {pure_5} and {pure_40}"
+        );
+    }
+
+    #[test]
+    fn modifier_disabled_is_unity() {
+        let assr = AssrTransfer::disabled();
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 5.0;
+        preset.objects[0].bass_mod.param_b = 0.90;
+
+        let modifier = assr.compute_input_scale_modifier(&preset);
+        assert_eq!(modifier, 1.0, "Disabled ASSR modifier should be 1.0");
+    }
+
+    #[test]
+    fn modifier_in_valid_range() {
+        let assr = AssrTransfer::new();
+        // Test with various frequencies
+        for freq in [1.0, 5.0, 10.0, 14.0, 25.0, 40.0] {
+            let mut preset = Preset::default();
+            preset.objects[0].active = true;
+            preset.objects[0].volume = 0.80;
+            preset.objects[0].bass_mod.kind = 4;
+            preset.objects[0].bass_mod.param_a = freq as f32;
+            preset.objects[0].bass_mod.param_b = 0.80;
+
+            let modifier = assr.compute_input_scale_modifier(&preset);
+            assert!(
+                modifier >= 0.0 && modifier <= 1.0,
+                "Modifier at {freq} Hz = {modifier}, should be in [0, 1]"
+            );
+        }
     }
 }
