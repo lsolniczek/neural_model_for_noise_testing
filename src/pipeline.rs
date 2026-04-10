@@ -204,7 +204,11 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let bands_l = filterbank_l.process_to_band_groups(&left);
     let bands_r = filterbank_r.process_to_band_groups(&right);
 
-    // 5. Normalise each ear's band signals to [0, 1] independently
+    // 5. Normalise each ear's band signals to [0, 1] using GLOBAL max.
+    //    Per Patterson et al. (1992) and Glasberg & Moore (2002), inter-band
+    //    energy ratios carry critical spectral information. Global normalization
+    //    preserves these ratios: Brown noise keeps dominant low-band energy,
+    //    White noise keeps flat distribution across bands.
     let mut left_bands: [Vec<f64>; 4] = [
         vec![0.0; bands_l.signals[0].len()],
         vec![0.0; bands_l.signals[1].len()],
@@ -218,13 +222,19 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         vec![0.0; bands_r.signals[3].len()],
     ];
 
-    for b in 0..4 {
-        let max_l = bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max);
-        let norm_l = if max_l > 1e-10 { 1.0 / max_l } else { 1.0 };
-        left_bands[b] = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
+    // Find global max across ALL bands for each ear
+    let global_max_l = (0..4)
+        .map(|b| bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max))
+        .fold(0.0_f64, f64::max);
+    let global_max_r = (0..4)
+        .map(|b| bands_r.signals[b].iter().cloned().fold(0.0_f64, f64::max))
+        .fold(0.0_f64, f64::max);
 
-        let max_r = bands_r.signals[b].iter().cloned().fold(0.0_f64, f64::max);
-        let norm_r = if max_r > 1e-10 { 1.0 / max_r } else { 1.0 };
+    let norm_l = if global_max_l > 1e-10 { 1.0 / global_max_l } else { 1.0 };
+    let norm_r = if global_max_r > 1e-10 { 1.0 / global_max_r } else { 1.0 };
+
+    for b in 0..4 {
+        left_bands[b] = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
         right_bands[b] = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
     }
 

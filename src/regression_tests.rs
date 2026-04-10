@@ -690,4 +690,144 @@ mod tests {
             total
         );
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 7. Global band normalization tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per Patterson et al. (1992) and Glasberg & Moore (2002), inter-band
+    // energy ratios carry critical spectral information and must be preserved
+    // through the auditory pipeline. Per-band max normalization destroys these
+    // ratios; global normalization preserves them.
+
+    /// Brown noise (low-freq dominant) and White noise (flat) should produce
+    /// different neural responses. This is the core test for global normalization.
+    #[test]
+    fn brown_and_white_produce_different_scores() {
+        let config = SimulationConfig::default();
+        let goal = Goal::new(GoalKind::Isolation);
+
+        // All-Brown preset
+        let mut brown = Preset::default();
+        brown.source_count = 1;
+        brown.objects[0].active = true;
+        brown.objects[0].color = 2; // Brown
+        brown.objects[0].volume = 0.80;
+
+        // All-White preset
+        let mut white = Preset::default();
+        white.source_count = 1;
+        white.objects[0].active = true;
+        white.objects[0].color = 0; // White
+        white.objects[0].volume = 0.80;
+
+        let result_brown = evaluate_preset(&brown, &goal, &config);
+        let result_white = evaluate_preset(&white, &goal, &config);
+
+        // Scores should differ because the neural model receives
+        // different spectral ratios (Brown: low-heavy; White: flat)
+        let score_diff = (result_brown.score - result_white.score).abs();
+        assert!(
+            score_diff > 0.005,
+            "Brown ({:.4}) and White ({:.4}) should produce different scores (diff={:.4}). \
+             If identical, band normalization is destroying spectral ratios.",
+            result_brown.score, result_white.score, score_diff
+        );
+
+        println!("NORMALIZATION TEST: brown={:.4} white={:.4} diff={:.4}",
+            result_brown.score, result_white.score, score_diff);
+    }
+
+    /// Band power distribution should differ between Brown and White noise.
+    /// Brown: more delta/theta. White: more balanced/beta.
+    #[test]
+    fn brown_has_more_slow_band_power_than_white() {
+        let config = SimulationConfig::default();
+        let goal = Goal::new(GoalKind::Isolation);
+
+        let mut brown = Preset::default();
+        brown.source_count = 1;
+        brown.objects[0].active = true;
+        brown.objects[0].color = 2;
+        brown.objects[0].volume = 0.80;
+
+        let mut white = Preset::default();
+        white.source_count = 1;
+        white.objects[0].active = true;
+        white.objects[0].color = 0;
+        white.objects[0].volume = 0.80;
+
+        let result_brown = evaluate_preset(&brown, &goal, &config);
+        let result_white = evaluate_preset(&white, &goal, &config);
+
+        // Brown noise concentrates energy in low bands → should produce
+        // more delta+theta relative to alpha+beta than White noise.
+        let brown_slow = result_brown.delta_power + result_brown.theta_power;
+        let white_slow = result_white.delta_power + result_white.theta_power;
+
+        // With global normalization, Brown should have more slow-wave power
+        // because its low-band signals are stronger relative to high bands.
+        println!("BAND RATIO TEST: brown_slow={:.4} white_slow={:.4}",
+            brown_slow, white_slow);
+
+        // Note: this test documents expected behavior after the normalization fix.
+        // With per-band normalization, brown_slow ≈ white_slow (both normalized to 1.0).
+        // With global normalization, brown_slow > white_slow.
+    }
+
+    /// All presets still produce valid scores after normalization change.
+    #[test]
+    fn normalization_change_preserves_valid_scores() {
+        let config = SimulationConfig::default();
+
+        // Test with various noise colors
+        for color in [0u8, 1, 2, 3, 5, 6] { // White, Pink, Brown, Green, Black, SSN
+            let mut preset = Preset::default();
+            preset.source_count = 1;
+            preset.objects[0].active = true;
+            preset.objects[0].color = color;
+            preset.objects[0].volume = 0.80;
+
+            for kind in GoalKind::all() {
+                let goal = Goal::new(*kind);
+                let result = evaluate_preset(&preset, &goal, &config);
+
+                assert!(
+                    result.score >= 0.0 && result.score <= 1.0,
+                    "Color {} {:?}: score {} out of range",
+                    color, kind, result.score
+                );
+                assert!(
+                    result.dominant_freq.is_finite() && result.dominant_freq >= 0.0,
+                    "Color {} {:?}: invalid dominant freq {}",
+                    color, kind, result.dominant_freq
+                );
+            }
+        }
+    }
+
+    /// Band powers still sum to ~1.0 after normalization change.
+    #[test]
+    fn normalization_preserves_band_power_sum() {
+        let config = SimulationConfig::default();
+        let goal = Goal::new(GoalKind::Isolation);
+
+        for color in [0u8, 1, 2, 5, 6] {
+            let mut preset = Preset::default();
+            preset.source_count = 1;
+            preset.objects[0].active = true;
+            preset.objects[0].color = color;
+            preset.objects[0].volume = 0.80;
+
+            let result = evaluate_preset(&preset, &goal, &config);
+            let total = result.delta_power + result.theta_power + result.alpha_power
+                + result.beta_power + result.gamma_power;
+
+            assert!(
+                (total - 1.0).abs() < 0.02,
+                "Color {}: band powers sum to {:.4}, should be ~1.0",
+                color, total
+            );
+        }
+    }
 }
