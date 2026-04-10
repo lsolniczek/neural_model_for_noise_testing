@@ -146,7 +146,7 @@ pub fn test_frequency_tracking() {
     for &freq in &test_freqs {
         let input = sine_signal(freq, duration, 1.0);
 
-        let jr = JansenRitModel::with_params(
+        let mut jr = JansenRitModel::with_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0,
         );
         let result = jr.simulate(&input);
@@ -212,7 +212,7 @@ pub fn test_bifurcation() {
     let mut results: Vec<(f64, f64, bool)> = Vec::new();
 
     for &offset in &offsets {
-        let jr = JansenRitModel::with_params(
+        let mut jr = JansenRitModel::with_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, 0.0,
         );
         let result = jr.simulate(&constant_input);
@@ -290,7 +290,7 @@ pub fn test_impulse_response() {
         input[i] = 1.0; // Max impulse
     }
 
-    let jr = JansenRitModel::with_params(
+    let mut jr = JansenRitModel::with_params(
         SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 200.0,
     );
     let result = jr.simulate(&input);
@@ -412,7 +412,7 @@ pub fn test_stochastic_resonance() {
     let noise = white_noise(duration, 12345);
 
     // Phase A: signal alone
-    let jr_a = JansenRitModel::with_params(
+    let mut jr_a = JansenRitModel::with_params(
         SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, scale,
     );
     let result_a = jr_a.simulate(&weak_sine);
@@ -449,7 +449,7 @@ pub fn test_stochastic_resonance() {
             })
             .collect();
 
-        let jr_b = JansenRitModel::with_params(
+        let mut jr_b = JansenRitModel::with_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, scale,
         );
         let result_b = jr_b.simulate(&combined);
@@ -715,7 +715,7 @@ pub fn test_bilateral_frequency_tracking() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0,
         );
 
         let lf = result.left_dominant_freq;
@@ -753,7 +753,7 @@ pub fn test_bilateral_frequency_tracking() {
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
         &fi,
-        neural.jansen_rit.v0,
+        neural.jansen_rit.v0, 0.0, 0.0, 0.0,
     );
 
     // Note: asymmetry won't be exactly 0 because L/R hemispheres have different
@@ -807,7 +807,7 @@ pub fn test_bilateral_bifurcation() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0,
         );
 
         let mean = result.combined.eeg.iter().sum::<f64>() / n as f64;
@@ -889,7 +889,7 @@ pub fn test_bilateral_impulse() {
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
         &fi,
-        neural.jansen_rit.v0,
+        neural.jansen_rit.v0, 0.0, 0.0, 0.0,
     );
 
     // Analyse response in 0.5s windows
@@ -1020,7 +1020,7 @@ pub fn test_bilateral_stochastic_resonance() {
                 neural.jansen_rit.input_scale,
                 SAMPLE_RATE,
                 &fi_inner,
-                neural.jansen_rit.v0,
+                neural.jansen_rit.v0, 0.0, 0.0, 0.0,
             );
 
             let bp_norm = result.combined.band_powers.normalized();
@@ -1106,7 +1106,7 @@ pub fn test_bilateral_spectral_discrimination() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0,
         );
 
         let result_b = simulate_bilateral(
@@ -1117,7 +1117,7 @@ pub fn test_bilateral_spectral_discrimination() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0,
         );
 
         let bpw = result_w.combined.band_powers.normalized();
@@ -1188,7 +1188,7 @@ pub fn test_wendling_legacy_recovery() {
     let input = sine_signal(10.0, duration, 1.0);
 
     // Classic JR95 via with_params (no fast inhibition)
-    let jr95 = JansenRitModel::with_params(
+    let mut jr95 = JansenRitModel::with_params(
         SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0,
     );
     let result_jr95 = jr95.simulate(&input);
@@ -1201,7 +1201,7 @@ pub fn test_wendling_legacy_recovery() {
         c6: 13.5,
         c7: 108.0,
     };
-    let wendling_off = JansenRitModel::with_wendling_params(
+    let mut wendling_off = JansenRitModel::with_wendling_params(
         SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_zero,
         0.20, 6.0, 0.62,
     );
@@ -1262,7 +1262,7 @@ pub fn test_wendling_gamma_gate() {
             c6: 13.5,
             c7: 108.0,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
             0.20, 6.0, 0.62,
         );
@@ -1321,7 +1321,7 @@ pub fn test_wendling_gamma_gate() {
             c6: 13.5,
             c7: 108.0,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
             0.20, 6.0, 0.62,
         );
@@ -1366,7 +1366,7 @@ pub fn test_wendling_gamma_gate() {
     let mut jr95_differs = false;
 
     for &b in &b_values {
-        let jr = JansenRitModel::with_params(
+        let mut jr = JansenRitModel::with_params(
             SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0,
         );
         let result = jr.simulate(&input_40hz);
@@ -1384,11 +1384,11 @@ pub fn test_wendling_gamma_gate() {
         g_fast_gain: 10.0, g_fast_rate: 500.0,
         c5: 40.5, c6: 13.5, c7: 108.0,
     };
-    let jr_w_b5 = JansenRitModel::with_wendling_params(
+    let mut jr_w_b5 = JansenRitModel::with_wendling_params(
         SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_on,
         0.20, 6.0, 0.62,
     );
-    let jr95_b5 = JansenRitModel::with_params(
+    let mut jr95_b5 = JansenRitModel::with_params(
         SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0,
     );
     let result_w = jr_w_b5.simulate(&input_40hz);
@@ -1427,7 +1427,7 @@ pub fn test_wendling_gamma_gate() {
             c7: 108.0,
         };
         // offset=120 — right at the Hopf bifurcation
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 120.0, 100.0, &fi,
             0.20, 6.0, 0.62,
         );
@@ -1516,7 +1516,7 @@ pub fn test_wendling_adhd_sensitivity() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0,
         );
 
         let bp = result.combined.band_powers.normalized();
@@ -1607,7 +1607,7 @@ pub fn test_wendling_numerical_stress() {
         let input: Vec<f64> = noise_input.iter().map(|&x| (x * gain).clamp(0.0, 1.0)).collect();
 
         let fi_off = FastInhibParams::default();
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_off,
             0.20, 6.0, 0.62,
         );
@@ -1650,7 +1650,7 @@ pub fn test_wendling_numerical_stress() {
             c6: 13.5,
             c7: 108.0,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
             0.20, 6.0, 0.62,
         );
@@ -1736,7 +1736,7 @@ pub fn test_wendling_numerical_stress() {
             c6,
             c7,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
             0.20, 6.0, 0.62,
         );

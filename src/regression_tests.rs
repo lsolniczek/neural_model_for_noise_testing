@@ -50,7 +50,7 @@ mod tests {
         let bi = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, sr, &fi,
-            params.jansen_rit.v0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0,
         );
 
         // Normalise EEG for FHN
@@ -443,7 +443,7 @@ mod tests {
             c6: params.jansen_rit.c6,
             c7: params.jansen_rit.c7,
         };
-        let model = JansenRitModel::with_wendling_params(
+        let mut model = JansenRitModel::with_wendling_params(
             sr, 3.25, 22.0, 100.0, 50.0, params.jansen_rit.c,
             220.0, params.jansen_rit.input_scale, &fi,
             params.jansen_rit.slow_inhib_ratio, params.jansen_rit.v0, 0.62,
@@ -1213,6 +1213,175 @@ mod tests {
              ASSR is likely reducing DC drive (operating point), not just AC (modulation).",
             result_gate.score, result_both.score, ratio
         );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 14. Habituation tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per Moran et al. (2011) and Rowe et al. (2012): sustained neural
+    // activity depresses excitatory connectivity, reducing response amplitude.
+
+    /// With habituation enabled, longer simulation should show reduced
+    /// EEG amplitude compared to the beginning.
+    #[test]
+    fn habituation_reduces_late_response() {
+        use crate::neural::jansen_rit::JansenRitModel;
+
+        let sr = 1000.0;
+        let n = (sr * 30.0) as usize; // 30 seconds
+        let input = vec![0.5; n]; // constant input
+
+        let mut jr = JansenRitModel::new(sr);
+        jr.habituation_rate = 0.0003;
+        jr.habituation_recovery = 0.0001;
+
+        let result = jr.simulate(&input);
+
+        // Compare EEG variance in first 5s vs last 5s
+        let first_5s = (sr * 2.0) as usize..(sr * 7.0) as usize; // skip 2s warmup
+        let last_5s = (sr * 25.0) as usize..(sr * 30.0) as usize;
+
+        let var_first: f64 = {
+            let slice = &result.eeg[first_5s];
+            let mean = slice.iter().sum::<f64>() / slice.len() as f64;
+            slice.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / slice.len() as f64
+        };
+        let var_last: f64 = {
+            let slice = &result.eeg[last_5s];
+            let mean = slice.iter().sum::<f64>() / slice.len() as f64;
+            slice.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / slice.len() as f64
+        };
+
+        println!("HABITUATION TEST: var_first={var_first:.6} var_last={var_last:.6} ratio={:.3}",
+            var_last / var_first.max(1e-20));
+
+        assert!(
+            var_last < var_first * 0.95,
+            "Habituation should reduce late EEG variance: first={var_first:.6} last={var_last:.6}"
+        );
+    }
+
+    /// With habituation_rate = 0 (default), behavior is unchanged.
+    #[test]
+    fn no_habituation_when_rate_zero() {
+        use crate::neural::jansen_rit::JansenRitModel;
+
+        let sr = 1000.0;
+        let n = (sr * 5.0) as usize;
+        let input = vec![0.5; n];
+
+        let mut jr_no_hab = JansenRitModel::new(sr);
+        let mut jr_zero_hab = JansenRitModel::new(sr);
+        jr_zero_hab.habituation_rate = 0.0;
+        jr_zero_hab.habituation_recovery = 0.0;
+
+        let result1 = jr_no_hab.simulate(&input);
+        let result2 = jr_zero_hab.simulate(&input);
+
+        // Should be identical
+        for i in 0..n {
+            assert!(
+                (result1.eeg[i] - result2.eeg[i]).abs() < 1e-10,
+                "Zero habituation should match default at sample {i}"
+            );
+        }
+    }
+
+    /// Habituation produces valid (finite) output.
+    #[test]
+    fn habituation_output_finite() {
+        use crate::neural::jansen_rit::JansenRitModel;
+
+        let sr = 1000.0;
+        let n = (sr * 10.0) as usize;
+        let input = vec![0.5; n];
+
+        let mut jr = JansenRitModel::new(sr);
+        jr.habituation_rate = 0.001; // aggressive
+        jr.habituation_recovery = 0.0001;
+
+        let result = jr.simulate(&input);
+        for (i, &v) in result.eeg.iter().enumerate() {
+            assert!(v.is_finite(), "EEG sample {i} is not finite: {v}");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 15. Stochastic JR tests — Per Ableidinger et al. (2017)
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn stochastic_jr_broadens_spectrum() {
+        use crate::neural::jansen_rit::JansenRitModel;
+        let sr = 1000.0;
+        let n = (sr * 10.0) as usize;
+        let input = vec![0.5; n];
+
+        // Use Normal brain-type parameters where alpha IS the attractor
+        // (input_offset=175, input_scale=60 → p = 175 + 0.5*60 = 205)
+        let mut jr_det = JansenRitModel::with_params(sr, 3.25, 22.0, 100.0, 50.0, 135.0, 175.0, 60.0);
+        let result_det = jr_det.simulate(&input);
+
+        let mut jr_stoch = JansenRitModel::with_params(sr, 3.25, 22.0, 100.0, 50.0, 135.0, 175.0, 60.0);
+        jr_stoch.stochastic_sigma = 20.0;
+        let result_stoch = jr_stoch.simulate(&input);
+
+        let det_norm = result_det.band_powers.normalized();
+        let stoch_norm = result_stoch.band_powers.normalized();
+
+        // Stochastic should broaden the spectrum — energy distributes more
+        // evenly across bands instead of concentrating in alpha+theta.
+        // Measure: standard deviation of band powers (lower = more even).
+        let det_bands = [det_norm.delta, det_norm.theta, det_norm.alpha, det_norm.beta];
+        let stoch_bands = [stoch_norm.delta, stoch_norm.theta, stoch_norm.alpha, stoch_norm.beta];
+
+        let mean_det = det_bands.iter().sum::<f64>() / 4.0;
+        let mean_stoch = stoch_bands.iter().sum::<f64>() / 4.0;
+        let std_det = (det_bands.iter().map(|x| (x - mean_det).powi(2)).sum::<f64>() / 4.0).sqrt();
+        let std_stoch = (stoch_bands.iter().map(|x| (x - mean_stoch).powi(2)).sum::<f64>() / 4.0).sqrt();
+
+        println!("STOCHASTIC: det_std={std_det:.3} stoch_std={std_stoch:.3}");
+        println!("  det: d={:.3} t={:.3} a={:.3} b={:.3}", det_norm.delta, det_norm.theta, det_norm.alpha, det_norm.beta);
+        println!("  stoch: d={:.3} t={:.3} a={:.3} b={:.3}", stoch_norm.delta, stoch_norm.theta, stoch_norm.alpha, stoch_norm.beta);
+
+        // Stochastic should have MORE EVEN distribution (lower std)
+        assert!(std_stoch < std_det,
+            "Stochastic should broaden spectrum: det_std={std_det:.3} > stoch_std={std_stoch:.3}");
+    }
+
+    #[test]
+    fn stochastic_sigma_zero_is_deterministic() {
+        use crate::neural::jansen_rit::JansenRitModel;
+        let sr = 1000.0;
+        let n = (sr * 3.0) as usize;
+        let input = vec![0.5; n];
+
+        let mut jr_det = JansenRitModel::new(sr);
+        let mut jr_zero = JansenRitModel::new(sr);
+        jr_zero.stochastic_sigma = 0.0;
+
+        let r1 = jr_det.simulate(&input);
+        let r2 = jr_zero.simulate(&input);
+        for i in 0..n {
+            assert!((r1.eeg[i] - r2.eeg[i]).abs() < 1e-10,
+                "sigma=0 should match deterministic at sample {i}");
+        }
+    }
+
+    #[test]
+    fn stochastic_jr_output_finite() {
+        use crate::neural::jansen_rit::JansenRitModel;
+        let sr = 1000.0;
+        let n = (sr * 5.0) as usize;
+        let input = vec![0.5; n];
+
+        let mut jr = JansenRitModel::new(sr);
+        jr.stochastic_sigma = 30.0;
+        let result = jr.simulate(&input);
+        for (i, &v) in result.eeg.iter().enumerate() {
+            assert!(v.is_finite(), "Stochastic EEG sample {i} is not finite: {v}");
+        }
     }
 
     /// Band powers still sum to ~1.0 after normalization change.

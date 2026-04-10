@@ -64,6 +64,12 @@ pub struct SimulationConfig {
     pub assr_enabled: bool,
     /// Enable thalamic gate (arousal-dependent filtering).
     pub thalamic_gate_enabled: bool,
+    /// Enable neural habituation (synaptic depression over time).
+    /// Per Moran et al. (2011): sustained activity depresses connectivity.
+    pub habituation_enabled: bool,
+    /// Enable stochastic JR (noise breaks alpha attractor).
+    /// Per Ableidinger et al. (2017): enables theta/delta production.
+    pub stochastic_jr_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -74,6 +80,8 @@ impl Default for SimulationConfig {
             brain_type: BrainType::Normal,
             assr_enabled: false,
             thalamic_gate_enabled: false,
+            habituation_enabled: false,
+            stochastic_jr_enabled: false,
         }
     }
 }
@@ -361,6 +369,9 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         NEURAL_SR,
         &fast_inhib,
         neural_params.jansen_rit.v0,
+        if config.habituation_enabled { 0.0003 } else { 0.0 },
+        if config.habituation_enabled { 0.0001 } else { 0.0 },
+        if config.stochastic_jr_enabled { 15.0 } else { 0.0 },
     );
 
     let jr_result = &bi_result.combined;

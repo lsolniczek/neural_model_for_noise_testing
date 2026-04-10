@@ -144,6 +144,23 @@ pub struct JansenRitModel {
     v0: f64,
     // Per-model sigmoid steepness (allows per-band frequency tuning)
     sigmoid_r: f64,
+    /// Habituation: synaptic depression rate.
+    /// Per Moran et al. (2011) and Rowe et al. (2012): sustained neural
+    /// activity depresses excitatory connectivity over time.
+    /// 0.0 = no habituation (default, backward compatible).
+    /// Typical: 0.0001-0.001 (depression per sample per unit activity).
+    pub habituation_rate: f64,
+    /// Habituation: recovery rate (how fast C recovers toward baseline).
+    /// Typical: 0.00005-0.0005 (recovery per sample).
+    pub habituation_recovery: f64,
+    /// Stochastic noise amplitude (σ) added to the input drive.
+    /// Per Ableidinger et al. (2017): relaxing the mean-field assumption
+    /// by adding noise enables the JR model to produce theta waves —
+    /// breaking the deterministic alpha attractor.
+    /// 0.0 = deterministic (default). Typical: 5.0-30.0 pulses/s.
+    pub stochastic_sigma: f64,
+    /// RNG state for stochastic noise (simple xorshift64 for reproducibility).
+    stochastic_rng: u64,
 }
 
 impl JansenRitModel {
@@ -170,6 +187,10 @@ impl JansenRitModel {
             c7: 0.0,
             v0: V0,
             sigmoid_r: R,
+            habituation_rate: 0.0,
+            habituation_recovery: 0.0,
+            stochastic_sigma: 0.0,
+            stochastic_rng: 42,
         }
     }
 
@@ -204,6 +225,10 @@ impl JansenRitModel {
             c7: 0.0,
             v0: V0,
             sigmoid_r: R,
+            habituation_rate: 0.0,
+            habituation_recovery: 0.0,
+            stochastic_sigma: 0.0,
+            stochastic_rng: 42,
         }
     }
 
@@ -242,6 +267,10 @@ impl JansenRitModel {
             c7: fast_inhib.c7,
             v0,
             sigmoid_r,
+            habituation_rate: 0.0,
+            habituation_recovery: 0.0,
+            stochastic_sigma: 0.0,
+            stochastic_rng: 42,
         }
     }
 
@@ -263,13 +292,13 @@ impl JansenRitModel {
     /// Compute derivatives for the 8-state Wendling system.
     ///
     /// When g_fast_gain = 0, derivatives[3] and [7] are zero, reducing to JR95.
+    /// `c_scale` is the habituation depression factor in [0, 1] (1.0 = no depression).
     #[inline]
-    fn derivatives(&self, y: &[f64; 8], p: f64) -> [f64; 8] {
-        // v_pyr = y1 - y2 - y3 (Wendling EEG: excitatory - slow_inhib - fast_inhib)
+    fn derivatives_with_habituation(&self, y: &[f64; 8], p: f64, c_scale: f64) -> [f64; 8] {
         let v_pyr = y[1] - y[2] - y[3];
         let sig_vpyr = self.sigmoid(v_pyr);
-        let sig_c1_y0 = self.sigmoid(self.c1 * y[0]);
-        let sig_c3_y0 = self.sigmoid(self.c3 * y[0]);
+        let sig_c1_y0 = self.sigmoid(self.c1 * c_scale * y[0]);
+        let sig_c3_y0 = self.sigmoid(self.c3 * c_scale * y[0]);
 
         let a = self.a_gain;
         let b = self.b_gain;
@@ -306,16 +335,47 @@ impl JansenRitModel {
             // dy4/dt = A·a·S(v_pyr) - 2a·y4 - a²·y0
             a * ar * sig_vpyr - 2.0 * ar * y[4] - ar * ar * y[0],
             // dy5/dt = A·a·(p + C2·S(C1·y0)) - 2a·y5 - a²·y1
-            a * ar * (p + self.c2 * sig_c1_y0) - 2.0 * ar * y[5] - ar * ar * y[1],
+            a * ar * (p + self.c2 * c_scale * sig_c1_y0) - 2.0 * ar * y[5] - ar * ar * y[1],
             // dy6/dt = B·b·C4·S(C3·y0) - 2b·y6 - b²·y2
-            b * br * self.c4 * sig_c3_y0 - 2.0 * br * y[6] - br * br * y[2],
+            b * br * self.c4 * c_scale * sig_c3_y0 - 2.0 * br * y[6] - br * br * y[2],
             // dy7/dt = G·g·(C5·S(vpyr) - C6·S(C3·y0)) - 2g·y7 - g²·y3
             g * gr * fast_drive - 2.0 * gr * y[7] - gr * gr * y[3],
         ]
     }
 
+    /// Backward-compatible derivatives (no habituation).
+    #[inline]
+    fn derivatives(&self, y: &[f64; 8], p: f64) -> [f64; 8] {
+        self.derivatives_with_habituation(y, p, 1.0)
+    }
+
+    /// Generate approximate Gaussian noise using Box-Muller from xorshift64.
+    /// Per Ableidinger et al. (2017): stochastic input breaks the mean-field
+    /// assumption, enabling theta/delta oscillations.
+    #[inline]
+    fn next_gaussian_noise(&mut self) -> f64 {
+        if self.stochastic_sigma == 0.0 {
+            return 0.0;
+        }
+        // xorshift64 for uniform [0, 1)
+        self.stochastic_rng ^= self.stochastic_rng << 13;
+        self.stochastic_rng ^= self.stochastic_rng >> 7;
+        self.stochastic_rng ^= self.stochastic_rng << 17;
+        let u1 = (self.stochastic_rng as f64) / (u64::MAX as f64);
+
+        self.stochastic_rng ^= self.stochastic_rng << 13;
+        self.stochastic_rng ^= self.stochastic_rng >> 7;
+        self.stochastic_rng ^= self.stochastic_rng << 17;
+        let u2 = (self.stochastic_rng as f64) / (u64::MAX as f64);
+
+        // Box-Muller transform
+        let u1_safe = u1.max(1e-15);
+        let gauss = (-2.0 * u1_safe.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        gauss * self.stochastic_sigma
+    }
+
     /// Simulate and also record the fast inhibitory state y[3] for diagnostics.
-    pub fn simulate_with_fast_inhib_trace(&self, input: &[f64]) -> (JansenRitResult, Vec<f64>) {
+    pub fn simulate_with_fast_inhib_trace(&mut self, input: &[f64]) -> (JansenRitResult, Vec<f64>) {
         let n = input.len();
         let mut eeg = vec![0.0_f64; n];
         let mut y3_trace = vec![0.0_f64; n];
@@ -343,23 +403,40 @@ impl JansenRitModel {
             }
         }
 
+        let mut depression = 0.0_f64;
+        let hab_rate = self.habituation_rate;
+        let hab_recovery = self.habituation_recovery;
+
         for i in 0..n {
-            let p = self.input_offset + input[i] * self.input_scale;
+            // Stochastic JR per Ableidinger et al. (2017): add noise to input drive.
+            let noise = self.next_gaussian_noise();
+            let p = self.input_offset + input[i] * self.input_scale + noise;
+            let c_scale = 1.0 - depression;
+
             for _ in 0..sub_steps {
-                let k1 = self.derivatives(&y, p);
+                let k1 = self.derivatives_with_habituation(&y, p, c_scale);
                 let mut y_tmp = [0.0; 8];
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
-                let k2 = self.derivatives(&y_tmp, p);
+                let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
-                let k3 = self.derivatives(&y_tmp, p);
+                let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
                 for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
-                let k4 = self.derivatives(&y_tmp, p);
+                let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
                 }
             }
             eeg[i] = y[1] - y[2] - y[3];
             y3_trace[i] = y[3];
+
+            // Update habituation: depression increases with pyramidal activity,
+            // recovers toward 0. Activity measure: |S(v_pyr)| / V_MAX ∈ [0, 1].
+            if hab_rate > 0.0 {
+                let v_pyr = y[1] - y[2] - y[3];
+                let activity = self.sigmoid(v_pyr) / V_MAX; // normalized [0, 1]
+                depression += hab_rate * activity - hab_recovery * depression;
+                depression = depression.clamp(0.0, 0.8); // max 80% depression
+            }
         }
 
         let eeg_mean = eeg.iter().sum::<f64>() / n as f64;
@@ -373,7 +450,7 @@ impl JansenRitModel {
     /// Simulate the Wendling/JR model with external input.
     ///
     /// `input` is the aggregated auditory nerve signal at each time step.
-    pub fn simulate(&self, input: &[f64]) -> JansenRitResult {
+    pub fn simulate(&mut self, input: &[f64]) -> JansenRitResult {
         let n = input.len();
         let mut eeg = vec![0.0_f64; n];
         let has_fast_inhib = self.g_fast_gain > 0.0;
@@ -407,27 +484,39 @@ impl JansenRitModel {
             }
         }
 
+        let mut depression = 0.0_f64;
+        let hab_rate = self.habituation_rate;
+        let hab_recovery = self.habituation_recovery;
+
         for i in 0..n {
-            let p = self.input_offset + input[i] * self.input_scale;
+            let noise = self.next_gaussian_noise();
+            let p = self.input_offset + input[i] * self.input_scale + noise;
+            let c_scale = 1.0 - depression;
 
             for _ in 0..sub_steps {
-                let k1 = self.derivatives(&y, p);
+                let k1 = self.derivatives_with_habituation(&y, p, c_scale);
                 let mut y_tmp = [0.0; 8];
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
-                let k2 = self.derivatives(&y_tmp, p);
+                let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
-                let k3 = self.derivatives(&y_tmp, p);
+                let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
                 for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
-                let k4 = self.derivatives(&y_tmp, p);
+                let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
                 }
             }
 
-            // EEG = excitatory - slow_inhib - fast_inhib (Wendling 2002)
             eeg[i] = y[1] - y[2] - y[3];
             if has_fast_inhib {
                 y3_trace[i] = y[3];
+            }
+
+            if hab_rate > 0.0 {
+                let v_pyr = y[1] - y[2] - y[3];
+                let activity = self.sigmoid(v_pyr) / V_MAX;
+                depression += hab_rate * activity - hab_recovery * depression;
+                depression = depression.clamp(0.0, 0.8);
             }
         }
 
@@ -710,6 +799,9 @@ pub fn simulate_bilateral(
     sample_rate: f64,
     fast_inhib: &FastInhibParams,
     v0: f64,
+    habituation_rate: f64,
+    habituation_recovery: f64,
+    stochastic_sigma: f64,
 ) -> BilateralResult {
     let n = left_bands[0].len();
     let contra = bilateral.contralateral_ratio;
@@ -746,11 +838,11 @@ pub fn simulate_bilateral(
     // This gives us the base per-hemisphere EEG and y[3] traces.
     let (rh_eeg, rh_y3) = run_hemisphere_tonotopic(
         &rh_bands, &rh_energy, &bilateral.right, c, input_scale, sample_rate, fast_inhib,
-        v0,
+        v0, habituation_rate, habituation_recovery, stochastic_sigma,
     );
     let (lh_eeg, lh_y3) = run_hemisphere_tonotopic(
         &lh_bands, &lh_energy, &bilateral.left, c, input_scale, sample_rate, fast_inhib,
-        v0,
+        v0, habituation_rate, habituation_recovery, stochastic_sigma,
     );
 
     // Phase 2: Apply callosal coupling (INHIBITORY).
@@ -797,7 +889,7 @@ pub fn simulate_bilateral(
     };
 
     // Analyse each hemisphere and the combined signal
-    let analysis = JansenRitModel::new(sample_rate);
+    let mut analysis = JansenRitModel::new(sample_rate);
 
     let combined_mean = combined_eeg.iter().sum::<f64>() / n as f64;
     let combined_det: Vec<f64> = combined_eeg.iter().map(|x| x - combined_mean).collect();
@@ -849,6 +941,9 @@ fn run_hemisphere_tonotopic(
     sample_rate: f64,
     fast_inhib: &FastInhibParams,
     v0: f64,
+    habituation_rate: f64,
+    habituation_recovery: f64,
+    stochastic_sigma: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let n = bands[0].len();
     let mut eeg = vec![0.0_f64; n];
@@ -885,6 +980,9 @@ fn run_hemisphere_tonotopic(
                     c, params.band_offsets[b], input_scale, &band_fi,
                     band_slow_inhib, band_v0, band_r,
                 );
+                jr.habituation_rate = habituation_rate;
+                jr.habituation_recovery = habituation_recovery;
+                jr.stochastic_sigma = stochastic_sigma;
                 let c1c2_scale = params.band_c1c2_scale[b];
                 if (c1c2_scale - 1.0).abs() > 1e-6 {
                     jr.scale_c1c2(c1c2_scale);
@@ -939,7 +1037,7 @@ mod tests {
 
     #[test]
     fn sigmoid_at_v0_equals_half_max() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let s = jr.sigmoid(V0);
         // S(V0) = V_MAX / (1 + exp(0)) = V_MAX / 2 = 2.5
         assert!(
@@ -950,7 +1048,7 @@ mod tests {
 
     #[test]
     fn sigmoid_saturates_to_vmax() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         // Large positive → V_MAX
         let s_high = jr.sigmoid(100.0);
         assert!(
@@ -967,7 +1065,7 @@ mod tests {
 
     #[test]
     fn sigmoid_is_monotonically_increasing() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let mut prev = jr.sigmoid(-10.0);
         for i in -99..100 {
             let v = i as f64 * 0.1;
@@ -983,7 +1081,7 @@ mod tests {
 
     #[test]
     fn derivatives_at_zero_state_with_zero_input() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let y = [0.0; 8];
         let dy = jr.derivatives(&y, 0.0);
 
@@ -1013,7 +1111,7 @@ mod tests {
 
     #[test]
     fn derivatives_external_input_only_affects_dy5() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let y = [0.0; 8];
         let dy_p0 = jr.derivatives(&y, 0.0);
         let dy_p100 = jr.derivatives(&y, 100.0);
@@ -1042,7 +1140,7 @@ mod tests {
 
     #[test]
     fn jr95_mode_y3_stays_zero() {
-        let jr = JansenRitModel::new(SR); // g_fast_gain = 0
+        let mut jr = JansenRitModel::new(SR); // g_fast_gain = 0
         let input = vec![0.5; 3000]; // 3 seconds
         let result = jr.simulate(&input);
 
@@ -1056,7 +1154,7 @@ mod tests {
 
     #[test]
     fn jr95_derivatives_y3_y7_are_zero() {
-        let jr = JansenRitModel::new(SR); // g_fast_gain = 0
+        let mut jr = JansenRitModel::new(SR); // g_fast_gain = 0
         // State with non-zero y0..y2, but y3=y7=0
         let y = [1.0, 2.0, 1.5, 0.0, 0.1, 0.2, -0.1, 0.0];
         let dy = jr.derivatives(&y, 200.0);
@@ -1080,7 +1178,7 @@ mod tests {
             c6: 13.5,
             c7: 108.0,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0,
             &fi, 0.20, V0, R,
         );
@@ -1104,7 +1202,7 @@ mod tests {
 
     #[test]
     fn output_length_matches_input() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let n = 2000;
         let input = vec![0.5; n];
         let result = jr.simulate(&input);
@@ -1114,7 +1212,7 @@ mod tests {
 
     #[test]
     fn output_is_finite() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let input = vec![0.5; 5000];
         let result = jr.simulate(&input);
 
@@ -1129,7 +1227,7 @@ mod tests {
 
     #[test]
     fn deterministic_output() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let input = vec![0.5; 3000];
         let r1 = jr.simulate(&input);
         let r2 = jr.simulate(&input);
@@ -1146,7 +1244,7 @@ mod tests {
 
     #[test]
     fn band_powers_non_negative() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let input = vec![0.5; 5000];
         let result = jr.simulate(&input);
 
@@ -1159,7 +1257,7 @@ mod tests {
 
     #[test]
     fn normalized_band_powers_sum_to_one() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let input = vec![0.5; 5000];
         let result = jr.simulate(&input);
         let norm = result.band_powers.normalized();
@@ -1176,7 +1274,7 @@ mod tests {
         // Default JR95 with p in oscillatory range should produce a dominant
         // frequency somewhere in 0.5–50 Hz.  The exact frequency depends on
         // the tuned C3/C4 (0.20 vs literature 0.25) and input offset.
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let input = vec![0.5; 8000]; // 8 seconds for good freq resolution
         let result = jr.simulate(&input);
 
@@ -1197,7 +1295,7 @@ mod tests {
 
     #[test]
     fn dominant_freq_in_physiological_range() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let input = vec![0.5; 5000];
         let result = jr.simulate(&input);
 
@@ -1214,7 +1312,7 @@ mod tests {
 
     #[test]
     fn band_powers_zero_for_short_signal() {
-        let jr = JansenRitModel::new(SR);
+        let mut jr = JansenRitModel::new(SR);
         let signal: Vec<f64> = vec![];
         let bp = jr.compute_band_powers(&signal);
         assert_eq!(bp.total(), 0.0);
@@ -1253,7 +1351,7 @@ mod tests {
             c6: 13.5,
             c7: 108.0,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0,
             &fi, 0.20, V0, R,
         );
@@ -1279,7 +1377,7 @@ mod tests {
     #[test]
     fn with_params_connectivity_scaling() {
         let c = 100.0;
-        let jr = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, c, 200.0, 100.0);
+        let mut jr = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, c, 200.0, 100.0);
         assert_eq!(jr.c1, c);
         assert_eq!(jr.c2, 0.8 * c);
         assert_eq!(jr.c3, 0.20 * c);
@@ -1289,7 +1387,7 @@ mod tests {
     #[test]
     fn with_wendling_slow_inhib_ratio_applied() {
         let fi = FastInhibParams::default();
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SR, A, B, A_RATE, B_RATE, 135.0, 200.0, 100.0,
             &fi, 0.15, V0, R, // slow_inhib_ratio = 0.15
         );
@@ -1334,7 +1432,7 @@ mod tests {
             c6: params.jansen_rit.c6,
             c7: params.jansen_rit.c7,
         };
-        let jr = JansenRitModel::with_wendling_params(
+        let mut jr = JansenRitModel::with_wendling_params(
             SR,
             params.jansen_rit.a_gain,
             params.jansen_rit.b_gain,
@@ -1375,8 +1473,8 @@ mod tests {
 
     #[test]
     fn different_input_offset_different_dynamics() {
-        let jr_low = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, C, 120.0, 100.0);
-        let jr_high = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, C, 280.0, 100.0);
+        let mut jr_low = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, C, 120.0, 100.0);
+        let mut jr_high = JansenRitModel::with_params(SR, A, B, A_RATE, B_RATE, C, 280.0, 100.0);
 
         let input = vec![0.5; 5000];
         let r_low = jr_low.simulate(&input);

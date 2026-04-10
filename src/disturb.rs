@@ -425,7 +425,7 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         neural_params.jansen_rit.input_scale,
         NEURAL_SR,
         &fast_inhib,
-        neural_params.jansen_rit.v0,
+        neural_params.jansen_rit.v0, 0.0, 0.0, 0.0,
     );
 
     // Phase 4: Sliding-window analysis

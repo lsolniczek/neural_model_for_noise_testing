@@ -932,6 +932,9 @@ fn run_detailed_pipeline(
         sr,
         &fast_inhib,
         neural_params.jansen_rit.v0,
+        0.0, // habituation: disabled in detailed pipeline (short evaluation)
+        0.0,
+        0.0, // stochastic: disabled
     );
 
     // FHN driven by combined bilateral EEG
