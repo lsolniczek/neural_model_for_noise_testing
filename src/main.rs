@@ -95,6 +95,14 @@ enum Commands {
         /// Audio duration per evaluation (seconds)
         #[arg(long, default_value_t = 10.0)]
         duration: f32,
+
+        /// Enable ASSR transfer function (auditory pathway filtering)
+        #[arg(long, default_value_t = false)]
+        assr: bool,
+
+        /// Enable thalamic gate (arousal-dependent filtering)
+        #[arg(long, default_value_t = false)]
+        thalamic_gate: bool,
     },
 
     /// Run disturbance resilience test — inject acoustic spike and measure recovery.
@@ -177,8 +185,10 @@ fn main() {
             goal,
             brain_type,
             duration,
+            assr,
+            thalamic_gate,
         } => {
-            run_evaluate(&preset, &goal, &brain_type, duration);
+            run_evaluate(&preset, &goal, &brain_type, duration, assr, thalamic_gate);
         }
         Commands::Disturb {
             preset,
@@ -439,7 +449,7 @@ fn run_optimize(
 
 // ── Evaluate ─────────────────────────────────────────────────────────────────
 
-fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32) {
+fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32, assr: bool, thalamic_gate: bool) {
     // Load preset from JSON
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
         eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
@@ -501,7 +511,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
 
     if is_matrix {
         // ── Matrix mode ─────────────────────────────────────────────────────
-        print_comparison_matrix(&preset, &goals, &brain_types, duration);
+        print_comparison_matrix(&preset, &goals, &brain_types, duration, assr, thalamic_gate);
     } else {
         // ── Single evaluation with full diagnosis ───────────────────────────
         let bt = brain_types[0];
@@ -511,6 +521,8 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let sim_config = SimulationConfig {
             duration_secs: duration,
             brain_type: bt,
+            assr_enabled: assr,
+            thalamic_gate_enabled: thalamic_gate,
             ..SimulationConfig::default()
         };
         let result = evaluate_preset(&preset, &goal, &sim_config);
@@ -924,6 +936,8 @@ fn print_comparison_matrix(
     goals: &[GoalKind],
     brain_types: &[BrainType],
     duration: f32,
+    assr: bool,
+    thalamic_gate: bool,
 ) {
     // Header
     print!("  {:<12}", "Brain Type");
@@ -946,6 +960,8 @@ fn print_comparison_matrix(
             let sim_config = SimulationConfig {
                 duration_secs: duration,
                 brain_type: *bt,
+                assr_enabled: assr,
+                thalamic_gate_enabled: thalamic_gate,
                 ..SimulationConfig::default()
             };
 

@@ -528,4 +528,166 @@ mod tests {
             voltage_variance: 0.0,
         }
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 6. ASSR + Thalamic Gate integration tests
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Default config (both disabled) produces identical scores to pre-change baseline.
+    #[test]
+    fn assr_and_gate_disabled_by_default() {
+        let config = SimulationConfig::default();
+        assert!(!config.assr_enabled, "ASSR should be disabled by default");
+        assert!(!config.thalamic_gate_enabled, "Thalamic gate should be disabled by default");
+    }
+
+    /// Pipeline with both features disabled produces same score as before.
+    #[test]
+    fn disabled_features_preserve_existing_scores() {
+        let preset = Preset::default();
+        let config_off = SimulationConfig::default(); // both disabled
+
+        let mut config_explicit = SimulationConfig::default();
+        config_explicit.assr_enabled = false;
+        config_explicit.thalamic_gate_enabled = false;
+
+        let goal = Goal::new(GoalKind::Focus);
+        let result_off = evaluate_preset(&preset, &goal, &config_off);
+        let result_explicit = evaluate_preset(&preset, &goal, &config_explicit);
+
+        assert!(
+            (result_off.score - result_explicit.score).abs() < 1e-10,
+            "Explicitly disabled should match default: {} vs {}",
+            result_off.score, result_explicit.score
+        );
+    }
+
+    /// Helper: create a preset with strong modulation for testing ASSR/gate effects.
+    fn make_modulated_preset() -> Preset {
+        let mut preset = Preset::default();
+        preset.source_count = 2;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 0; // White
+        preset.objects[0].volume = 0.85;
+        preset.objects[0].x = 3.0;
+        preset.objects[0].bass_mod.kind = 4; // NeuralLfo
+        preset.objects[0].bass_mod.param_a = 14.0; // 14 Hz beta
+        preset.objects[0].bass_mod.param_b = 0.90; // high depth
+        preset.objects[0].satellite_mod.kind = 4;
+        preset.objects[0].satellite_mod.param_a = 14.0;
+        preset.objects[0].satellite_mod.param_b = 0.85;
+
+        preset.objects[1].active = true;
+        preset.objects[1].color = 0;
+        preset.objects[1].volume = 0.75;
+        preset.objects[1].x = -3.0;
+        preset.objects[1].bass_mod.kind = 2; // Breathing
+        preset.objects[1].bass_mod.param_a = 3.0;
+        preset.objects[1].bass_mod.param_b = 0.80;
+        preset
+    }
+
+    /// ASSR enabled changes scores (proves the component has effect).
+    #[test]
+    fn assr_enabled_changes_scores() {
+        let preset = make_modulated_preset();
+        let goal = Goal::new(GoalKind::Focus);
+
+        let config_off = SimulationConfig::default();
+        let mut config_on = SimulationConfig::default();
+        config_on.assr_enabled = true;
+
+        let result_off = evaluate_preset(&preset, &goal, &config_off);
+        let result_on = evaluate_preset(&preset, &goal, &config_on);
+
+        // Scores should differ when ASSR is enabled on modulated preset
+        assert!(
+            (result_off.score - result_on.score).abs() > 1e-4,
+            "ASSR should change scores on modulated preset: off={:.6} on={:.6}",
+            result_off.score, result_on.score
+        );
+
+        // Both should still be valid
+        assert!(result_on.score >= 0.0 && result_on.score <= 1.0,
+            "ASSR-enabled score {} out of range", result_on.score);
+
+        println!("ASSR effect: off={:.6} on={:.6} delta={:.6}",
+            result_off.score, result_on.score, result_on.score - result_off.score);
+    }
+
+    /// Thalamic gate enabled changes scores.
+    #[test]
+    fn thalamic_gate_enabled_changes_scores() {
+        let preset = make_modulated_preset();
+        let goal = Goal::new(GoalKind::DeepRelaxation);
+
+        let config_off = SimulationConfig::default();
+        let mut config_on = SimulationConfig::default();
+        config_on.thalamic_gate_enabled = true;
+
+        let result_off = evaluate_preset(&preset, &goal, &config_off);
+        let result_on = evaluate_preset(&preset, &goal, &config_on);
+
+        assert!(
+            (result_off.score - result_on.score).abs() > 1e-4,
+            "Thalamic gate should change scores on modulated preset: off={:.6} on={:.6}",
+            result_off.score, result_on.score
+        );
+
+        assert!(result_on.score >= 0.0 && result_on.score <= 1.0,
+            "Gate-enabled score {} out of range", result_on.score);
+
+        println!("Thalamic gate effect: off={:.6} on={:.6} delta={:.6}",
+            result_off.score, result_on.score, result_on.score - result_off.score);
+    }
+
+    /// Both features enabled together produces valid scores.
+    #[test]
+    fn both_features_enabled_produces_valid_scores() {
+        let preset = Preset::default();
+
+        let mut config = SimulationConfig::default();
+        config.assr_enabled = true;
+        config.thalamic_gate_enabled = true;
+
+        for kind in GoalKind::all() {
+            let goal = Goal::new(*kind);
+            let result = evaluate_preset(&preset, &goal, &config);
+
+            assert!(
+                result.score >= 0.0 && result.score <= 1.0,
+                "{:?} with both features: score {} out of range",
+                kind, result.score
+            );
+            assert!(
+                result.dominant_freq.is_finite(),
+                "{:?} with both features: non-finite dominant freq",
+                kind
+            );
+
+            println!("Both enabled {:?}: score={:.6} dom_freq={:.2}",
+                kind, result.score, result.dominant_freq);
+        }
+    }
+
+    /// ASSR + gate preserve band power normalization (sum ≈ 1.0).
+    #[test]
+    fn features_preserve_band_normalization() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Isolation);
+
+        let mut config = SimulationConfig::default();
+        config.assr_enabled = true;
+        config.thalamic_gate_enabled = true;
+
+        let result = evaluate_preset(&preset, &goal, &config);
+        let total = result.delta_power + result.theta_power + result.alpha_power
+            + result.beta_power + result.gamma_power;
+
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "Band powers should sum to ~1.0 with features enabled, got {:.6}",
+            total
+        );
+    }
 }

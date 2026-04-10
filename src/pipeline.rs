@@ -3,7 +3,7 @@
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 
-use crate::auditory::GammatoneFilterbank;
+use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate};
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
 use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
@@ -51,6 +51,10 @@ pub struct SimulationConfig {
     pub warmup_discard_secs: f32,
     /// Brain type profile for neural models.
     pub brain_type: BrainType,
+    /// Enable ASSR transfer function between cochlea and cortex.
+    pub assr_enabled: bool,
+    /// Enable thalamic gate (arousal-dependent filtering).
+    pub thalamic_gate_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -59,6 +63,8 @@ impl Default for SimulationConfig {
             duration_secs: 12.0,
             warmup_discard_secs: 2.0,
             brain_type: BrainType::Normal,
+            assr_enabled: false,
+            thalamic_gate_enabled: false,
         }
     }
 }
@@ -250,18 +256,35 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         dec[skip..].to_vec()
     };
 
-    let left_bands_dec: [Vec<f64>; 4] = [
+    let mut left_bands_dec: [Vec<f64>; 4] = [
         trim(&left_bands[0]),
         trim(&left_bands[1]),
         trim(&left_bands[2]),
         trim(&left_bands[3]),
     ];
-    let right_bands_dec: [Vec<f64>; 4] = [
+    let mut right_bands_dec: [Vec<f64>; 4] = [
         trim(&right_bands[0]),
         trim(&right_bands[1]),
         trim(&right_bands[2]),
         trim(&right_bands[3]),
     ];
+
+    // 5d. (Optional) ASSR transfer function — attenuates modulation
+    //     frequencies that don't efficiently reach cortex via auditory pathway.
+    if config.assr_enabled {
+        let assr = AssrTransfer::new();
+        assr.apply(&mut left_bands_dec, NEURAL_SR);
+        assr.apply(&mut right_bands_dec, NEURAL_SR);
+    }
+
+    // 5e. (Optional) Thalamic gate — arousal-dependent filtering.
+    //     Dark, reverberant, gentle presets → low arousal → passes slow rhythms.
+    if config.thalamic_gate_enabled {
+        let arousal = ThalamicGate::compute_arousal(preset, brightness);
+        let gate = ThalamicGate::new(arousal);
+        gate.apply(&mut left_bands_dec, NEURAL_SR);
+        gate.apply(&mut right_bands_dec, NEURAL_SR);
+    }
 
     // 6. Bilateral cortical model: 2×4 parallel Jansen-Rit models
     //    Left hemisphere (fast, α/β) ← mainly right ear (contralateral)
