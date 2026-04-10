@@ -1032,6 +1032,59 @@ mod tests {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 11. Brightness removal tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per Zwicker & Fastl (1999), brightness is a perceptual construct
+    // derived from the same cochlear excitation that feeds the neural model.
+    // With global band normalization, the neural model now sees spectral
+    // differences directly — brightness is redundant.
+
+    /// Score should be fully determined by neural model (band powers + FHN),
+    /// not by a separate brightness modifier.
+    #[test]
+    fn score_independent_of_brightness_parameter() {
+        let goal = Goal::new(GoalKind::Focus);
+
+        // Create a JR result and FHN result
+        let bp = BandPowers {
+            delta: 0.05, theta: 0.15, alpha: 0.35, beta: 0.35, gamma: 0.10,
+        };
+        let jr = make_jr_result_from_powers(bp);
+        let fhn = make_perfect_fhn(GoalKind::Focus);
+
+        // Score should be the same regardless of brightness parameter
+        let score_dark = goal.evaluate_with_brightness(&fhn, &jr, 0.0);
+        let score_bright = goal.evaluate_with_brightness(&fhn, &jr, 1.0);
+
+        assert!(
+            (score_dark - score_bright).abs() < 0.001,
+            "Score should not depend on brightness: dark={score_dark:.4} bright={score_bright:.4}. \
+             Brightness modifier should be removed (Zwicker & Fastl 1999)."
+        );
+    }
+
+    /// All goal scores should remain in [0, 1] after brightness removal.
+    #[test]
+    fn scores_valid_without_brightness() {
+        for kind in GoalKind::all() {
+            let goal = Goal::new(*kind);
+            let bp = BandPowers {
+                delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2,
+            };
+            let jr = make_jr_result_from_powers(bp);
+            let fhn = make_perfect_fhn(*kind);
+
+            let score = goal.evaluate_with_brightness(&fhn, &jr, 0.5);
+            assert!(
+                score >= 0.0 && score <= 1.0,
+                "{:?}: score {score} out of range after brightness removal",
+                kind
+            );
+        }
+    }
+
     /// Band powers still sum to ~1.0 after normalization change.
     #[test]
     fn normalization_preserves_band_power_sum() {

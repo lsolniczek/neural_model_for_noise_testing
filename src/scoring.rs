@@ -308,12 +308,14 @@ impl Goal {
 
         let neural_score = self.band_weight * band_score + self.fhn_targets.weight * fhn_score;
 
-        let brightness_mod = self.brightness_modifier(brightness);
+        // Brightness modifier removed per Zwicker & Fastl (1999): brightness is
+        // a perceptual construct derived from the same cochlear excitation that
+        // feeds the neural model. With global band normalization (Priority 1a),
+        // the neural model now captures spectral differences directly — adding
+        // brightness as a separate term double-counts spectral information.
+        let _ = brightness; // parameter kept for API compatibility
 
-        // Neural model does 90% of the work; brightness is a psychoacoustic complement.
-        let total = 0.9 * neural_score + 0.1 * brightness_mod;
-
-        total.clamp(0.0, 1.0)
+        neural_score.clamp(0.0, 1.0)
     }
 
     /// Compute a [0, 1] score modifier based on spectral brightness for this goal.

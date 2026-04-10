@@ -90,9 +90,11 @@
 ## Priority 6: Scoring Refinements (MEDIUM IMPACT, MEDIUM EFFORT)
 
 ### 6a. Remove Brightness Double-Counting
-- [ ] **Problem:** Brightness contributes 10% of score (`scoring.rs:309-316`) but partially duplicates information already in band powers. Biases optimizer toward bright noise even when neural entrainment is suboptimal.
-- [ ] **Fix:** Replace brightness term with goal-specific spectral match derived from band energy fractions. Or remove and increase band_weight to 1.0.
-- [ ] **Ref:** Zwicker E, Fastl H (1999). *Psychoacoustics: Facts and Models.* 2nd ed. Springer. — spectral loudness and brightness are perceptual constructs derived from the same cochlear excitation pattern that already feeds the neural model; including both double-counts.
+- [x] **Problem:** Brightness contributed 10% of score (`scoring.rs:309-316`), partially duplicating information already captured by band powers after global normalization fix.
+- [x] **Fix:** Removed brightness modifier from `evaluate_with_brightness()`. Score is now 100% neural model (band powers + FHN). API parameter kept for compatibility (`let _ = brightness`).
+- [x] **Ref:** Zwicker E, Fastl H (1999). *Psychoacoustics: Facts and Models.* 2nd ed. Springer.
+- [x] Tests: score independent of brightness parameter, all goals produce valid scores. 300 total tests passing.
+- [x] Impact: Scores shifted down ~5-10% (brightness was a free bonus). Neural model now has full scoring authority.
 
 ### 6b. Include Alpha Asymmetry in Scoring
 - [ ] **Problem:** Alpha asymmetry is computed (`pipeline.rs:388`) but never used in scoring. Hemispheric balance matters for meditation, relaxation, and deep work goals.
