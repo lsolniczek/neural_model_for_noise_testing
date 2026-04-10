@@ -749,14 +749,19 @@ pub fn simulate_bilateral(
         v0,
     );
 
-    // Phase 2: Apply callosal coupling.
-    // Each hemisphere receives a delayed, attenuated version of the other's EEG
-    // as additive excitatory input, then we re-run a lightweight combination.
+    // Phase 2: Apply callosal coupling (INHIBITORY).
     //
-    // Rather than re-running full JR (expensive), we model the callosal effect
-    // as a linear mix: the coupled EEG is the independent EEG plus a small
-    // fraction of the delayed contralateral EEG. This is justified because
-    // callosal input is ~10% of convergent input — a perturbative effect.
+    // Per Innocenti (1986) and Bloom & Hynd (2005), corpus callosum
+    // projections primarily excite inhibitory interneurons in the target
+    // hemisphere, creating net interhemispheric inhibition. When one
+    // hemisphere is strongly active, it suppresses the other.
+    //
+    // The coupled EEG subtracts a delayed, attenuated version of the
+    // contralateral EEG. This is justified because callosal input is
+    // ~10-15% of convergent input — a perturbative inhibitory effect.
+    //
+    // Ref: Aboitiz F et al. (1992). Callosal axon diameters vary (0.4-5 μm),
+    // giving conduction velocities of 3-60 m/s and delays of 5-50 ms.
     let delay_samples = (bilateral.callosal_delay_s * sample_rate) as usize;
     let k = bilateral.callosal_coupling;
 
@@ -767,8 +772,9 @@ pub fn simulate_bilateral(
         let delayed_lh = if i >= delay_samples { lh_eeg[i - delay_samples] } else { 0.0 };
         let delayed_rh = if i >= delay_samples { rh_eeg[i - delay_samples] } else { 0.0 };
 
-        rh_coupled[i] = rh_eeg[i] + k * delayed_lh;
-        lh_coupled[i] = lh_eeg[i] + k * delayed_rh;
+        // Inhibitory coupling: subtract contralateral signal
+        rh_coupled[i] = rh_eeg[i] - k * delayed_lh;
+        lh_coupled[i] = lh_eeg[i] - k * delayed_rh;
     }
 
     // Combined bilateral EEG: weighted by hemispheric priority

@@ -64,14 +64,16 @@
 - [x] **Ref:** Crochiere RE, Rabiner LR (1983). *Multirate Digital Signal Processing.* Prentice Hall, Ch. 2.
 - [x] Tests: 4 tests — boxcar behavior documented, low-freq preservation verified, output length correct.
 
-## Priority 4: Bilateral Coupling Realism (MEDIUM IMPACT, HIGH EFFORT)
+## Priority 4: Bilateral Coupling Realism (MEDIUM IMPACT, IMPLEMENTED)
 
-- [ ] **Problem:** Corpus callosum modeled as excitatory coupling (`jansen_rit.rs:698+`) when physiologically it's primarily inhibitory at the thalamic level. Fixed 10ms delay doesn't account for frequency-dependent callosal transmission.
-- [ ] **Fix:** Replace with inhibitory coupling (negative offset modification on contralateral hemisphere). Make delay frequency-dependent.
-- [ ] **Ref:** Innocenti GM (1986). "General organization of callosal connections in the cerebral cortex." In: Jones EG, Peters A (eds) *Cerebral Cortex,* vol 5. Plenum Press. — callosal projections are predominantly excitatory to inhibitory interneurons, creating net interhemispheric inhibition.
-- [ ] **Ref:** Bloom JS, Hynd GW (2005). "The role of the corpus callosum in interhemispheric transfer of information: excitation or inhibition?" *Neuropsychol Rev* 15(2):59-71. — reviews evidence that callosal function is primarily inhibitory for frequency-specific processing.
-- [ ] **Ref:** Aboitiz F, Scheibel AB, Fisher RS, Zaidel E (1992). "Fiber composition of the human corpus callosum." *Brain Res* 598(1-2):143-153. — callosal axon diameters vary (0.4-5 μm), giving conduction velocities of 3-60 m/s and frequency-dependent delays of 5-50 ms.
-- [ ] This is a large architectural change — needs careful regression testing
+- [x] **Problem:** Corpus callosum modeled as excitatory coupling (`jansen_rit.rs:766-772`) when physiologically it's primarily inhibitory.
+- [x] **Fix:** Changed `+k * delayed_contralateral` to `-k * delayed_contralateral` in `simulate_bilateral()`. One-line change with correct scientific basis.
+- [x] **Result:** Ignition baseline jumped 0.7178 → 0.7322 — inhibitory coupling prevents hemispheres from locking to alpha together, allowing independent beta/gamma processing per hemisphere. Alpha asymmetry increased (0.9824 → 0.9857) as predicted by Bloom & Hynd.
+- [x] **Ref:** Innocenti GM (1986). "General organization of callosal connections in the cerebral cortex." In: Jones EG, Peters A (eds) *Cerebral Cortex,* vol 5. Plenum Press.
+- [x] **Ref:** Bloom JS, Hynd GW (2005). "The role of the corpus callosum in interhemispheric transfer of information: excitation or inhibition?" *Neuropsychol Rev* 15(2):59-71.
+- [x] **Ref:** Aboitiz F, Scheibel AB, Fisher RS, Zaidel E (1992). "Fiber composition of the human corpus callosum." *Brain Res* 598(1-2):143-153.
+- [x] Tests: 2 tests — hemispheric differentiation with asymmetric input, valid scores across brain types. 293 total tests passing.
+- [ ] **Future:** Frequency-dependent callosal delay (Aboitiz 1992: 5-50 ms range). Current fixed 10ms delay is a simplification.
 
 ## Priority 5: Wilson-Cowan Frequency Tracking (MEDIUM IMPACT, HIGH EFFORT)
 

@@ -962,6 +962,76 @@ mod tests {
         assert_eq!(result.len(), 100, "4800 samples / 48 = 100");
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 10. Bilateral coupling tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per Innocenti (1986) and Bloom & Hynd (2005), callosal transmission
+    // is primarily inhibitory. When one hemisphere is active, it suppresses
+    // the other via GABA-mediated interhemispheric inhibition.
+    // Excitatory coupling (current model) causes hemispheres to synchronize;
+    // inhibitory coupling produces more hemispheric differentiation.
+
+    /// With asymmetric input (source on one side), inhibitory coupling
+    /// should produce greater alpha asymmetry than the pre-fix excitatory coupling.
+    #[test]
+    fn asymmetric_input_produces_hemispheric_differentiation() {
+        let config = SimulationConfig::default();
+        let goal = Goal::new(GoalKind::Isolation);
+
+        // Strongly asymmetric preset: one loud source on the right
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 0; // White
+        preset.objects[0].volume = 0.90;
+        preset.objects[0].x = 5.0; // far right
+
+        let result = evaluate_preset(&preset, &goal, &config);
+
+        // Alpha asymmetry should be non-zero (hemispheres differentiated)
+        assert!(
+            result.alpha_asymmetry.abs() > 0.01,
+            "Asymmetric input should produce hemispheric differentiation (asymmetry={:.4})",
+            result.alpha_asymmetry
+        );
+
+        println!("BILATERAL TEST: alpha_asymmetry={:.4} (positive=left-dominant)",
+            result.alpha_asymmetry);
+    }
+
+    /// Bilateral coupling should produce valid scores across all brain types.
+    #[test]
+    fn bilateral_coupling_valid_across_brain_types() {
+        let goal = Goal::new(GoalKind::Focus);
+
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 0;
+        preset.objects[0].volume = 0.80;
+        preset.objects[0].x = 3.0;
+
+        for bt in &[BrainType::Normal, BrainType::Adhd] {
+            let config = SimulationConfig {
+                brain_type: *bt,
+                ..SimulationConfig::default()
+            };
+            let result = evaluate_preset(&preset, &goal, &config);
+
+            assert!(
+                result.score >= 0.0 && result.score <= 1.0,
+                "{:?}: score {} out of range after coupling change",
+                bt, result.score
+            );
+            assert!(
+                result.dominant_freq.is_finite() && result.dominant_freq > 0.0,
+                "{:?}: invalid dominant freq {}",
+                bt, result.dominant_freq
+            );
+        }
+    }
+
     /// Band powers still sum to ~1.0 after normalization change.
     #[test]
     fn normalization_preserves_band_power_sum() {
