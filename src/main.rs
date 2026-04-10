@@ -532,7 +532,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let brightness = detailed.brightness;
         let energy_fractions = detailed.energy_fractions;
 
-        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, detailed.bilateral.alpha_asymmetry, Some(detailed.performance));
+        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, detailed.bilateral.alpha_asymmetry, detailed.performance.plv, Some(detailed.performance));
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
@@ -876,13 +876,25 @@ fn run_detailed_pipeline(
     let log_high = 10000.0_f64.ln();
     let brightness = ((centroid.max(100.0).ln() - log_low) / (log_high - log_low)).clamp(0.0, 1.0);
 
-    // (Optional) ASSR: compute input_scale modifier from preset's modulation frequencies
-    let assr_scale_modifier = if assr_enabled {
+    // (Optional) ASSR: attenuate modulation (AC) in band signals only.
+    // DC preserved — operating point is the thalamic gate's domain.
+    if assr_enabled {
         let assr = crate::auditory::AssrTransfer::new();
-        assr.compute_input_scale_modifier(preset)
-    } else {
-        1.0
-    };
+        let assr_mod = assr.compute_input_scale_modifier(preset);
+        if assr_mod < 1.0 - 1e-10 {
+            for bands in [&mut left_bands, &mut right_bands] {
+                for band in bands.iter_mut() {
+                    let n = band.len();
+                    if n == 0 { continue; }
+                    let mean = band.iter().sum::<f64>() / n as f64;
+                    for sample in band.iter_mut() {
+                        let ac = *sample - mean;
+                        *sample = mean + ac * assr_mod;
+                    }
+                }
+            }
+        }
+    }
 
     // Bilateral cortical model
     let neural_params = brain_type.params();
@@ -909,8 +921,6 @@ fn run_detailed_pipeline(
         c7: neural_params.jansen_rit.c7,
     };
 
-    let effective_input_scale = neural_params.jansen_rit.input_scale * assr_scale_modifier;
-
     let bi_result = neural::simulate_bilateral(
         &left_bands,
         &right_bands,
@@ -918,7 +928,7 @@ fn run_detailed_pipeline(
         &bands_r.energy_fractions,
         &bilateral,
         neural_params.jansen_rit.c,
-        effective_input_scale,
+        neural_params.jansen_rit.input_scale,
         sr,
         &fast_inhib,
         neural_params.jansen_rit.v0,

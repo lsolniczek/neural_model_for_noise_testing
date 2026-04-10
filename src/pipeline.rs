@@ -288,15 +288,29 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         trim(&right_bands[3]),
     ];
 
-    // 5d. (Optional) ASSR: compute input_scale modifier from preset's modulation frequencies.
-    //     Modulation at 40 Hz reaches cortex strongly → full input_scale.
-    //     Modulation at 5 Hz barely reaches cortex → reduced input_scale.
-    let assr_scale_modifier = if config.assr_enabled {
+    // 5d. (Optional) ASSR: attenuate modulation (AC) in band signals.
+    //     Per Picton et al. (2003), ASSR models frequency-dependent transmission
+    //     of amplitude modulation through the auditory pathway.
+    //     IMPORTANT: Only scale the AC component, not the DC mean.
+    //     DC (mean drive level) is the thalamic gate's domain — ASSR should not
+    //     shift the cortical operating point, only reduce modulation strength.
+    if config.assr_enabled {
         let assr = AssrTransfer::new();
-        assr.compute_input_scale_modifier(preset)
-    } else {
-        1.0
-    };
+        let assr_mod = assr.compute_input_scale_modifier(preset);
+        if assr_mod < 1.0 - 1e-10 {
+            for bands in [&mut left_bands_dec, &mut right_bands_dec] {
+                for band in bands.iter_mut() {
+                    let n = band.len();
+                    if n == 0 { continue; }
+                    let mean = band.iter().sum::<f64>() / n as f64;
+                    for sample in band.iter_mut() {
+                        let ac = *sample - mean;
+                        *sample = mean + ac * assr_mod;
+                    }
+                }
+            }
+        }
+    }
 
     // 5e. (Optional) Thalamic gate — modulates cortical operating point.
     //     Dark, reverberant, gentle presets → low arousal → lower input_offset
@@ -335,8 +349,7 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         c7: neural_params.jansen_rit.c7,
     };
 
-    let effective_input_scale = neural_params.jansen_rit.input_scale * assr_scale_modifier;
-
+    // input_scale is no longer modified by ASSR — ASSR operates on signal AC only.
     let bi_result = simulate_bilateral(
         &left_bands_dec,
         &right_bands_dec,
@@ -344,7 +357,7 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         &bands_r.energy_fractions,
         &bilateral,
         neural_params.jansen_rit.c,
-        effective_input_scale,
+        neural_params.jansen_rit.input_scale,
         NEURAL_SR,
         &fast_inhib,
         neural_params.jansen_rit.v0,
@@ -396,9 +409,13 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         target_lfo_freq,
     );
 
-    // 9. Score: neural model + alpha asymmetry penalty.
-    //    Per Davidson (2004): hemispheric balance matters for relaxation/meditation goals.
-    let score = goal.evaluate_with_asymmetry(&fhn_result, jr_result, bi_result.alpha_asymmetry);
+    // 9. Score: neural model + asymmetry penalty + PLV entrainment bonus.
+    let score = goal.evaluate_full(
+        &fhn_result,
+        jr_result,
+        bi_result.alpha_asymmetry,
+        performance.plv,
+    );
     let norm_bands = jr_result.band_powers.normalized();
 
     SimulationResult {

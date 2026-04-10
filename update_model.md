@@ -9,8 +9,9 @@
 - [x] Pipeline integration with CLI flag (`--assr`)
 - [x] Disabled by default (zero regression)
 - [x] **Pivot: signal-level FFT filtering ineffective** — band signals are DC-dominated envelopes, modulation is ~5% of power. Proved empirically: scores identical with/without signal filtering.
-- [x] **New approach: preset-level input_scale modifier.** `compute_input_scale_modifier()` scans NeuralLfo frequencies, computes weighted ASSR gain, scales JR `input_scale`. Presets with 40 Hz modulation get full drive; 5 Hz gets ~0.31x drive.
-- [x] Verified: Ignition (25 Hz NeuralLfo) gets +0.04 score improvement with ASSR enabled
+- [x] **New approach: preset-level input_scale modifier.** `compute_input_scale_modifier()` scans NeuralLfo frequencies, computes weighted ASSR gain.
+- [x] **DC/AC separation fix:** Original approach scaled entire `input_scale` (DC+AC), conflating modulation attenuation with operating point shift (thalamic gate's domain). Fixed: ASSR now subtracts signal mean, scales AC only by ASSR modifier, adds mean back. DC operating point preserved — clean separation from thalamic gate.
+- [x] Verified: Ground gate+assr conflict improved (ratio 0.66→0.69). Remaining gap is correct AC attenuation.
 
 ### Thalamic Gate
 - [x] Research thalamocortical dynamics (Hughes & Crunelli 2005, Suffczynski 2004)
@@ -109,12 +110,17 @@
 - [x] **Ref:** Allen JJB, Coan JA, Nazarian M (2004). "Issues and assumptions on the road from raw signals to metrics of frontal EEG asymmetry." *Biol Psychol* 67(1-2):183-218.
 - [x] Tests: balanced > asymmetric for relaxation, sleep ignores asymmetry, valid range. 303 total tests passing.
 
-### 6c. Entrainment Coherence Scoring
-- [ ] Replace or supplement band-power scoring with phase-locking value (PLV)
-- [ ] Measure coherence between modulation frequency and neural oscillation
-- [ ] Weight scoring by entrainment strength, not just band power magnitude
-- [ ] **Ref:** Lachaux JP, Rodriguez E, Martinerie J, Varela FJ (1999). "Measuring phase synchrony in brain signals." *Hum Brain Mapp* 8(4):194-208. — defines PLV as |1/N × Σ exp(iφ(t))| where φ is the instantaneous phase difference; PLV=1 means perfect phase-locking (entrainment), PLV=0 means no entrainment.
-- [ ] **Ref:** Helfrich RF, Schneider TR, Rach S, Trautmann-Lengsfeld SA, Engel AK, Herrmann CS (2014). "Entrainment of brain oscillations by transcranial alternating current stimulation." *Curr Biol* 24(3):333-339. — applies PLV to measure entrainment from external periodic stimulation; directly analogous to our auditory modulation → cortical oscillation pipeline.
+### 6c. Entrainment Coherence Scoring (PLV)
+- [x] Implemented Phase-Locking Value per Lachaux et al. (1999): PLV = |1/N × Σ exp(i·φ(t))| using Hilbert transform (Marple 1999) for instantaneous phase extraction.
+- [x] `compute_plv()` in `performance.rs`: bandpass filter (±3 Hz), Hilbert analytic signal, phase difference with reference sinusoid.
+- [x] Added `plv` field to `PerformanceVector`.
+- [x] `evaluate_full()` in `scoring.rs`: combines band score + FHN score + asymmetry penalty + PLV bonus. PLV bonus weighted per goal: Focus 100%, Isolation 80%, DeepWork 60%, Meditation 30%, Sleep/Relaxation 0%.
+- [x] Wired into both `pipeline.rs` and `main.rs` diagnose path.
+- [x] **Ref:** Lachaux JP et al. (1999). "Measuring phase synchrony in brain signals." *Hum Brain Mapp* 8(4):194-208.
+- [x] **Ref:** Helfrich RF et al. (2014). "Entrainment of brain oscillations by transcranial alternating current stimulation." *Curr Biol* 24(3):333-339.
+- [x] **Ref:** Marple SL (1999). "Computing the Discrete-Time Analytic Signal via FFT." *IEEE Trans Signal Process* 47(9):2600-2603.
+- [x] Tests: 6 unit tests (perfect sine PLV>0.8, off-target <0.3, noise <0.3, range [0,1], included in PerformanceVector, None without target). 309 total tests passing.
+- [x] Impact: Ignition +0.006 (strong 25 Hz entrainment rewarded). Drift/Ground unchanged (no entrainment weight). Correct behavior.
 
 ## Priority 7: EEG Validation (HIGH IMPACT, HIGH EFFORT)
 

@@ -338,6 +338,48 @@ impl Goal {
         (base_score * (1.0 - penalty)).clamp(0.0, 1.0)
     }
 
+    /// Evaluate with all corrections: asymmetry penalty + PLV entrainment bonus.
+    ///
+    /// Per Lachaux et al. (1999) and Helfrich et al. (2014), phase-locking
+    /// to the modulation frequency indicates genuine neural entrainment.
+    /// Goals that want entrainment (Focus, Isolation) get a score bonus
+    /// proportional to PLV. Goals that want natural rhythms (Sleep, Relaxation)
+    /// don't benefit from entrainment.
+    pub fn evaluate_full(
+        &self,
+        fhn: &FhnResult,
+        jansen_rit: &JansenRitResult,
+        alpha_asymmetry: f64,
+        plv: Option<f64>,
+    ) -> f64 {
+        let base_score = self.evaluate_with_asymmetry(fhn, jansen_rit, alpha_asymmetry);
+
+        // PLV bonus: weighted by goal's entrainment relevance
+        let plv_bonus = if let Some(plv_value) = plv {
+            let weight = self.entrainment_weight();
+            weight * plv_value * 0.10 // max 10% bonus at PLV=1.0
+        } else {
+            0.0
+        };
+
+        (base_score + plv_bonus).clamp(0.0, 1.0)
+    }
+
+    /// How much this goal values entrainment (phase-locking to stimulus).
+    fn entrainment_weight(&self) -> f64 {
+        match self.kind {
+            // Active entrainment goals: benefit strongly from PLV
+            GoalKind::Focus => 1.0,
+            GoalKind::Isolation => 0.8,
+            GoalKind::DeepWork => 0.6,
+            // Mild benefit
+            GoalKind::Meditation => 0.3,
+            // Natural rhythm goals: don't benefit from external entrainment
+            GoalKind::DeepRelaxation => 0.0,
+            GoalKind::Sleep => 0.0,
+        }
+    }
+
     /// Compute asymmetry penalty [0, max_penalty] for this goal.
     /// Returns 0.0 for goals that don't care about asymmetry.
     fn asymmetry_penalty(&self, alpha_asymmetry: f64) -> f64 {
@@ -432,7 +474,7 @@ impl Goal {
     }
 
     /// Produce a detailed diagnostic breakdown of how a result matches this goal.
-    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, alpha_asymmetry: f64, performance: Option<PerformanceVector>) -> Diagnosis {
+    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, alpha_asymmetry: f64, plv: Option<f64>, performance: Option<PerformanceVector>) -> Diagnosis {
         let norm = jansen_rit.band_powers.normalized();
         let t = &self.band_targets;
 
@@ -481,7 +523,7 @@ impl Goal {
             MetricStatus::Pass
         };
 
-        let score = self.evaluate_with_asymmetry(fhn, jansen_rit, alpha_asymmetry);
+        let score = self.evaluate_full(fhn, jansen_rit, alpha_asymmetry, plv);
 
         let verdict = if score >= 0.75 {
             Verdict::Good
@@ -966,7 +1008,7 @@ mod tests {
 
         for &kind in GoalKind::all() {
             let goal = Goal::new(kind);
-            let diag = goal.diagnose(&fhn, &jr, 0.5, 0.0, None);
+            let diag = goal.diagnose(&fhn, &jr, 0.5, 0.0, None, None);
             assert_eq!(diag.bands.len(), 5, "{kind} diagnosis should have 5 bands");
         }
     }
@@ -977,7 +1019,7 @@ mod tests {
         let jr = make_jr(0.01, 0.18, 0.33, 0.42, 0.06); // Focus ideals
 
         let goal = Goal::new(GoalKind::Focus);
-        let diag = goal.diagnose(&fhn, &jr, 0.55, 0.0, None);
+        let diag = goal.diagnose(&fhn, &jr, 0.55, 0.0, None, None);
 
         assert!(
             matches!(diag.verdict, Verdict::Good),

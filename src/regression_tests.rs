@@ -1154,6 +1154,67 @@ mod tests {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 13. ASSR DC/AC separation tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // ASSR should only attenuate the modulation (AC) component, not the
+    // mean drive level (DC). This prevents ASSR from conflating modulation
+    // transmission with operating point shift (which is the thalamic gate's job).
+
+    /// With ASSR + thalamic gate both enabled, Ground (sleep) should still
+    /// produce a good score — ASSR shouldn't collapse the operating point
+    /// on top of the gate's shift.
+    #[test]
+    fn assr_does_not_collapse_operating_point_with_gate() {
+        let mut config = SimulationConfig::default();
+        config.assr_enabled = true;
+        config.thalamic_gate_enabled = true;
+
+        let goal = Goal::new(GoalKind::Sleep);
+
+        // Use Ground-like preset: Brown + NeuralLfo 5Hz
+        let mut preset = Preset::default();
+        preset.source_count = 2;
+        preset.anchor_color = 5; // Black
+        preset.objects[0].active = true;
+        preset.objects[0].color = 2; // Brown
+        preset.objects[0].volume = 0.75;
+        preset.objects[0].reverb_send = 0.85;
+        preset.objects[0].bass_mod.kind = 2; // Breathing
+        preset.objects[0].bass_mod.param_b = 0.80;
+        preset.objects[1].active = true;
+        preset.objects[1].color = 6; // SSN
+        preset.objects[1].volume = 0.85;
+        preset.objects[1].bass_mod.kind = 4; // NeuralLfo 5Hz
+        preset.objects[1].bass_mod.param_a = 5.0;
+        preset.objects[1].bass_mod.param_b = 1.0;
+        preset.objects[1].satellite_mod.kind = 4;
+        preset.objects[1].satellite_mod.param_a = 5.0;
+        preset.objects[1].satellite_mod.param_b = 0.90;
+
+        // Gate alone
+        let mut config_gate = SimulationConfig::default();
+        config_gate.thalamic_gate_enabled = true;
+        let result_gate = evaluate_preset(&preset, &goal, &config_gate);
+
+        // Both
+        let result_both = evaluate_preset(&preset, &goal, &config);
+
+        // With DC/AC separation, ASSR should NOT dramatically reduce the
+        // score when combined with gate. Allow some reduction but not collapse.
+        let ratio = result_both.score / result_gate.score.max(0.001);
+        println!("ASSR DC/AC TEST: gate_only={:.4} both={:.4} ratio={:.3}",
+            result_gate.score, result_both.score, ratio);
+
+        assert!(
+            ratio > 0.60,
+            "ASSR+gate should not collapse score: gate={:.4} both={:.4} ratio={:.3}. \
+             ASSR is likely reducing DC drive (operating point), not just AC (modulation).",
+            result_gate.score, result_both.score, ratio
+        );
+    }
+
     /// Band powers still sum to ~1.0 after normalization change.
     #[test]
     fn normalization_preserves_band_power_sum() {

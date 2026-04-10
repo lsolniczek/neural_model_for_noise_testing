@@ -28,6 +28,15 @@ pub struct PerformanceVector {
     /// Shift from the ~10 Hz alpha baseline indicates the noise is pulling
     /// the brain toward a different regime.
     pub spectral_centroid: f64,
+
+    /// Phase-Locking Value (PLV) to the target modulation frequency.
+    /// Per Lachaux et al. (1999): PLV = |1/N × Σ exp(i·φ(t))|
+    /// where φ(t) is the instantaneous phase difference between the
+    /// neural EEG and a reference sinusoid at the target frequency.
+    /// Range: [0, 1]. 1.0 = perfect phase-locking (true entrainment).
+    /// 0.0 = no phase relationship (coincidental power, not entrained).
+    /// None if no target frequency.
+    pub plv: Option<f64>,
 }
 
 impl PerformanceVector {
@@ -53,10 +62,15 @@ impl PerformanceVector {
             Some(compute_ei_stability(fast_inhib_trace))
         };
 
+        let plv = target_freq.map(|freq| {
+            compute_plv(eeg, sample_rate, freq)
+        });
+
         PerformanceVector {
             entrainment_ratio,
             ei_stability,
             spectral_centroid,
+            plv,
         }
     }
 }
@@ -116,6 +130,94 @@ fn compute_entrainment_ratio(eeg: &[f64], sample_rate: f64, target_freq: f64) ->
     } else {
         0.0
     }
+}
+
+/// Phase-Locking Value (PLV) per Lachaux et al. (1999).
+///
+/// Measures the consistency of the phase relationship between the neural
+/// EEG oscillation and a reference sinusoid at the target frequency.
+/// Uses Hilbert transform (Marple 1999) for instantaneous phase extraction.
+///
+/// PLV = |1/N × Σ exp(i·(φ_eeg(t) - φ_ref(t)))|
+///
+/// Steps:
+/// 1. Bandpass filter EEG around target frequency (±3 Hz)
+/// 2. Extract instantaneous phase via Hilbert transform
+/// 3. Generate reference phase: 2π × f × t
+/// 4. Compute phase difference and average the unit phasors
+fn compute_plv(eeg: &[f64], sample_rate: f64, target_freq: f64) -> f64 {
+    let n = eeg.len();
+    if n < 64 || target_freq <= 0.5 {
+        return 0.0;
+    }
+
+    let fft_len = n.next_power_of_two();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft_fwd = planner.plan_fft_forward(fft_len);
+    let fft_inv = planner.plan_fft_inverse(fft_len);
+
+    // Step 1: Bandpass filter around target ±3 Hz using FFT
+    let hann_denom = if n > 1 { (n - 1) as f64 } else { 1.0 };
+    let mut buf: Vec<Complex<f64>> = (0..fft_len)
+        .map(|i| {
+            if i < n {
+                let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / hann_denom).cos());
+                Complex::new(eeg[i] * w, 0.0)
+            } else {
+                Complex::new(0.0, 0.0)
+            }
+        })
+        .collect();
+
+    fft_fwd.process(&mut buf);
+
+    let freq_res = sample_rate / fft_len as f64;
+    let lo_bin = ((target_freq - 3.0).max(0.5) / freq_res).floor() as usize;
+    let hi_bin = ((target_freq + 3.0) / freq_res).ceil().min((fft_len / 2) as f64) as usize;
+
+    // Zero out everything outside the bandpass
+    for i in 0..fft_len {
+        let bin = if i <= fft_len / 2 { i } else { fft_len - i };
+        if bin < lo_bin || bin > hi_bin {
+            buf[i] = Complex::new(0.0, 0.0);
+        }
+    }
+
+    // Step 2: Hilbert transform for analytic signal (Marple 1999)
+    // Zero negative frequencies, double positive frequencies
+    for i in 1..fft_len / 2 {
+        buf[i] *= 2.0;
+    }
+    for i in (fft_len / 2 + 1)..fft_len {
+        buf[i] = Complex::new(0.0, 0.0);
+    }
+    // DC and Nyquist unchanged
+
+    fft_inv.process(&mut buf);
+
+    let inv_n = 1.0 / fft_len as f64;
+
+    // Step 3 & 4: Compute PLV from phase difference
+    let mut phasor_sum = Complex::new(0.0_f64, 0.0_f64);
+    let valid_samples = n.min(fft_len);
+
+    for i in 0..valid_samples {
+        let analytic = buf[i] * inv_n;
+        let eeg_phase = analytic.im.atan2(analytic.re);
+
+        // Reference phase: pure sinusoid at target frequency
+        let ref_phase = 2.0 * PI * target_freq * i as f64 / sample_rate;
+
+        // Phase difference
+        let phase_diff = eeg_phase - ref_phase;
+
+        // Accumulate unit phasor
+        phasor_sum += Complex::new(phase_diff.cos(), phase_diff.sin());
+    }
+
+    // PLV = magnitude of average phasor
+    let plv = (phasor_sum / valid_samples as f64).norm();
+    plv.clamp(0.0, 1.0)
 }
 
 /// E/I Stability Index: coefficient of variation of the y[3] trace.
@@ -398,5 +500,83 @@ mod tests {
             c >= 1.0 && c <= 50.0,
             "Centroid should be in [1, 50] Hz, got {c:.1}"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PLV tests — per Lachaux et al. (1999)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn plv_perfect_sine_at_target() {
+        // Pure 10 Hz sine → perfect phase-locking to 10 Hz reference
+        let n = (SR * 5.0) as usize;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 10.0 * i as f64 / SR).sin())
+            .collect();
+        let plv = compute_plv(&eeg, SR, 10.0);
+        assert!(
+            plv > 0.8,
+            "Pure sine at target should have high PLV, got {plv:.3}"
+        );
+    }
+
+    #[test]
+    fn plv_off_target_is_low() {
+        // Pure 10 Hz sine → low PLV at 25 Hz (no phase relationship)
+        let n = (SR * 5.0) as usize;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 10.0 * i as f64 / SR).sin())
+            .collect();
+        let plv = compute_plv(&eeg, SR, 25.0);
+        assert!(
+            plv < 0.3,
+            "10 Hz sine should have low PLV at 25 Hz, got {plv:.3}"
+        );
+    }
+
+    #[test]
+    fn plv_noise_is_low() {
+        // Random noise → no phase-locking
+        let n = (SR * 5.0) as usize;
+        let mut state = 12345u64;
+        let eeg: Vec<f64> = (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state as f64 / u64::MAX as f64) * 2.0 - 1.0
+            })
+            .collect();
+        let plv = compute_plv(&eeg, SR, 10.0);
+        assert!(
+            plv < 0.3,
+            "Random noise should have low PLV, got {plv:.3}"
+        );
+    }
+
+    #[test]
+    fn plv_in_zero_to_one() {
+        let n = (SR * 3.0) as usize;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 14.0 * i as f64 / SR).sin())
+            .collect();
+        let plv = compute_plv(&eeg, SR, 14.0);
+        assert!(plv >= 0.0 && plv <= 1.0, "PLV should be in [0,1], got {plv}");
+    }
+
+    #[test]
+    fn plv_included_in_performance_vector() {
+        let n = (SR * 3.0) as usize;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 10.0 * i as f64 / SR).sin())
+            .collect();
+        let pv = PerformanceVector::compute(&eeg, &[], SR, Some(10.0));
+        assert!(pv.plv.is_some(), "PLV should be present when target freq given");
+        assert!(pv.plv.unwrap() > 0.5, "Pure sine PLV should be high");
+    }
+
+    #[test]
+    fn plv_none_without_target() {
+        let eeg = vec![0.5; 3000];
+        let pv = PerformanceVector::compute(&eeg, &[], SR, None);
+        assert!(pv.plv.is_none(), "PLV should be None without target freq");
     }
 }
