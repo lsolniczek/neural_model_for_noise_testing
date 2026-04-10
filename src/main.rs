@@ -532,7 +532,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         let brightness = detailed.brightness;
         let energy_fractions = detailed.energy_fractions;
 
-        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, Some(detailed.performance));
+        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, detailed.bilateral.alpha_asymmetry, Some(detailed.performance));
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);

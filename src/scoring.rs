@@ -318,6 +318,54 @@ impl Goal {
         neural_score.clamp(0.0, 1.0)
     }
 
+    /// Evaluate with alpha asymmetry penalty.
+    ///
+    /// Per Davidson (2004) and Allen et al. (2004), hemispheric alpha asymmetry
+    /// is a marker of cognitive state. Goals that want balanced processing
+    /// (meditation, relaxation) penalize excessive asymmetry. Goals where
+    /// lateralization is acceptable (focus, sleep) don't penalize.
+    ///
+    /// `alpha_asymmetry` ∈ [-1, 1]: 0 = balanced, ±1 = fully lateralized.
+    pub fn evaluate_with_asymmetry(
+        &self,
+        fhn: &FhnResult,
+        jansen_rit: &JansenRitResult,
+        alpha_asymmetry: f64,
+    ) -> f64 {
+        let base_score = self.evaluate_with_brightness(fhn, jansen_rit, 0.5);
+
+        let penalty = self.asymmetry_penalty(alpha_asymmetry);
+        (base_score * (1.0 - penalty)).clamp(0.0, 1.0)
+    }
+
+    /// Compute asymmetry penalty [0, max_penalty] for this goal.
+    /// Returns 0.0 for goals that don't care about asymmetry.
+    fn asymmetry_penalty(&self, alpha_asymmetry: f64) -> f64 {
+        let abs_asym = alpha_asymmetry.abs();
+
+        // Per-goal asymmetry tolerance and max penalty
+        let (threshold, max_penalty) = match self.kind {
+            // Meditation/relaxation: want balanced hemispheres
+            GoalKind::Meditation => (0.2, 0.15),
+            GoalKind::DeepRelaxation => (0.3, 0.12),
+            // Isolation: neutral masking, moderate balance preferred
+            GoalKind::Isolation => (0.4, 0.08),
+            // Focus/DeepWork: allow task-oriented lateralization
+            GoalKind::Focus => (0.5, 0.05),
+            GoalKind::DeepWork => (0.5, 0.05),
+            // Sleep: asymmetry irrelevant
+            GoalKind::Sleep => (1.0, 0.0),
+        };
+
+        if abs_asym <= threshold {
+            0.0
+        } else {
+            // Linear ramp from 0 at threshold to max_penalty at |asymmetry|=1.0
+            let excess = (abs_asym - threshold) / (1.0 - threshold);
+            max_penalty * excess.min(1.0)
+        }
+    }
+
     /// Compute a [0, 1] score modifier based on spectral brightness for this goal.
     fn brightness_modifier(&self, brightness: f64) -> f64 {
         match self.kind {
@@ -384,7 +432,7 @@ impl Goal {
     }
 
     /// Produce a detailed diagnostic breakdown of how a result matches this goal.
-    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, performance: Option<PerformanceVector>) -> Diagnosis {
+    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, alpha_asymmetry: f64, performance: Option<PerformanceVector>) -> Diagnosis {
         let norm = jansen_rit.band_powers.normalized();
         let t = &self.band_targets;
 
@@ -433,7 +481,7 @@ impl Goal {
             MetricStatus::Pass
         };
 
-        let score = self.evaluate_with_brightness(fhn, jansen_rit, brightness);
+        let score = self.evaluate_with_asymmetry(fhn, jansen_rit, alpha_asymmetry);
 
         let verdict = if score >= 0.75 {
             Verdict::Good
@@ -918,7 +966,7 @@ mod tests {
 
         for &kind in GoalKind::all() {
             let goal = Goal::new(kind);
-            let diag = goal.diagnose(&fhn, &jr, 0.5, None);
+            let diag = goal.diagnose(&fhn, &jr, 0.5, 0.0, None);
             assert_eq!(diag.bands.len(), 5, "{kind} diagnosis should have 5 bands");
         }
     }
@@ -929,7 +977,7 @@ mod tests {
         let jr = make_jr(0.01, 0.18, 0.33, 0.42, 0.06); // Focus ideals
 
         let goal = Goal::new(GoalKind::Focus);
-        let diag = goal.diagnose(&fhn, &jr, 0.55, None);
+        let diag = goal.diagnose(&fhn, &jr, 0.55, 0.0, None);
 
         assert!(
             matches!(diag.verdict, Verdict::Good),

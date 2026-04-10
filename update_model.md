@@ -97,10 +97,17 @@
 - [x] Impact: Scores shifted down ~5-10% (brightness was a free bonus). Neural model now has full scoring authority.
 
 ### 6b. Include Alpha Asymmetry in Scoring
-- [ ] **Problem:** Alpha asymmetry is computed (`pipeline.rs:388`) but never used in scoring. Hemispheric balance matters for meditation, relaxation, and deep work goals.
-- [ ] **Fix:** Add asymmetry as a soft penalty for goals that want balanced states.
-- [ ] **Ref:** Davidson RJ (2004). "What does the prefrontal cortex 'do' in affect: perspectives on frontal EEG asymmetry research." *Biol Psychol* 67(1-2):219-234. — frontal alpha asymmetry is a reliable marker of approach/withdrawal motivation; left-dominant alpha suppression correlates with positive affect (relevant for relaxation goals).
-- [ ] **Ref:** Allen JJB, Coan JA, Nazarian M (2004). "Issues and assumptions on the road from raw signals to metrics of frontal EEG asymmetry in emotion." *Biol Psychol* 67(1-2):183-218. — methodological framework for scoring hemispheric asymmetry.
+- [x] **Problem:** Alpha asymmetry computed but never used in scoring.
+- [x] **Fix:** `evaluate_with_asymmetry()` applies goal-specific penalty. `asymmetry_penalty()` uses per-goal threshold and max penalty:
+  - Meditation: threshold 0.2, max 15% penalty
+  - Deep Relaxation: threshold 0.3, max 12%
+  - Isolation: threshold 0.4, max 8%
+  - Focus/Deep Work: threshold 0.5, max 5%
+  - Sleep: no penalty
+- [x] Wired into both `pipeline.rs` (evaluate_preset) and `main.rs` (diagnose display).
+- [x] **Ref:** Davidson RJ (2004). "What does the prefrontal cortex 'do' in affect." *Biol Psychol* 67(1-2):219-234.
+- [x] **Ref:** Allen JJB, Coan JA, Nazarian M (2004). "Issues and assumptions on the road from raw signals to metrics of frontal EEG asymmetry." *Biol Psychol* 67(1-2):183-218.
+- [x] Tests: balanced > asymmetric for relaxation, sleep ignores asymmetry, valid range. 303 total tests passing.
 
 ### 6c. Entrainment Coherence Scoring
 - [ ] Replace or supplement band-power scoring with phase-locking value (PLV)

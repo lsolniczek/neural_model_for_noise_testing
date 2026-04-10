@@ -1085,6 +1085,75 @@ mod tests {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 12. Alpha asymmetry scoring tests
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Per Davidson (2004) and Allen et al. (2004), frontal alpha asymmetry
+    // is a marker of cognitive/emotional state. Balanced hemispheres indicate
+    // relaxed, symmetric processing. Excessive asymmetry can indicate
+    // maladaptive lateralization.
+
+    /// Balanced hemispheres should score higher than extremely asymmetric
+    /// for goals that want symmetric processing (meditation, relaxation).
+    #[test]
+    fn balanced_scores_higher_than_asymmetric_for_relaxation() {
+        let goal = Goal::new(GoalKind::DeepRelaxation);
+        let bp = BandPowers {
+            delta: 0.22, theta: 0.35, alpha: 0.36, beta: 0.03, gamma: 0.01,
+        };
+        let jr = make_jr_result_from_powers(bp);
+        let fhn = make_perfect_fhn(GoalKind::DeepRelaxation);
+
+        // Score with balanced vs extreme asymmetry
+        let score_balanced = goal.evaluate_with_asymmetry(&fhn, &jr, 0.0);
+        let score_extreme = goal.evaluate_with_asymmetry(&fhn, &jr, 0.95);
+
+        assert!(
+            score_balanced > score_extreme,
+            "Balanced ({score_balanced:.4}) should score higher than extreme asymmetry ({score_extreme:.4}) for relaxation"
+        );
+    }
+
+    /// Sleep goal should not penalize asymmetry.
+    #[test]
+    fn sleep_ignores_asymmetry() {
+        let goal = Goal::new(GoalKind::Sleep);
+        let bp = BandPowers {
+            delta: 0.30, theta: 0.48, alpha: 0.12, beta: 0.02, gamma: 0.02,
+        };
+        let jr = make_jr_result_from_powers(bp);
+        let fhn = make_perfect_fhn(GoalKind::Sleep);
+
+        let score_balanced = goal.evaluate_with_asymmetry(&fhn, &jr, 0.0);
+        let score_extreme = goal.evaluate_with_asymmetry(&fhn, &jr, 0.95);
+
+        // Should be identical or very close for sleep
+        assert!(
+            (score_balanced - score_extreme).abs() < 0.01,
+            "Sleep should not penalize asymmetry: balanced={score_balanced:.4} extreme={score_extreme:.4}"
+        );
+    }
+
+    /// All goals produce valid scores with asymmetry parameter.
+    #[test]
+    fn asymmetry_scoring_valid_range() {
+        for kind in GoalKind::all() {
+            let goal = Goal::new(*kind);
+            let bp = BandPowers { delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2 };
+            let jr = make_jr_result_from_powers(bp);
+            let fhn = make_perfect_fhn(*kind);
+
+            for asym in [-0.9, -0.5, 0.0, 0.5, 0.9] {
+                let score = goal.evaluate_with_asymmetry(&fhn, &jr, asym);
+                assert!(
+                    score >= 0.0 && score <= 1.0,
+                    "{:?} asymmetry={asym}: score {score} out of range", kind
+                );
+            }
+        }
+    }
+
     /// Band powers still sum to ~1.0 after normalization change.
     #[test]
     fn normalization_preserves_band_power_sum() {

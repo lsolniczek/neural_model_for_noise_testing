@@ -396,8 +396,9 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         target_lfo_freq,
     );
 
-    // 9. Score (with reduced brightness modifier — neural model now does most work)
-    let score = goal.evaluate_with_brightness(&fhn_result, jr_result, brightness);
+    // 9. Score: neural model + alpha asymmetry penalty.
+    //    Per Davidson (2004): hemispheric balance matters for relaxation/meditation goals.
+    let score = goal.evaluate_with_asymmetry(&fhn_result, jr_result, bi_result.alpha_asymmetry);
     let norm_bands = jr_result.band_powers.normalized();
 
     SimulationResult {
