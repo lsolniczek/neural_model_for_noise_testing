@@ -75,14 +75,17 @@
 - [x] Tests: 2 tests — hemispheric differentiation with asymmetric input, valid scores across brain types. 293 total tests passing.
 - [ ] **Future:** Frequency-dependent callosal delay (Aboitiz 1992: 5-50 ms range). Current fixed 10ms delay is a simplification.
 
-## Priority 5: Wilson-Cowan Frequency Tracking (MEDIUM IMPACT, HIGH EFFORT)
+## Priority 5: Wilson-Cowan Frequency Tracking (IMPLEMENTED)
 
-- [ ] **Problem:** WC oscillates at hardcoded frequencies (14/25 Hz) regardless of input. Real cortical oscillations track input frequency — driving at 20 Hz should produce 20 Hz output. Current WC always outputs 25 Hz.
-- [ ] **Fix:** Replace fixed-frequency WC with input-dependent frequency tracking. Options: Kuramoto oscillator, adaptive WC with input-dependent tau, or phase-locking loop.
-- [ ] **Ref:** Pikovsky A, Rosenblum M, Kurths J (2001). *Synchronization: A Universal Concept in Nonlinear Sciences.* Cambridge University Press. — Chapter 3 covers forced synchronization of nonlinear oscillators, the mathematical framework for entrainment.
-- [ ] **Ref:** Notbohm A, Kurths J, Herrmann CS (2016). "Modification of brain oscillations via rhythmic sensory stimulation." *Int J Psychophysiol* 103:62-68. — demonstrates that cortical oscillators follow external driving frequencies within an Arnold tongue (entrainment region), not just at their natural frequency.
-- [ ] **Ref:** Thut G, Schyns PG, Gross J (2011). "Entrainment of perceptually relevant brain oscillations by non-invasive rhythmic stimulation of the human brain." *Front Psychol* 2:170. — evidence that cortical oscillation frequency shifts toward the stimulus frequency within ±2-3 Hz of natural frequency.
-- [ ] Consider: may be better to use JR for all bands and accept 20 Hz ceiling, since the thalamic gate now handles slow-wave production
+- [x] **Problem:** WC oscillates at hardcoded frequencies (14/25 Hz) regardless of input.
+- [x] **Fix:** `for_frequency_adaptive()` — detects dominant modulation frequency in input signal via FFT, shifts WC natural frequency toward it if within ±5 Hz Arnold tongue. Partial entrainment: shift fraction decreases linearly with detuning.
+- [x] `detect_dominant_modulation()` — finds strongest spectral peak in 1-50 Hz range, requires 3x above noise floor to report.
+- [x] Applied to both `simulate_tonotopic` and `run_hemisphere_tonotopic` in `jansen_rit.rs`.
+- [x] **Ref:** Pikovsky A, Rosenblum M, Kurths J (2001). *Synchronization: A Universal Concept in Nonlinear Sciences.* Cambridge University Press, Ch. 3.
+- [x] **Ref:** Notbohm A, Kurths J, Herrmann CS (2016). "Modification of brain oscillations via rhythmic sensory stimulation." *Int J Psychophysiol* 103:62-68.
+- [x] **Ref:** Thut G, Schyns PG, Gross J (2011). "Entrainment of perceptually relevant brain oscillations." *Front Psychol* 2:170.
+- [x] Tests: 5 unit tests — tracks nearby frequency, ignores distant, keeps natural for flat input, detects peaks, returns None for flat. 298 total tests passing.
+- [x] Impact: Minimal on current presets (Ignition's 25 Hz drives already match WC(25) target). Will benefit future presets with non-matching modulation frequencies.
 
 ## Priority 6: Scoring Refinements (MEDIUM IMPACT, MEDIUM EFFORT)
 

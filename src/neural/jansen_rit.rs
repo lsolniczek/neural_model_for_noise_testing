@@ -624,8 +624,12 @@ pub fn simulate_tonotopic(
                 (result.eeg, result.fast_inhib_trace)
             }
             BandModelType::WilsonCowan(target_hz) => {
-                let wc = WilsonCowanModel::for_frequency(
+                // Adaptive frequency tracking per Pikovsky et al. (2001):
+                // WC shifts natural frequency toward input's dominant modulation
+                // if within ±5 Hz Arnold tongue.
+                let wc = WilsonCowanModel::for_frequency_adaptive(
                     sample_rate, target_hz, input_scale as f64 * 0.01,
+                    &input_signal, 5.0,
                 );
                 let result = wc.simulate(&input_signal);
                 (result.eeg, result.inhib_trace)
@@ -890,8 +894,12 @@ fn run_hemisphere_tonotopic(
                 (result.eeg, result.fast_inhib_trace)
             }
             BandModelType::WilsonCowan(target_hz) => {
-                let wc = WilsonCowanModel::for_frequency(
+                // Adaptive frequency tracking per Pikovsky et al. (2001):
+                // WC shifts natural frequency toward input's dominant modulation
+                // if within ±5 Hz Arnold tongue.
+                let wc = WilsonCowanModel::for_frequency_adaptive(
                     sample_rate, target_hz, input_scale as f64 * 0.01,
+                    &input_signal, 5.0,
                 );
                 let result = wc.simulate(&input_signal);
                 (result.eeg, result.inhib_trace)

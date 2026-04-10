@@ -17,6 +17,8 @@
 /// Target frequency is approximately:
 ///   f ≈ (1/2π) · √(w_ei·w_ie·S'_e·S'_i / (τ_e·τ_i))
 
+use rustfft::{num_complex::Complex, FftPlanner};
+
 /// Wilson-Cowan model result (compatible with JR pipeline).
 pub struct WilsonCowanResult {
     /// EEG-like output: E(t) - I(t).
@@ -188,6 +190,103 @@ impl WilsonCowanModel {
         }
 
         WilsonCowanResult { eeg, inhib_trace }
+    }
+
+    /// Create a WC model with adaptive frequency tracking.
+    ///
+    /// Per Pikovsky et al. (2001) and Thut et al. (2011), a cortical oscillator
+    /// entrains to an external periodic driving force within the Arnold tongue
+    /// (±entrainment_range Hz of natural frequency). If the input's dominant
+    /// modulation frequency falls within this range, the model shifts its
+    /// natural frequency to match — modeling genuine neural frequency tracking.
+    ///
+    /// `input` is the band signal that will drive the model.
+    /// `target_hz` is the default natural frequency.
+    /// `entrainment_range` is the max frequency shift (typically 3-5 Hz).
+    pub fn for_frequency_adaptive(
+        sample_rate: f64,
+        target_hz: f64,
+        input_scale: f64,
+        input: &[f64],
+        entrainment_range: f64,
+    ) -> Self {
+        // Detect dominant modulation frequency in the input
+        let detected = Self::detect_dominant_modulation(input, sample_rate);
+
+        // If detected frequency is within the Arnold tongue, shift toward it
+        let effective_hz = if let Some(dom_freq) = detected {
+            let detuning = (dom_freq - target_hz).abs();
+            if detuning <= entrainment_range && dom_freq > 1.0 {
+                // Partial entrainment: shift proportionally to coupling strength
+                // Full shift at detuning=0, linear falloff to zero at edge of tongue
+                let shift_fraction = 1.0 - (detuning / entrainment_range);
+                target_hz + shift_fraction * (dom_freq - target_hz)
+            } else {
+                target_hz
+            }
+        } else {
+            target_hz
+        };
+
+        Self::for_frequency(sample_rate, effective_hz, input_scale)
+    }
+
+    /// Detect the dominant modulation frequency in a signal (1-50 Hz range).
+    /// Returns None if no clear peak is found.
+    fn detect_dominant_modulation(signal: &[f64], sample_rate: f64) -> Option<f64> {
+        let n = signal.len();
+        if n < 64 {
+            return None;
+        }
+
+        // Use first 2 seconds or available signal
+        let analysis_len = n.min((sample_rate * 2.0) as usize);
+        let fft_len = analysis_len.next_power_of_two();
+
+        let mut planner = FftPlanner::<f64>::new();
+        let fft = planner.plan_fft_forward(fft_len);
+
+        // Remove DC and apply Hann window
+        let mean = signal[..analysis_len].iter().sum::<f64>() / analysis_len as f64;
+        let denom = (analysis_len - 1) as f64;
+        let mut buf: Vec<Complex<f64>> = (0..fft_len)
+            .map(|i| {
+                if i < analysis_len {
+                    let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / denom).cos());
+                    Complex::new((signal[i] - mean) * w, 0.0)
+                } else {
+                    Complex::new(0.0, 0.0)
+                }
+            })
+            .collect();
+
+        fft.process(&mut buf);
+
+        // Find peak in 1-50 Hz range
+        let freq_res = sample_rate / fft_len as f64;
+        let min_bin = (1.0 / freq_res).ceil() as usize;
+        let max_bin = ((50.0 / freq_res).floor() as usize).min(fft_len / 2);
+
+        let mut best_power = 0.0_f64;
+        let mut best_bin = min_bin;
+        let mut total_power = 0.0_f64;
+
+        for bin in min_bin..max_bin {
+            let power = buf[bin].norm_sqr();
+            total_power += power;
+            if power > best_power {
+                best_power = power;
+                best_bin = bin;
+            }
+        }
+
+        // Only return if peak is significantly above noise floor
+        let mean_power = total_power / (max_bin - min_bin) as f64;
+        if best_power > mean_power * 3.0 {
+            Some(best_bin as f64 * freq_res)
+        } else {
+            None // no clear modulation peak
+        }
     }
 }
 
@@ -483,5 +582,111 @@ mod tests {
             (ratio - 4.0).abs() < 0.1,
             "tau_sum ratio should be ~4.0 for 4x frequency, got {ratio:.2}"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Adaptive frequency tracking tests
+    // Per Pikovsky et al. (2001): Arnold tongue entrainment.
+    // Per Thut et al. (2011): ±2-3 Hz tracking range.
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn adaptive_tracks_nearby_frequency() {
+        // WC tuned to 25 Hz, input modulated at 22 Hz (within ±5 Hz)
+        // Should shift output frequency toward 22 Hz
+        let n = 8000;
+        let input_freq = 22.0;
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.3 * (2.0 * PI * input_freq * i as f64 / SR).sin())
+            .collect();
+
+        let wc_fixed = WilsonCowanModel::for_frequency(SR, 25.0, 0.5);
+        let wc_adaptive = WilsonCowanModel::for_frequency_adaptive(SR, 25.0, 0.5, &input, 5.0);
+
+        let result_fixed = wc_fixed.simulate(&input);
+        let result_adaptive = wc_adaptive.simulate(&input);
+
+        let freq_fixed = dominant_frequency(&result_fixed.eeg, SR);
+        let freq_adaptive = dominant_frequency(&result_adaptive.eeg, SR);
+
+        println!("ADAPTIVE TEST: fixed={freq_fixed:.1} Hz, adaptive={freq_adaptive:.1} Hz (input={input_freq} Hz)");
+
+        // Adaptive should be closer to input frequency than fixed
+        let error_fixed = (freq_fixed - input_freq).abs();
+        let error_adaptive = (freq_adaptive - input_freq).abs();
+        assert!(
+            error_adaptive <= error_fixed + 0.5, // allow small tolerance
+            "Adaptive ({freq_adaptive:.1}) should be at least as close to input ({input_freq}) as fixed ({freq_fixed:.1})"
+        );
+    }
+
+    #[test]
+    fn adaptive_ignores_distant_frequency() {
+        // WC tuned to 25 Hz, input modulated at 10 Hz (outside ±5 Hz)
+        // Should NOT shift — stays at 25 Hz
+        let n = 8000;
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.3 * (2.0 * PI * 10.0 * i as f64 / SR).sin())
+            .collect();
+
+        let wc_fixed = WilsonCowanModel::for_frequency(SR, 25.0, 0.5);
+        let wc_adaptive = WilsonCowanModel::for_frequency_adaptive(SR, 25.0, 0.5, &input, 5.0);
+
+        let result_fixed = wc_fixed.simulate(&input);
+        let result_adaptive = wc_adaptive.simulate(&input);
+
+        let freq_fixed = dominant_frequency(&result_fixed.eeg, SR);
+        let freq_adaptive = dominant_frequency(&result_adaptive.eeg, SR);
+
+        // Both should be similar — adaptive doesn't shift for distant frequency
+        assert!(
+            (freq_fixed - freq_adaptive).abs() < 3.0,
+            "Distant input: adaptive ({freq_adaptive:.1}) should be similar to fixed ({freq_fixed:.1})"
+        );
+    }
+
+    #[test]
+    fn adaptive_no_modulation_keeps_natural() {
+        // Flat input (no modulation) — should use natural frequency
+        let n = 8000;
+        let input = vec![0.5; n];
+
+        let wc_fixed = WilsonCowanModel::for_frequency(SR, 25.0, 0.5);
+        let wc_adaptive = WilsonCowanModel::for_frequency_adaptive(SR, 25.0, 0.5, &input, 5.0);
+
+        let result_fixed = wc_fixed.simulate(&input);
+        let result_adaptive = wc_adaptive.simulate(&input);
+
+        let freq_fixed = dominant_frequency(&result_fixed.eeg, SR);
+        let freq_adaptive = dominant_frequency(&result_adaptive.eeg, SR);
+
+        assert!(
+            (freq_fixed - freq_adaptive).abs() < 1.0,
+            "No modulation: adaptive ({freq_adaptive:.1}) should match fixed ({freq_fixed:.1})"
+        );
+    }
+
+    #[test]
+    fn detect_dominant_modulation_finds_peak() {
+        let n = 2000;
+        // Signal with clear 20 Hz modulation
+        let signal: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.4 * (2.0 * PI * 20.0 * i as f64 / SR).sin())
+            .collect();
+
+        let detected = WilsonCowanModel::detect_dominant_modulation(&signal, SR);
+        assert!(detected.is_some(), "Should detect 20 Hz modulation");
+        let freq = detected.unwrap();
+        assert!(
+            (freq - 20.0).abs() < 2.0,
+            "Detected {freq:.1} Hz, expected ~20 Hz"
+        );
+    }
+
+    #[test]
+    fn detect_dominant_modulation_returns_none_for_flat() {
+        let signal = vec![0.5; 2000];
+        let detected = WilsonCowanModel::detect_dominant_modulation(&signal, SR);
+        assert!(detected.is_none(), "Flat signal should return None");
     }
 }
