@@ -80,6 +80,30 @@ impl ThalamicGate {
         -MAX_OFFSET_REDUCTION * (1.0 - self.arousal)
     }
 
+    /// Compute per-band offset shifts based on arousal.
+    ///
+    /// Per Steriade, McCormick & Sejnowski (1993), thalamic state changes
+    /// are frequency-selective: during low arousal (burst mode), slow
+    /// oscillations (<15 Hz) emerge while fast rhythms persist in tonic mode.
+    ///
+    /// Returns [band0_shift, band1_shift, band2_shift, band3_shift]:
+    ///   - Band 0 (low, 50-200 Hz → delta/theta): full shift
+    ///   - Band 1 (low-mid, 200-800 Hz → theta/alpha): 70% shift
+    ///   - Band 2 (mid-high, 800-3kHz → alpha/beta): 20% shift
+    ///   - Band 3 (high, 3-8kHz → beta/gamma): no shift (stays tonic)
+    pub fn band_offset_shifts(&self) -> [f64; 4] {
+        if !self.enabled {
+            return [0.0; 4];
+        }
+        let base = -MAX_OFFSET_REDUCTION * (1.0 - self.arousal);
+        [
+            base * 1.0,   // Band 0: full shift — delta/theta target
+            base * 0.7,   // Band 1: 70% shift — theta/alpha boundary
+            base * 0.2,   // Band 2: 20% shift — mostly stays beta-responsive
+            base * 0.0,   // Band 3: no shift — always tonic for gamma
+        ]
+    }
+
     /// Derive arousal level from preset properties and spectral brightness.
     ///
     /// Dark, reverberant, gently-modulated presets → low arousal.
@@ -323,5 +347,82 @@ mod tests {
         );
 
         println!("Dark preset: arousal={arousal:.3}, offset_shift={shift:.1}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Band-dependent shift tests
+    // Per Steriade, McCormick & Sejnowski (1993): thalamic burst mode
+    // is frequency-selective — slow bands shift, fast bands stay tonic.
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn band_shifts_low_arousal_decreasing_by_band() {
+        let gate = ThalamicGate::new(0.0); // fully relaxed
+        let shifts = gate.band_offset_shifts();
+        // Band 0 gets full shift, band 3 gets none
+        assert!(shifts[0] < shifts[1], "Band 0 shift ({}) should be more negative than band 1 ({})", shifts[0], shifts[1]);
+        assert!(shifts[1] < shifts[2], "Band 1 shift ({}) should be more negative than band 2 ({})", shifts[1], shifts[2]);
+        assert!(shifts[2] < shifts[3] || shifts[2].abs() < 1e-10 && shifts[3].abs() < 1e-10,
+            "Band 2 shift ({}) should be more negative than band 3 ({})", shifts[2], shifts[3]);
+    }
+
+    #[test]
+    fn band_shifts_band3_always_zero() {
+        for a in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let gate = ThalamicGate::new(a);
+            let shifts = gate.band_offset_shifts();
+            assert!(
+                shifts[3].abs() < 1e-10,
+                "Band 3 (gamma) should never shift, got {} at arousal {a}",
+                shifts[3]
+            );
+        }
+    }
+
+    #[test]
+    fn band_shifts_high_arousal_all_zero() {
+        let gate = ThalamicGate::new(1.0);
+        let shifts = gate.band_offset_shifts();
+        for (b, &s) in shifts.iter().enumerate() {
+            assert!(
+                s.abs() < 1e-10,
+                "High arousal: band {b} shift should be 0, got {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn band_shifts_disabled_all_zero() {
+        let gate = ThalamicGate::disabled();
+        let shifts = gate.band_offset_shifts();
+        for (b, &s) in shifts.iter().enumerate() {
+            assert_eq!(s, 0.0, "Disabled: band {b} shift should be 0");
+        }
+    }
+
+    #[test]
+    fn band_shifts_band0_matches_uniform_shift() {
+        // Band 0 should get the same shift as the uniform offset_shift()
+        let gate = ThalamicGate::new(0.3);
+        let uniform = gate.offset_shift();
+        let per_band = gate.band_offset_shifts();
+        assert!(
+            (per_band[0] - uniform).abs() < 1e-10,
+            "Band 0 ({}) should match uniform shift ({})",
+            per_band[0], uniform
+        );
+    }
+
+    #[test]
+    fn band_shifts_proportions_correct() {
+        let gate = ThalamicGate::new(0.0);
+        let shifts = gate.band_offset_shifts();
+        let band0 = shifts[0];
+        // Band 1 = 70% of band 0
+        assert!((shifts[1] / band0 - 0.7).abs() < 0.01,
+            "Band 1 should be 70% of band 0: {} / {} = {}", shifts[1], band0, shifts[1] / band0);
+        // Band 2 = 20% of band 0
+        assert!((shifts[2] / band0 - 0.2).abs() < 0.01,
+            "Band 2 should be 20% of band 0: {} / {} = {}", shifts[2], band0, shifts[2] / band0);
     }
 }

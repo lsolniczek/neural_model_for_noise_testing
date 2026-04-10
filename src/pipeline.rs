@@ -292,12 +292,16 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     // 5e. (Optional) Thalamic gate — modulates cortical operating point.
     //     Dark, reverberant, gentle presets → low arousal → lower input_offset
     //     → JR model shifts toward bifurcation → theta/delta possible.
-    let thalamic_offset_shift = if config.thalamic_gate_enabled {
+    // 5e. (Optional) Thalamic gate — compute per-band offset shifts.
+    //     Per Steriade et al. (1993): thalamic burst mode is frequency-selective.
+    //     Low bands (delta/theta) shift fully toward bifurcation.
+    //     High bands (beta/gamma) stay in tonic mode for fast rhythms.
+    let thalamic_band_shifts = if config.thalamic_gate_enabled {
         let arousal = ThalamicGate::compute_arousal(preset, brightness);
         let gate = ThalamicGate::new(arousal);
-        gate.offset_shift()
+        gate.band_offset_shifts()
     } else {
-        0.0
+        [0.0; 4]
     };
 
     // 6. Bilateral cortical model: 2×4 parallel Jansen-Rit models
@@ -306,14 +310,11 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     //    Coupled through corpus callosum with ~10ms delay, ~10% strength.
     let neural_params = config.brain_type.params();
     let mut bilateral = config.brain_type.bilateral_params();
-    // Apply thalamic gate: shift all band_offsets toward bifurcation at low arousal.
-    // This modulates the JR operating point — lower offset → near bifurcation → theta/delta.
-    if thalamic_offset_shift.abs() > 1e-10 {
-        for offset in bilateral.left.band_offsets.iter_mut() {
-            *offset += thalamic_offset_shift;
-        }
-        for offset in bilateral.right.band_offsets.iter_mut() {
-            *offset += thalamic_offset_shift;
+    // Apply thalamic gate: per-band offset shifts toward bifurcation at low arousal.
+    for b in 0..4 {
+        if thalamic_band_shifts[b].abs() > 1e-10 {
+            bilateral.left.band_offsets[b] += thalamic_band_shifts[b];
+            bilateral.right.band_offsets[b] += thalamic_band_shifts[b];
         }
     }
 

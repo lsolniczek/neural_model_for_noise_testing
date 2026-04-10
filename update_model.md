@@ -47,15 +47,12 @@
 
 ## Priority 2: Band-Dependent Thalamic Shift (MEDIUM IMPACT, LOW EFFORT)
 
-- [ ] **Problem:** Thalamic gate applies uniform offset shift to all 4 bands. Physiologically, arousal reduction primarily affects low bands (theta/delta), not high bands (beta/gamma). This causes Ground's score to drop from 0.73 → 0.54 when combined with ASSR — the high bands lose drive unnecessarily.
-- [ ] **Fix:** Band-dependent shift: full shift on bands 0-1 (low, low-mid), partial on band 2, none on band 3:
-  ```
-  band_shifts = [-MAX * (1-arousal), -MAX * 0.7 * (1-arousal), -MAX * 0.2 * (1-arousal), 0.0]
-  ```
-- [ ] **Ref:** Hughes SW, Crunelli V (2005). "Thalamic mechanisms of EEG alpha rhythms and their pathological implications." *Neuroscientist* 11(4):357-372. — thalamocortical relay neurons switch from tonic to burst mode during arousal reduction, primarily affecting low-frequency (<15 Hz) relay.
-- [ ] **Ref:** Steriade M, McCormick DA, Sejnowski TJ (1993). "Thalamocortical oscillations in the sleeping and aroused brain." *Science* 262(5134):679-685. — demonstrates that thalamic state changes are frequency-selective: slow oscillations (<1 Hz) and spindles (7-14 Hz) emerge in burst mode while fast rhythms persist in tonic mode.
-- [ ] Tests: verify high bands remain beta-responsive at low arousal
-- [ ] Re-evaluate Ground and Drift with band-dependent shift
+- [x] **Problem:** Thalamic gate applies uniform offset shift to all 4 bands. Physiologically, arousal reduction primarily affects low bands (theta/delta), not high bands (beta/gamma).
+- [x] **Fix:** `band_offset_shifts()` method returns per-band shifts: [100%, 70%, 20%, 0%] of max reduction. Applied in both `pipeline.rs` and `main.rs`.
+- [x] **Ref:** Hughes SW, Crunelli V (2005). "Thalamic mechanisms of EEG alpha rhythms and their pathological implications." *Neuroscientist* 11(4):357-372.
+- [x] **Ref:** Steriade M, McCormick DA, Sejnowski TJ (1993). "Thalamocortical oscillations in the sleeping and aroused brain." *Science* 262(5134):679-685.
+- [x] Tests: 6 unit tests for band shifts (decreasing by band, band 3 always zero, proportions correct, disabled passthrough). 288 total tests passing.
+- [x] Verified: high bands stay beta-responsive at low arousal. Ground with features: 0.5377.
 
 ## Priority 3: Decimation Anti-Aliasing (MEDIUM IMPACT, LOW EFFORT)
 

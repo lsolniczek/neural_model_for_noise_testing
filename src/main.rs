@@ -888,17 +888,15 @@ fn run_detailed_pipeline(
     let neural_params = brain_type.params();
     let mut bilateral = brain_type.bilateral_params();
 
-    // (Optional) Thalamic gate: shift JR operating point based on arousal
+    // (Optional) Thalamic gate: per-band offset shifts (Steriade et al. 1993)
     if thalamic_gate_enabled {
         let arousal = crate::auditory::ThalamicGate::compute_arousal(preset, brightness);
         let gate = crate::auditory::ThalamicGate::new(arousal);
-        let shift = gate.offset_shift();
-        if shift.abs() > 1e-10 {
-            for offset in bilateral.left.band_offsets.iter_mut() {
-                *offset += shift;
-            }
-            for offset in bilateral.right.band_offsets.iter_mut() {
-                *offset += shift;
+        let band_shifts = gate.band_offset_shifts();
+        for b in 0..4 {
+            if band_shifts[b].abs() > 1e-10 {
+                bilateral.left.band_offsets[b] += band_shifts[b];
+                bilateral.right.band_offsets[b] += band_shifts[b];
             }
         }
     }
