@@ -958,10 +958,20 @@ fn run_detailed_pipeline(
 
     // Performance Vector
     let target_lfo_freq = preset.objects.iter()
-        .flat_map(|obj| [&obj.bass_mod, &obj.satellite_mod])
-        .filter(|m| m.kind == 4 && m.param_a > 0.5)
-        .map(|m| m.param_a as f64)
-        .next();
+        .filter(|obj| obj.active)
+        .flat_map(|obj| {
+            let vol = obj.volume as f64;
+            let mut lfos = Vec::new();
+            if obj.bass_mod.kind == 4 && obj.bass_mod.param_a > 0.5 {
+                lfos.push((obj.bass_mod.param_a as f64, obj.bass_mod.param_b as f64 * vol));
+            }
+            if obj.satellite_mod.kind == 4 && obj.satellite_mod.param_a > 0.5 {
+                lfos.push((obj.satellite_mod.param_a as f64, obj.satellite_mod.param_b as f64 * vol));
+            }
+            lfos
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(freq, _)| freq);
 
     let jr = &bi_result.combined;
     let eeg_mean = jr.eeg.iter().sum::<f64>() / jr.eeg.len() as f64;
@@ -1035,7 +1045,7 @@ fn print_comparison_matrix(
 }
 
 fn print_preset_summary(preset: &Preset) {
-    let color_names = ["White", "Pink", "Brown", "Green", "Grey", "Black", "SSN"];
+    let color_names = ["White", "Pink", "Brown", "Green", "Grey", "Black", "SSN", "Blue"];
     let env_names = [
         "AnechoicChamber",
         "FocusRoom",

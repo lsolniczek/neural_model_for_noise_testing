@@ -96,11 +96,18 @@ impl ThalamicGate {
             return [0.0; 4];
         }
         let base = -MAX_OFFSET_REDUCTION * (1.0 - self.arousal);
+
+        // At moderate arousal (>0.3): only low bands shift (Steriade 1993).
+        // At very low arousal (<0.15): ALL bands shift — full burst mode,
+        // the entire thalamocortical system enters slow-wave state.
+        // Interpolate proportions between the two regimes.
+        let deep_factor = ((0.3 - self.arousal) / 0.3).clamp(0.0, 1.0); // 0 at arousal≥0.3, 1 at arousal=0
+
         [
-            base * 1.0,   // Band 0: full shift — delta/theta target
-            base * 0.7,   // Band 1: 70% shift — theta/alpha boundary
-            base * 0.2,   // Band 2: 20% shift — mostly stays beta-responsive
-            base * 0.0,   // Band 3: no shift — always tonic for gamma
+            base * 1.0,                                // Band 0: always full
+            base * (0.7 + 0.3 * deep_factor),          // Band 1: 70% → 100% at deep relaxation
+            base * (0.2 + 0.6 * deep_factor),          // Band 2: 20% → 80% at deep relaxation
+            base * (0.0 + 0.4 * deep_factor),          // Band 3: 0% → 40% at deep relaxation
         ]
     }
 

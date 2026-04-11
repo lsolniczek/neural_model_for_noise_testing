@@ -78,10 +78,10 @@ impl Default for SimulationConfig {
             duration_secs: 12.0,
             warmup_discard_secs: 2.0,
             brain_type: BrainType::Normal,
-            assr_enabled: false,
-            thalamic_gate_enabled: false,
-            habituation_enabled: false,
-            stochastic_jr_enabled: false,
+            assr_enabled: true,
+            thalamic_gate_enabled: true,
+            habituation_enabled: true,
+            stochastic_jr_enabled: true,
         }
     }
 }
@@ -402,12 +402,24 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
     // 8. Performance Vector — diagnostic metrics for preset evaluation.
-    //    Extract NeuralLFO target frequency from the preset (kind=4, param_a=freq).
+    //    Extract the STRONGEST NeuralLFO frequency from the preset.
+    //    "Strongest" = highest (depth × volume) product, which is the actual
+    //    entrainment driver — not just the first one found.
     let target_lfo_freq = preset.objects.iter()
-        .flat_map(|obj| [&obj.bass_mod, &obj.satellite_mod])
-        .filter(|m| m.kind == 4 && m.param_a > 0.5) // NeuralLfo with freq > 0.5 Hz
-        .map(|m| m.param_a as f64)
-        .next(); // Use first active NeuralLFO frequency
+        .filter(|obj| obj.active)
+        .flat_map(|obj| {
+            let vol = obj.volume as f64;
+            let mut lfos = Vec::new();
+            if obj.bass_mod.kind == 4 && obj.bass_mod.param_a > 0.5 {
+                lfos.push((obj.bass_mod.param_a as f64, obj.bass_mod.param_b as f64 * vol));
+            }
+            if obj.satellite_mod.kind == 4 && obj.satellite_mod.param_a > 0.5 {
+                lfos.push((obj.satellite_mod.param_a as f64, obj.satellite_mod.param_b as f64 * vol));
+            }
+            lfos
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) // strongest by depth*volume
+        .map(|(freq, _strength)| freq);
 
     // Detrend EEG for spectral analysis
     let eeg_mean = jr_result.eeg.iter().sum::<f64>() / jr_result.eeg.len() as f64;

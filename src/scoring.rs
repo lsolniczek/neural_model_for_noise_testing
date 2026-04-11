@@ -30,6 +30,15 @@ pub enum GoalKind {
     Isolation,
     Meditation,
     DeepWork,
+    /// Shield: Beta-dominant focused masking. High beta for concentration,
+    /// minimal theta to prevent mind-wandering, stable moderate FHN.
+    Shield,
+    /// Flow: Alpha-dominant rhythmic state. Alpha-beta synchronization,
+    /// coherent JR oscillations, relaxed sustained productivity.
+    Flow,
+    /// Ignition: Gamma-driven ADHD activation. 40 Hz binding,
+    /// high FHN firing to push through activation threshold.
+    Ignition,
 }
 
 impl fmt::Display for GoalKind {
@@ -41,6 +50,9 @@ impl fmt::Display for GoalKind {
             GoalKind::Isolation => write!(f, "isolation"),
             GoalKind::Meditation => write!(f, "meditation"),
             GoalKind::DeepWork => write!(f, "deep_work"),
+            GoalKind::Shield => write!(f, "shield"),
+            GoalKind::Flow => write!(f, "flow"),
+            GoalKind::Ignition => write!(f, "ignition"),
         }
     }
 }
@@ -53,7 +65,10 @@ impl GoalKind {
             "sleep" => Some(GoalKind::Sleep),
             "isolation" | "masking" => Some(GoalKind::Isolation),
             "meditation" | "meditate" => Some(GoalKind::Meditation),
-            "deep_work" | "deepwork" | "flow" => Some(GoalKind::DeepWork),
+            "deep_work" | "deepwork" => Some(GoalKind::DeepWork),
+            "shield" => Some(GoalKind::Shield),
+            "flow" => Some(GoalKind::Flow),
+            "ignition" => Some(GoalKind::Ignition),
             _ => None,
         }
     }
@@ -67,6 +82,9 @@ impl GoalKind {
             GoalKind::DeepRelaxation,
             GoalKind::Meditation,
             GoalKind::Isolation,
+            GoalKind::Shield,
+            GoalKind::Flow,
+            GoalKind::Ignition,
         ]
     }
 }
@@ -281,6 +299,79 @@ impl Goal {
                 },
                 band_weight: 0.75,
             },
+
+            // ── Shield: Beta-Dominant Focused Masking ───────────────────────
+            // High beta for task concentration, minimal theta to prevent
+            // mind-wandering, stable moderate FHN firing.
+            // Ref: Engel & Fries 2010 (beta maintenance hypothesis),
+            //      Cavanagh & Frank 2014 (theta suppression in focused attention).
+            GoalKind::Shield => Goal {
+                kind,
+                band_targets: BandTargets {
+                    delta: BandTarget { min: 0.00, ideal: 0.05, max: 0.15 },
+                    theta: BandTarget { min: 0.00, ideal: 0.03, max: 0.10 },
+                    alpha: BandTarget { min: 0.15, ideal: 0.30, max: 0.50 },
+                    beta:  BandTarget { min: 0.30, ideal: 0.50, max: 0.70 },
+                    gamma: BandTarget { min: 0.00, ideal: 0.05, max: 0.15 },
+                },
+                fhn_targets: FhnTargets {
+                    firing_rate_range: (5.0, 15.0),
+                    target_isi_cv: Some(0.25), // Stable, low jitter
+                    weight: 0.30,
+                },
+                band_weight: 0.70,
+            },
+
+            // ── Flow: Alpha-Dominant Rhythmic Synchronization ───────────────
+            // Dominant alpha for relaxed alertness, moderate beta for task
+            // engagement, coherent JR oscillations, rhythmic FHN firing.
+            // The neurological flow state: creativity + calm.
+            // Ref: Katahira et al. 2018 (alpha in flow),
+            //      Csikszentmihalyi 1990 (flow state psychology).
+            GoalKind::Flow => Goal {
+                kind,
+                band_targets: BandTargets {
+                    delta: BandTarget { min: 0.00, ideal: 0.05, max: 0.15 },
+                    theta: BandTarget { min: 0.05, ideal: 0.15, max: 0.30 },
+                    alpha: BandTarget { min: 0.30, ideal: 0.45, max: 0.60 },
+                    beta:  BandTarget { min: 0.15, ideal: 0.30, max: 0.45 },
+                    gamma: BandTarget { min: 0.00, ideal: 0.02, max: 0.08 },
+                },
+                fhn_targets: FhnTargets {
+                    firing_rate_range: (3.0, 12.0),
+                    target_isi_cv: Some(0.30), // Rhythmic oscillation
+                    weight: 0.30,
+                },
+                band_weight: 0.70,
+            },
+
+            // ── Ignition: Gamma-Driven ADHD Activation ──────────────────────
+            // 40 Hz gamma for cognitive binding (Iaccarino 2016), high beta
+            // for activation, elevated FHN firing to push through the ADHD
+            // activation threshold (reduced synaptic gain in ADHD model).
+            // Ref: Iaccarino et al. 2016 (40 Hz entrainment),
+            //      Söderlund et al. 2007 (stochastic resonance in ADHD).
+            // ── Ignition: Stochastic Resonance + Gamma Binding for ADHD ────
+            // Under-arousal → active cognitive readiness. Lower the
+            // activation threshold via stochastic resonance (Söderlund 2007).
+            // 40 Hz gamma binding (Iaccarino 2016). Suppress theta excess.
+            // High FHN firing with LOW ISI CV = ordered, "locked-in" rhythm.
+            GoalKind::Ignition => Goal {
+                kind,
+                band_targets: BandTargets {
+                    delta: BandTarget { min: 0.00, ideal: 0.02, max: 0.05 },
+                    theta: BandTarget { min: 0.00, ideal: 0.10, max: 0.25 },
+                    alpha: BandTarget { min: 0.10, ideal: 0.20, max: 0.35 },
+                    beta:  BandTarget { min: 0.35, ideal: 0.50, max: 0.65 },
+                    gamma: BandTarget { min: 0.05, ideal: 0.15, max: 0.35 },
+                },
+                fhn_targets: FhnTargets {
+                    firing_rate_range: (12.0, 25.0),
+                    target_isi_cv: Some(0.20), // Ordered rhythm — locked-in firing
+                    weight: 0.30,
+                },
+                band_weight: 0.70,
+            },
         }
     }
 
@@ -377,6 +468,12 @@ impl Goal {
             // Natural rhythm goals: don't benefit from external entrainment
             GoalKind::DeepRelaxation => 0.0,
             GoalKind::Sleep => 0.0,
+            // Shield: moderate entrainment benefit
+            GoalKind::Shield => 0.7,
+            // Flow: mild entrainment (natural rhythm more important)
+            GoalKind::Flow => 0.3,
+            // Ignition: strong entrainment (gamma binding)
+            GoalKind::Ignition => 1.0,
         }
     }
 
@@ -397,6 +494,12 @@ impl Goal {
             GoalKind::DeepWork => (0.5, 0.05),
             // Sleep: asymmetry irrelevant
             GoalKind::Sleep => (1.0, 0.0),
+            // Shield: moderate tolerance (focused masking)
+            GoalKind::Shield => (0.4, 0.08),
+            // Flow: want balanced (relaxed state)
+            GoalKind::Flow => (0.3, 0.12),
+            // Ignition: allow lateralization (ADHD activation)
+            GoalKind::Ignition => (0.6, 0.03),
         };
 
         if abs_asym <= threshold {
@@ -434,12 +537,15 @@ impl Goal {
                 (0.85 - 0.5 * brightness).clamp(0.0, 1.0)
             }
             GoalKind::DeepWork => {
-                // Moderate darkness — brown/pink foundation is ideal
-                // Too bright is distracting; too dark is soporific
-                // Peak at brightness=0.35
                 let x = (brightness - 0.35).abs();
                 (1.0 - 1.5 * x).clamp(0.0, 1.0)
             }
+            GoalKind::Shield => (0.3 + 0.7 * brightness).clamp(0.0, 1.0),
+            GoalKind::Flow => {
+                let x = (brightness - 0.45).abs();
+                (1.0 - 1.5 * x).clamp(0.0, 1.0)
+            }
+            GoalKind::Ignition => (0.3 + 0.7 * brightness).clamp(0.0, 1.0),
         }
     }
 
@@ -984,8 +1090,8 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn goal_kind_all_returns_six() {
-        assert_eq!(GoalKind::all().len(), 6);
+    fn goal_kind_all_returns_nine() {
+        assert_eq!(GoalKind::all().len(), 9);
     }
 
     #[test]

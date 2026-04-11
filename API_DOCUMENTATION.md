@@ -133,9 +133,11 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--goal` | string | `all` | Goal to evaluate against. Use `all` to test all 6 goals |
+| `--goal` | string | `all` | Goal to evaluate against. Use `all` to test all 9 goals |
 | `--brain-type` | string | `normal` | Brain type profile. Use `all` to test all 5 types |
 | `--duration` | float | `10.0` | Audio duration per evaluation (seconds) |
+| `--assr` | flag | `false` | Enable ASSR transfer function (auditory pathway filtering). Off by default for `evaluate`; always on in the `optimize` pipeline |
+| `--thalamic-gate` | flag | `false` | Enable arousal-dependent thalamic gating. Off by default for `evaluate`; always on in the `optimize` pipeline |
 
 #### Examples
 
@@ -152,6 +154,9 @@ cargo run --release -- evaluate presets/my_preset.json --goal focus --brain-type
 # Full matrix: all goals x all brain types
 cargo run --release -- evaluate presets/my_preset.json --goal all --brain-type all
 
+# Match the optimize pipeline (ASSR + thalamic gate enabled)
+cargo run --release -- evaluate presets/my_preset.json --goal focus --assr --thalamic-gate
+
 # Longer evaluation for more stable results
 cargo run --release -- evaluate presets/my_preset.json --goal meditation --duration 20
 ```
@@ -163,6 +168,7 @@ Per-goal diagnostic table:
 ```
 === Focus (Normal) ===
   Score: 0.743  Verdict: OK
+    (base 0.721 + PLV bonus 0.022, asymmetry penalty 0.000)
 
     Band              Target           Actual     Status
     Delta             0.00-0.08        0.012      PASS
@@ -176,7 +182,13 @@ Per-goal diagnostic table:
 
     Dominant freq:    12.4 Hz (Beta)
     Spectral centroid: 12.4 Hz
+    Alpha asymmetry:   0.12 (L-R / L+R)
+    PLV (beta):        0.22
 ```
+
+The score is the result of `Goal::evaluate_full()` (`src/scoring.rs`):
+`final = clamp(band_weight·band_score + fhn_weight·fhn_score − asymmetry_penalty + plv_weight·PLV·0.10, 0, 1)`.
+See the Goals Reference below for per-goal weights.
 
 ---
 
@@ -280,7 +292,7 @@ No options. Runs 5 tests:
 ### Full Test Suite
 
 ```bash
-# Run all 236 tests
+# Run the full suite (~300+ tests)
 cargo test
 
 # Run in release mode (faster for pipeline tests)
@@ -298,46 +310,53 @@ cargo test sigmoid_at_v0_equals_half_max
 Run tests for a single module using the module path filter:
 
 ```bash
-# Auditory model (22 tests) — ERB formula, channel spacing, band grouping, FFT energy
+# Auditory gammatone filterbank — ERB formula, channel spacing, band grouping, FFT energy
 cargo test auditory::gammatone::tests
 
-# FitzHugh-Nagumo model (20 tests) — ODE derivatives, spike detection, ISI CV, bifurcation
+# ASSR transfer function — DC/AC separation, frequency-dependent attenuation
+cargo test auditory::assr::tests
+
+# Thalamic gate — arousal mapping, band-dependent offset shifts
+cargo test auditory::thalamic_gate::tests
+
+# FitzHugh-Nagumo model — ODE derivatives, spike detection, ISI CV, bifurcation
 cargo test neural::fhn::tests
 
-# Jansen-Rit model (23 tests) — sigmoid, ODE structure, band powers, Wendling extension
+# Jansen-Rit model — sigmoid, ODE structure, band powers, Wendling extension,
+# inhibitory callosal coupling, stochastic drive, habituation
 cargo test neural::jansen_rit::tests
 
-# Wilson-Cowan model (15 tests) — E-I oscillation, frequency tuning, sigmoid, bounds
+# Wilson-Cowan model — adaptive frequency tracking (±5 Hz Arnold tongue), E-I oscillation
 cargo test neural::wilson_cowan::tests
 
-# Performance vector (18 tests) — entrainment ratio, E/I stability, spectral centroid
+# Performance vector — entrainment ratio, E/I stability, spectral centroid, PLV
 cargo test neural::performance::tests
 
-# Neural integration tests (6 tests) — bilateral model, hemispheric asymmetry, callosal coupling
+# Neural integration tests — bilateral model, hemispheric asymmetry, callosal coupling
 cargo test neural::tests::tests
 
-# Brain type profiles (18 tests) — parameter validity, cross-type invariants, AST hypothesis
+# Brain type profiles — parameter validity, cross-type invariants
 cargo test brain_type::tests
 
-# Scoring system (25 tests) — Gaussian formula, goal targets, brightness modifiers, FHN scoring
+# Scoring system — Gaussian formula, goal targets, asymmetry penalty, PLV bonus, FHN scoring
 cargo test scoring::tests
 
-# Preset parameter space (18 tests) — genome encoding, bounds, clamping, stochastic remapping
+# Preset parameter space — genome encoding, bounds, clamping, stochastic remapping
 cargo test preset::tests
 
-# Spatial movement patterns (14 tests) — orbit, pendulum, random walk, boundary enforcement
+# Spatial movement patterns — orbit, pendulum, figure-eight, random walk, boundary enforcement
 cargo test movement::tests
 
-# Simulation pipeline (17 tests) — decimation, deinterleave, spectral brightness, constants
+# Simulation pipeline — global normalization, 95th percentile FHN scaling, deinterleave, decimation
 cargo test pipeline::tests
 
-# Differential evolution optimizer (20 tests) — DE/rand/1/bin, convergence, discrete handling
+# Differential evolution optimizer — DE/rand/1/bin, convergence, discrete handling
 cargo test optimizer::differential_evolution::tests
 
-# Regression tests (16 tests) — scoring snapshots, genome round-trip, pipeline integration
+# Regression tests — scoring snapshots, genome round-trip, pipeline integration
 cargo test regression_tests::tests
 
-# Preset analysis tests (4 tests) — parameter sweep sensitivity
+# Preset analysis tests — parameter sweep sensitivity
 cargo test analyze_preset::tests
 ```
 
@@ -384,16 +403,25 @@ cargo test -- --test-threads=1
 
 ## Goals Reference
 
-Available values for the `--goal` option:
+Available values for the `--goal` option. All 9 goals are iterated when `--goal all` is used.
 
-| Goal | Aliases | Target Brain State |
-|------|---------|-------------------|
-| `focus` | `concentration` | Beta dominant, frontal theta. Active task engagement |
-| `deep_work` | `deepwork`, `flow` | Alpha dominant with theta support. Flow state |
-| `sleep` | — | Theta dominant, delta emerging. NREM stage 1-2 |
-| `deep_relaxation` | `relaxation`, `relax` | Theta + alpha dominant. Pre-sleep unwinding |
-| `meditation` | `meditate` | Theta + alpha co-dominant. Focused-attention meditation |
-| `isolation` | `masking` | Flat spectrum. Noise masking, neutral cortical state |
+| Goal | Aliases | Target Brain State | Band/FHN Weights | PLV Bonus | Asymmetry Penalty |
+|------|---------|-------------------|:-:|:-:|:-:|
+| `focus` | `concentration` | Beta dominant, frontal theta. Active task engagement | 0.70 / 0.30 | 100% | 5% (thr 0.5) |
+| `deep_work` | `deepwork` | Alpha dominant with theta support. Flow for cognitively demanding work | 0.75 / 0.25 | 60% | 5% (thr 0.5) |
+| `sleep` | — | Theta dominant, delta emerging. NREM stage 1-2 | 0.65 / 0.35 | 0% | none |
+| `deep_relaxation` | `relaxation`, `relax` | Theta + alpha dominant. Pre-sleep unwinding | 0.70 / 0.30 | 0% | 12% (thr 0.3) |
+| `meditation` | `meditate` | Theta + alpha co-dominant. Focused-attention meditation (samatha) | 0.65 / 0.35 | 30% | 15% (thr 0.2) |
+| `isolation` | `masking` | Flat spectrum. Noise masking, neutral cortical state | 0.80 / 0.20 | 80% | 8% (thr 0.4) |
+| `shield` | — | Beta-dominant focused masking, minimal theta, stable FHN | 0.70 / 0.30 | 70% | 8% (thr 0.4) |
+| `flow` | — | Alpha-dominant rhythmic synchronization, moderate beta | 0.70 / 0.30 | 30% | 12% (thr 0.3) |
+| `ignition` | — | Gamma-driven activation, high FHN for ADHD cognitive binding | 0.70 / 0.30 | 100% | 3% (thr 0.6) |
+
+**PLV bonus**: up to `10% × weight × PLV` added to the score. Goals that want genuine phase-locked entrainment (focus, ignition, isolation, shield) are rewarded when the cortical response locks onto the driving modulation frequency.
+
+**Asymmetry penalty**: linear ramp from 0 at the threshold to the listed max at |asymmetry|=1. Penalizes excessive L/R alpha lateralization for balance-wanting goals; sleep ignores it entirely.
+
+See `src/scoring.rs` for the exact band targets and the `Goal::evaluate_full()` formula.
 
 ---
 
@@ -463,7 +491,9 @@ Presets are JSON files with this structure:
 
 #### Field Reference
 
-**Noise colors** (`anchor_color`, `color`): 0=White, 1=Pink, 2=Brown, 3=Blue, 4=Violet, 5=Grey, 6=SSN
+**Noise colors** (`anchor_color`, `color`): 0=White, 1=Pink, 2=Brown, 3=Green, 4=Grey, 5=Black, 6=SSN, 7=Blue
+
+(Canonical source: `NoiseColor::from_u8` in `noise_generator_dsp/crates/core/src/lib.rs:176–188`, labels from `src/main.rs:1048`.)
 
 **Spatial modes** (`spatial_mode`): 0=Stereo, 1=Immersive
 
@@ -539,6 +569,8 @@ Reported as **normalized fractions** summing to 1.0:
 
 ### Spectral Brightness
 
+Brightness is computed and reported for diagnostic purposes, but **no longer contributes to the score**. After the shift to global band normalization, the neural model captures spectral differences directly, so a separate brightness term would double-count the same information (`src/scoring.rs:402–407`). The `brightness` parameter on `evaluate_with_brightness()` is kept for API compatibility only.
+
 | Value | Character | Noise Example |
 |-------|-----------|---------------|
 | 0.0 | Very dark | Brown noise (1/f^2) |
@@ -546,3 +578,11 @@ Reported as **normalized fractions** summing to 1.0:
 | 0.5 | Neutral | — |
 | 0.7 | Bright | White noise (flat) |
 | 1.0 | Very bright | Blue/violet noise |
+
+### Alpha Asymmetry
+
+Reported as `(L − R) / (L + R)` on alpha-band power across hemispheres. Range [-1, 1]: 0 = balanced, ±1 = fully lateralized. Used in scoring via `Goal::asymmetry_penalty()`.
+
+### Phase-Locking Value (PLV)
+
+PLV ∈ [0, 1] measures phase coherence between the driving modulation frequency and the cortical response (Lachaux et al. 1999). Computed in `src/neural/performance.rs` via bandpass filter (±3 Hz) → Hilbert analytic signal → averaged unit phasors: `PLV = |1/N × Σ exp(i·Δφ)|`. Values > 0.6 indicate strong entrainment; < 0.3 is essentially noise.

@@ -520,6 +520,9 @@ mod tests {
             GoalKind::Isolation => (5.0, 0.35),
             GoalKind::Meditation => (3.5, 0.28),
             GoalKind::DeepWork => (8.0, 0.30),
+            GoalKind::Shield => (10.0, 0.25),
+            GoalKind::Flow => (7.0, 0.30),
+            GoalKind::Ignition => (18.0, 0.35),
         };
 
         FhnResult {
@@ -539,30 +542,30 @@ mod tests {
 
     /// Default config (both disabled) produces identical scores to pre-change baseline.
     #[test]
-    fn assr_and_gate_disabled_by_default() {
+    fn assr_and_gate_enabled_by_default() {
         let config = SimulationConfig::default();
-        assert!(!config.assr_enabled, "ASSR should be disabled by default");
-        assert!(!config.thalamic_gate_enabled, "Thalamic gate should be disabled by default");
+        assert!(config.assr_enabled, "ASSR should be enabled by default");
+        assert!(config.thalamic_gate_enabled, "Thalamic gate should be enabled by default");
     }
 
     /// Pipeline with both features disabled produces same score as before.
     #[test]
-    fn disabled_features_preserve_existing_scores() {
+    fn enabled_features_are_consistent() {
         let preset = Preset::default();
-        let config_off = SimulationConfig::default(); // both disabled
+        let config1 = SimulationConfig::default(); // both enabled
 
-        let mut config_explicit = SimulationConfig::default();
-        config_explicit.assr_enabled = false;
-        config_explicit.thalamic_gate_enabled = false;
+        let mut config2 = SimulationConfig::default();
+        config2.assr_enabled = true;
+        config2.thalamic_gate_enabled = true;
 
         let goal = Goal::new(GoalKind::Focus);
-        let result_off = evaluate_preset(&preset, &goal, &config_off);
-        let result_explicit = evaluate_preset(&preset, &goal, &config_explicit);
+        let result1 = evaluate_preset(&preset, &goal, &config1);
+        let result2 = evaluate_preset(&preset, &goal, &config2);
 
         assert!(
-            (result_off.score - result_explicit.score).abs() < 1e-10,
-            "Explicitly disabled should match default: {} vs {}",
-            result_off.score, result_explicit.score
+            (result1.score - result2.score).abs() < 1e-10,
+            "Default and explicit enabled should match: {} vs {}",
+            result1.score, result2.score
         );
     }
 
@@ -593,13 +596,13 @@ mod tests {
 
     /// ASSR enabled changes scores (proves the component has effect).
     #[test]
-    fn assr_enabled_changes_scores() {
+    fn assr_disabled_changes_scores() {
         let preset = make_modulated_preset();
         let goal = Goal::new(GoalKind::Focus);
 
-        let config_off = SimulationConfig::default();
-        let mut config_on = SimulationConfig::default();
-        config_on.assr_enabled = true;
+        let config_on = SimulationConfig::default(); // enabled by default
+        let mut config_off = SimulationConfig::default();
+        config_off.assr_enabled = false;
 
         let result_off = evaluate_preset(&preset, &goal, &config_off);
         let result_on = evaluate_preset(&preset, &goal, &config_on);
@@ -621,13 +624,13 @@ mod tests {
 
     /// Thalamic gate enabled changes scores.
     #[test]
-    fn thalamic_gate_enabled_changes_scores() {
+    fn thalamic_gate_disabled_changes_scores() {
         let preset = make_modulated_preset();
         let goal = Goal::new(GoalKind::DeepRelaxation);
 
-        let config_off = SimulationConfig::default();
-        let mut config_on = SimulationConfig::default();
-        config_on.thalamic_gate_enabled = true;
+        let config_on = SimulationConfig::default(); // enabled by default
+        let mut config_off = SimulationConfig::default();
+        config_off.thalamic_gate_enabled = false;
 
         let result_off = evaluate_preset(&preset, &goal, &config_off);
         let result_on = evaluate_preset(&preset, &goal, &config_on);

@@ -249,6 +249,72 @@
 - [ ] **Ref:** Obleser J, Kayser C (2019). "Neural entrainment and attentional selection in the listening brain." *Trends Cogn Sci* 23(11):913-926. — methodological framework for measuring neural entrainment to auditory stimuli.
 - [ ] **Ref:** Zoefel B, ten Oever S, Sack AT (2018). "The involvement of endogenous neural oscillations in the processing of rhythmic input." *Front Neurosci* 12:95. — distinguishes true entrainment from evoked responses; critical for PLV validation.
 
+## Priority 13: Cortical Envelope Tracking (CET) Pathway (MEDIUM IMPACT, MEDIUM EFFORT)
+
+**Problem:** The current pipeline has no explicit mechanism for *cortical envelope tracking* — the well-documented slow (0.5–8 Hz) phase-locking of auditory cortex to the amplitude envelope of natural sounds (speech, wind, waves, ASMR). Three specific limitations:
+
+1. **Slow modulation is attenuated by ASSR.** `pipeline.rs:305-321` applies a scalar ASSR modifier (log-Gaussian peaked at 10/40 Hz, from `compute_input_scale_modifier`) uniformly to the AC component of *all* bands. A 5 Hz NeuralLfo sits in a trough of that curve and gets its AC component suppressed before it ever reaches JR — the exact opposite of what the cortical envelope-tracking literature predicts for slow-rate stimuli.
+2. **No slow inhibitory population in JR.** Current Jansen-Rit uses canonical a=100/s (τ_e≈10 ms), b=50/s (τ_i≈20 ms). Tracking 4–8 Hz theta-rate envelopes cleanly requires a GABA_B-like slow inhibitory time constant (τ ≈ 100–200 ms). Without it, JR's internal dynamics actively resist locking to the 5 Hz envelope.
+3. **PLV is measured against the carrier, not the envelope.** `compute_plv()` in `performance.rs` builds a reference sinusoid at `target_lfo_freq` (the NeuralLfo carrier). For CET, the physiologically meaningful quantity is PLV between the cortical response and the *instantaneous phase of the extracted envelope*, not the phase of a synthetic sine at the LFO rate.
+
+Net result: presets that rely on slow envelope fluctuations (Ground, Drift, relaxation/meditation targets) can't be rewarded for CET-mediated entrainment, and the optimizer has no gradient toward "organic" envelope-modulated designs (surf, wind, breath-paced pink noise).
+
+**Solution:** Implement CET as a three-part extension gated behind a new `cet_enabled` config flag, mirroring the `assr_enabled` / `thalamic_gate_enabled` pattern. The existing gammatone envelope (`gammatone.rs:121-125`) already does the physiologically correct thing (magnitude → 80 Hz LPF → decimate) — CET builds on top of it, it does not replace it.
+
+### 13a. Bifurcate input into fast (ASSR) and slow (CET) pathways
+- [ ] **PRECHECK:** Before any code changes, run a probe to verify that AC-dominance is sufficient at low rates. Build a synthetic preset with 5 Hz NeuralLfo on broadband pink noise, render 10 s, and measure the AC/DC ratio of the decimated band 0 signal (after `trim()` at `pipeline.rs:286-297`, before the ASSR block). If AC/(|DC|+AC) < 0.15 the Priority 1b "JR is mean-driven" finding still holds at low rates and this whole priority is moot — abort and revisit step 13b first. If AC fraction ≥ 0.3, proceed.
+- [ ] Add a 2-way Linkwitz-Riley crossover (4th-order, cutoff ~10 Hz) on each decimated band signal in `pipeline.rs`, right after `trim()` and *before* the ASSR block at line 305. Produces `slow_bands_{l,r}` (0.5–10 Hz envelope drive) and `fast_bands_{l,r}` (>10 Hz carrier drive).
+- [ ] Apply the existing ASSR modifier *only* to `fast_bands` (current behavior, unchanged for that subset). `slow_bands` bypasses ASSR entirely — this is the core fix for the "ASSR kills 5 Hz" problem.
+- [ ] Recombine fast + slow per band before passing to `simulate_bilateral()`, OR (cleaner) pass them as two separate excitatory drives into JR — see 13b.
+- [ ] Gate behind `SimulationConfig.cet_enabled` (default `false` — zero regression on existing presets).
+- [ ] Add CLI flag `--cet` on the `evaluate` command, mirroring `--assr` and `--thalamic-gate`.
+- [ ] Unit tests: crossover sum reconstructs original signal (< 0.1% error on white noise input), slow-path energy at 5 Hz unaffected by ASSR when `cet_enabled=true`, fast-path energy at 40 Hz still attenuated per ASSR curve.
+
+### 13b. Slow inhibitory population in Jansen-Rit (GABA_B-like)
+- [ ] Add a third inhibitory population to `JansenRitModel` with slow time constant: `b_slow ≈ 5–10 /s` (τ ≈ 100–200 ms), driven by pyramidal activity with its own gain `B_slow` and connectivity `C_slow`. Keep the existing fast GABA_A (b=50/s) population intact — the slow population is additive.
+- [ ] Wire the slow population into `derivatives_with_habituation()` in `jansen_rit.rs`: pyramidal membrane potential gains a second inhibitory current term.
+- [ ] When `cet_enabled=true`, the slow-band CET input (from 13a) drives the pyramidal excitatory input *and* is weighted into the slow-inhibitory drive (so envelope-locked activity engages slow GABA_B-mediated feedback, giving the circuit a natural 4–8 Hz attractor).
+- [ ] Parameters from Spiegler et al. (2011) and Moran et al. (2007) — both already in the JR/DCM literature, ballpark `B_slow = 10 mV`, `C_slow = 30`, `b_slow = 5 /s`.
+- [ ] Default `B_slow = 0.0` when `cet_enabled=false` → bitwise-identical to current JR (regression guarantee, same pattern as `stochastic_sigma=0` in Priority 7).
+- [ ] Unit tests: (a) `B_slow=0` produces bitwise-identical output to current model, (b) with `B_slow>0` and 5 Hz envelope input, band 1 (theta) power increases ≥2× versus B_slow=0, (c) model remains stable (finite, bounded) across brain types.
+
+### 13c. Envelope-phase PLV metric
+- [ ] Add `compute_envelope_plv()` in `performance.rs`: takes the decimated slow-band envelope signal from 13a and the theta-filtered EEG output from JR, runs both through the existing Hilbert machinery (`hilbert_analytic_signal` from `performance.rs`, per Marple 1999), computes phase difference, returns `|1/N Σ exp(i·Δφ)|`. Reuse ~80% of the existing `compute_plv()` code path; the only change is the reference is the envelope's instantaneous phase, not `sin(2πft)`.
+- [ ] Add `envelope_plv: Option<f64>` field to `PerformanceVector` alongside the existing `plv`.
+- [ ] Wire into `Goal::evaluate_full()` in `scoring.rs` with a per-goal weight. Suggested weights (relaxation goals benefit; beta/gamma goals don't):
+  - Ground/Sleep: 80% (current carrier-PLV is 0% for these goals — CET gives them their first real entrainment signal)
+  - Deep Relaxation: 70%
+  - Meditation: 60%
+  - Drift/Flow: 40%
+  - Deep Work: 20%
+  - Focus/Isolation/Shield/Ignition: 0% (these already score well on carrier-PLV; don't dilute)
+- [ ] Do NOT replace the existing carrier PLV — envelope-PLV is *additive* on a different axis. A preset can have high carrier-PLV (beta entrainment to 25 Hz LFO) AND high envelope-PLV (theta entrainment to 5 Hz breath modulation) simultaneously; both deserve credit.
+- [ ] Unit tests: (a) 5 Hz envelope-modulated input with CET enabled → envelope_plv > 0.6, (b) flat input → envelope_plv < 0.3, (c) scoring unchanged on existing presets when `cet_enabled=false`, (d) relaxation presets with strong envelope modulation score higher with CET on than off.
+
+### 13d. Validation against existing presets
+- [ ] Re-evaluate Ground, Drift, and Shield/Flow/Ignition baselines with `cet_enabled=true`. Expected: Ground and Drift gain (they use slow modulation); Shield/Flow/Ignition unchanged or slightly up (their carrier-PLV dominates).
+- [ ] Optimize a new Ground-class preset with `cet_enabled=true` and verify the optimizer discovers envelope-modulated designs (NeuralLfo at 1–5 Hz, deep modulation depth) without any direct hint in the fitness function.
+- [ ] Regression test in `regression_tests.rs`: CET-disabled path produces bitwise-identical scores to pre-CET baseline for all existing preset snapshots.
+
+### Caveats worth respecting
+- The Priority 1b investigation (`update_model.md:11`, Obsolete/Superseded:256-258) empirically found that AC was ~5% of total band power and JR was effectively mean-driven. That measurement was for *40 Hz carrier modulation on high bands*, where the 80 Hz gammatone LPF already squashes the carrier. For 1–8 Hz envelopes on low bands the AC fraction is much larger and the finding doesn't automatically carry over — but step 13a's PRECHECK is non-optional. If the precheck fails, implement 13b first (slow GABA_B population) so that JR actually *can* respond to AC drive at all, then retry 13a.
+- Don't couple CET to the `stochastic_jr_enabled` flag — they're orthogonal (noise broadens the spectrum, CET adds a structured slow drive). Both should be independently toggleable.
+- CET must not bypass the thalamic gate's operating-point shifts (Priority 2). The slow input drive is modulated by the same `band_offsets` (post-gate) as the fast drive — the two pathways share the JR circuit, they don't duplicate it.
+
+### References
+
+- [ ] **Ref:** Ding N, Simon JZ (2014). "Cortical entrainment to continuous speech: functional roles and interpretations." *Front Hum Neurosci* 8:311. — foundational review of cortical envelope tracking; establishes that auditory cortex phase-locks to the 1–8 Hz envelope of natural sound even when no periodic carrier is present.
+- [ ] **Ref:** Giraud AL, Poeppel D (2012). "Cortical oscillations and speech processing: emerging computational principles and operations." *Nat Neurosci* 15(4):511-517. — theta/delta cortical oscillations as the computational substrate for envelope tracking; motivates the GABA_B slow time constant.
+- [ ] **Ref:** Lakatos P, Karmos G, Mehta AD, Ulbert I, Schroeder CE (2008). "Entrainment of neuronal oscillations as a mechanism of attentional selection." *Science* 320(5872):110-113. — demonstrates that slow-envelope entrainment is an active attentional mechanism, not a passive following response; validates scoring CET for attention-related goals.
+- [ ] **Ref:** Luo H, Poeppel D (2007). "Phase patterns of neuronal responses reliably discriminate speech in human auditory cortex." *Neuron* 54(6):1001-1010. — MEG evidence that envelope-phase (not amplitude) carries the bulk of cortical tracking information; directly motivates the envelope-phase PLV formulation in 13c.
+- [ ] **Ref:** Peelle JE, Davis MH (2012). "Neural oscillations carry speech rhythm through to comprehension." *Front Psychol* 3:320. — syllabic-rate (3–7 Hz) cortical tracking mechanism; sets the cutoff rationale for the 10 Hz crossover in 13a.
+- [ ] **Ref:** Doelling KB, Arnal LH, Ghitza O, Poeppel D (2014). "Acoustic landmarks drive delta-theta oscillations to enable speech comprehension by facilitating perceptual parsing." *NeuroImage* 85:761-768. — shows that removing slow envelope cues (highpassing the amplitude modulation above ~8 Hz) destroys cortical tracking; empirical mirror of the "ASSR kills slow modulation" bug.
+- [ ] **Ref:** Obleser J, Kayser C (2019). "Neural entrainment and attentional selection in the listening brain." *Trends Cogn Sci* 23(11):913-926. — methodological framework for measuring envelope entrainment (already cited in Priority 12; reused here for the PLV-against-envelope formulation).
+- [ ] **Ref:** Zoefel B, ten Oever S, Sack AT (2018). "The involvement of endogenous neural oscillations in the processing of rhythmic input." *Front Neurosci* 12:95. — distinguishes genuine envelope entrainment from evoked responses (already cited in Priority 12); critical for validating 13c against trivial transient locking.
+- [ ] **Ref:** Spiegler A, Kiebel SJ, Atay FM, Knösche TR (2011). "Complex behavior in a modified Jansen and Rit neural mass model." *Biol Cybern* 104:229-254. — provides extended JR parameter sets including slow inhibitory populations; parameter source for 13b's `B_slow`, `C_slow`, `b_slow`.
+- [ ] **Ref:** Moran RJ, Stephan KE, Seidenbecher T, Pape HC, Dolan RJ, Friston KJ (2007). "A neural mass model of spectral responses in electrophysiology." *NeuroImage* 37(3):706-720. — DCM-oriented JR extension with GABA_A/GABA_B separation; canonical reference for the slow inhibitory time constant used in 13b.
+- [ ] **Ref:** Ghitza O (2011). "Linking speech perception and neurophysiology: speech decoding guided by cascaded oscillators locked to the input rhythm." *Front Psychol* 2:130. — cascaded-oscillator model of envelope tracking; architectural precedent for the fast/slow pathway bifurcation in 13a.
+
 ---
 
 ## Obsolete / Superseded
