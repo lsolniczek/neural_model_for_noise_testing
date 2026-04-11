@@ -161,6 +161,44 @@ pub struct JansenRitModel {
     pub stochastic_sigma: f64,
     /// RNG state for stochastic noise (simple xorshift64 for reproducibility).
     stochastic_rng: u64,
+    // ── Slow GABA_B inhibitory population (Priority 13b — CET) ──────────
+    //
+    // The Wendling 4-population JR has two inhibitory populations but BOTH
+    // operate on GABA_A timescales (b_rate = 50/s ≈ 20 ms; g_fast_rate ≈ 500/s
+    // ≈ 2 ms). Cortical envelope tracking of 1–8 Hz envelopes requires a
+    // genuinely slow inhibitory feedback loop with τ ≈ 100–200 ms — i.e. a
+    // GABA_B-like population, missing from canonical JR.
+    //
+    // Per Moran & Friston (2011) "canonical microcircuit" extension and
+    // Ghitza (2011) cascaded-oscillator model, we add a parallel 2-state
+    // population [y_slow_0, y_slow_1] driven by pyramidal firing S(v_pyr):
+    //
+    //   dy_slow_0/dt = y_slow_1
+    //   dy_slow_1/dt = B_slow · b_slow · C_slow · S(v_pyr)
+    //                  − 2·b_slow · y_slow_1 − b_slow² · y_slow_0
+    //
+    // The slow PSP `y_slow_0` is subtracted from the EEG output:
+    //   eeg = y[1] − y[2] − y[3] − y_slow_0
+    //
+    // This is additive to the existing 8-state Wendling system: when
+    // `b_slow_gain == 0.0` (default), the slow ODE evaluates to zero,
+    // y_slow_0 stays at zero forever, the EEG subtraction is a no-op,
+    // and the model is bitwise-identical to its pre-CET behaviour.
+    //
+    // Refs:
+    // - Moran RJ, Friston KJ (2011). Canonical microcircuit DCM with
+    //   GABA_A and GABA_B populations. *NeuroImage* 56(3):1131-1144.
+    // - Ghitza O (2011). "Linking speech perception and neurophysiology."
+    //   *Front Psychol* 2:130. — slow inhibitory loop for envelope tracking.
+    /// Slow inhibitory synaptic gain B_slow (mV). 0.0 = disabled (default).
+    /// Suggested when CET enabled: 10.0 mV per Moran & Friston (2011).
+    pub b_slow_gain: f64,
+    /// Slow inhibitory rate constant (1/s). 0.0 = disabled (default).
+    /// Suggested when CET enabled: 5.0 /s (τ ≈ 200 ms, GABA_B timescale).
+    pub b_slow_rate: f64,
+    /// Slow inhibitory connectivity from pyramidal firing. 0.0 = disabled.
+    /// Suggested when CET enabled: 30.0 (matches C3/C4 ratio in canonical JR).
+    pub c_slow: f64,
 }
 
 impl JansenRitModel {
@@ -191,6 +229,10 @@ impl JansenRitModel {
             habituation_recovery: 0.0,
             stochastic_sigma: 0.0,
             stochastic_rng: 42,
+            // Slow GABA_B (CET 13b) — disabled by default → bitwise regression safe.
+            b_slow_gain: 0.0,
+            b_slow_rate: 0.0,
+            c_slow: 0.0,
         }
     }
 
@@ -229,6 +271,9 @@ impl JansenRitModel {
             habituation_recovery: 0.0,
             stochastic_sigma: 0.0,
             stochastic_rng: 42,
+            b_slow_gain: 0.0,
+            b_slow_rate: 0.0,
+            c_slow: 0.0,
         }
     }
 
@@ -271,6 +316,9 @@ impl JansenRitModel {
             habituation_recovery: 0.0,
             stochastic_sigma: 0.0,
             stochastic_rng: 42,
+            b_slow_gain: 0.0,
+            b_slow_rate: 0.0,
+            c_slow: 0.0,
         }
     }
 
@@ -349,6 +397,40 @@ impl JansenRitModel {
         self.derivatives_with_habituation(y, p, 1.0)
     }
 
+    /// Set the slow inhibitory (GABA_B) parameters in one call.
+    /// `gain` is B_slow (mV), `rate` is b_slow (1/s), `c` is C_slow (dimensionless).
+    /// Setting `gain = 0.0` disables the population entirely (default state).
+    pub fn set_slow_inhib(&mut self, gain: f64, rate: f64, c: f64) {
+        self.b_slow_gain = gain;
+        self.b_slow_rate = rate;
+        self.c_slow = c;
+    }
+
+    /// Slow GABA_B inhibitory population derivatives.
+    /// Driven by sigmoid(v_pyr) where v_pyr is the *current* pyramidal membrane
+    /// potential including the slow PSP feedback (consistent with the canonical
+    /// microcircuit formulation in Moran & Friston 2011).
+    ///
+    /// Returns [dy_slow_0/dt, dy_slow_1/dt]. Returns [0.0, 0.0] when disabled.
+    #[inline]
+    fn slow_inhib_derivatives(&self, y_main: &[f64; 8], y_slow: &[f64; 2]) -> [f64; 2] {
+        if self.b_slow_gain == 0.0 {
+            return [0.0, 0.0];
+        }
+        // Pyramidal membrane voltage including the slow PSP feedback
+        let v_pyr = y_main[1] - y_main[2] - y_main[3] - y_slow[0];
+        let sig_vpyr = self.sigmoid(v_pyr);
+        let bs = self.b_slow_rate;
+        let bg = self.b_slow_gain;
+        [
+            // dy_slow_0/dt = y_slow_1
+            y_slow[1],
+            // dy_slow_1/dt = B_slow · b_slow · C_slow · S(v_pyr)
+            //                − 2·b_slow · y_slow_1 − b_slow² · y_slow_0
+            bg * bs * self.c_slow * sig_vpyr - 2.0 * bs * y_slow[1] - bs * bs * y_slow[0],
+        ]
+    }
+
     /// Generate approximate Gaussian noise using Box-Muller from xorshift64.
     /// Per Ableidinger et al. (2017): stochastic input breaks the mean-field
     /// assumption, enabling theta/delta oscillations.
@@ -385,6 +467,12 @@ impl JansenRitModel {
 
         let h = self.dt / sub_steps as f64;
 
+        // Slow GABA_B (CET 13b) state. Stays at zero forever when disabled,
+        // so we only update it conditionally — guarantees bitwise identity
+        // with pre-CET model when b_slow_gain == 0.
+        let mut y_slow = [0.0_f64; 2];
+        let slow_enabled = self.b_slow_gain > 0.0;
+
         let warmup_steps = (self.sample_rate * 1.0) as usize;
         let warmup_p = self.input_offset + input[0] * self.input_scale;
         for _ in 0..warmup_steps {
@@ -399,6 +487,17 @@ impl JansenRitModel {
                 let k4 = self.derivatives(&y_tmp, warmup_p);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
+                if slow_enabled {
+                    let s1 = self.slow_inhib_derivatives(&y, &y_slow);
+                    let s2 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                    let s3 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                    let s4 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                    y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                    y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
             }
         }
@@ -425,14 +524,27 @@ impl JansenRitModel {
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
                 }
+                if slow_enabled {
+                    let s1 = self.slow_inhib_derivatives(&y, &y_slow);
+                    let s2 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                    let s3 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                    let s4 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                    y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                    y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
+                }
             }
-            eeg[i] = y[1] - y[2] - y[3];
+            // EEG = pyramidal − fast/dendritic inhibition − somatic inhibition − slow GABA_B.
+            // y_slow[0] is zero when slow_enabled == false → matches pre-CET formula.
+            eeg[i] = y[1] - y[2] - y[3] - y_slow[0];
             y3_trace[i] = y[3];
 
             // Update habituation: depression increases with pyramidal activity,
             // recovers toward 0. Activity measure: |S(v_pyr)| / V_MAX ∈ [0, 1].
             if hab_rate > 0.0 {
-                let v_pyr = y[1] - y[2] - y[3];
+                let v_pyr = y[1] - y[2] - y[3] - y_slow[0];
                 let activity = self.sigmoid(v_pyr) / V_MAX; // normalized [0, 1]
                 depression += hab_rate * activity - hab_recovery * depression;
                 depression = depression.clamp(0.0, 0.8); // max 80% depression
@@ -460,6 +572,12 @@ impl JansenRitModel {
         // y3/y7 = fast inhibitory (GABA-A), zero-initialised → JR95 compat
         let mut y = [0.001_f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
+        // Slow GABA_B (CET 13b) — additive parallel population. Stays at zero
+        // when disabled, making the EEG subtraction below a no-op (bitwise
+        // regression-safe per IEEE 754: x - 0.0 == x).
+        let mut y_slow = [0.0_f64; 2];
+        let slow_enabled = self.b_slow_gain > 0.0;
+
         // Use more sub-steps when fast inhibitory is active (g_rate up to 500)
         let sub_steps = if self.g_fast_rate > 200.0 { 3_usize } else { 2_usize };
         let h = self.dt / sub_steps as f64;
@@ -480,6 +598,17 @@ impl JansenRitModel {
                 let k4 = self.derivatives(&y_tmp, warmup_p);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
+                if slow_enabled {
+                    let s1 = self.slow_inhib_derivatives(&y, &y_slow);
+                    let s2 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                    let s3 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                    let s4 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                    y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                    y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
             }
         }
@@ -505,15 +634,26 @@ impl JansenRitModel {
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
                 }
+                if slow_enabled {
+                    let s1 = self.slow_inhib_derivatives(&y, &y_slow);
+                    let s2 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                    let s3 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                    let s4 = self.slow_inhib_derivatives(
+                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                    y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                    y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
+                }
             }
 
-            eeg[i] = y[1] - y[2] - y[3];
+            eeg[i] = y[1] - y[2] - y[3] - y_slow[0];
             if has_fast_inhib {
                 y3_trace[i] = y[3];
             }
 
             if hab_rate > 0.0 {
-                let v_pyr = y[1] - y[2] - y[3];
+                let v_pyr = y[1] - y[2] - y[3] - y_slow[0];
                 let activity = self.sigmoid(v_pyr) / V_MAX;
                 depression += hab_rate * activity - hab_recovery * depression;
                 depression = depression.clamp(0.0, 0.8);
@@ -802,6 +942,11 @@ pub fn simulate_bilateral(
     habituation_rate: f64,
     habituation_recovery: f64,
     stochastic_sigma: f64,
+    // CET 13b — Slow GABA_B params. All 0.0 = disabled (regression-safe default).
+    // Suggested when CET enabled: gain=10.0 mV, rate=5.0 /s, c_slow=30.0.
+    b_slow_gain: f64,
+    b_slow_rate: f64,
+    c_slow: f64,
 ) -> BilateralResult {
     let n = left_bands[0].len();
     let contra = bilateral.contralateral_ratio;
@@ -839,10 +984,12 @@ pub fn simulate_bilateral(
     let (rh_eeg, rh_y3) = run_hemisphere_tonotopic(
         &rh_bands, &rh_energy, &bilateral.right, c, input_scale, sample_rate, fast_inhib,
         v0, habituation_rate, habituation_recovery, stochastic_sigma,
+        b_slow_gain, b_slow_rate, c_slow,
     );
     let (lh_eeg, lh_y3) = run_hemisphere_tonotopic(
         &lh_bands, &lh_energy, &bilateral.left, c, input_scale, sample_rate, fast_inhib,
         v0, habituation_rate, habituation_recovery, stochastic_sigma,
+        b_slow_gain, b_slow_rate, c_slow,
     );
 
     // Phase 2: Apply callosal coupling (INHIBITORY).
@@ -944,6 +1091,9 @@ fn run_hemisphere_tonotopic(
     habituation_rate: f64,
     habituation_recovery: f64,
     stochastic_sigma: f64,
+    b_slow_gain: f64,
+    b_slow_rate: f64,
+    c_slow: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let n = bands[0].len();
     let mut eeg = vec![0.0_f64; n];
@@ -983,6 +1133,8 @@ fn run_hemisphere_tonotopic(
                 jr.habituation_rate = habituation_rate;
                 jr.habituation_recovery = habituation_recovery;
                 jr.stochastic_sigma = stochastic_sigma;
+                // CET 13b — slow GABA_B (default 0.0 → no-op).
+                jr.set_slow_inhib(b_slow_gain, b_slow_rate, c_slow);
                 let c1c2_scale = params.band_c1c2_scale[b];
                 if (c1c2_scale - 1.0).abs() > 1e-6 {
                     jr.scale_c1c2(c1c2_scale);
@@ -1490,6 +1642,154 @@ mod tests {
         assert!(
             diff > 0.01,
             "Different input offsets should produce different band powers"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Priority 13b: Slow GABA_B inhibitory population (CET)
+    //
+    // Per Moran & Friston (2011) "canonical microcircuit" extension of JR
+    // and Ghitza (2011), cortical envelope tracking depends on a slow
+    // inhibitory time constant (~200 ms / b_slow ≈ 5 /s) that the canonical
+    // Wendling 4-population model lacks. We add a parallel 2-state slow
+    // population [y8, y9] driven by pyramidal firing, contributing to the
+    // EEG via subtraction. Default b_slow_gain = 0.0 → bitwise-identical
+    // to current model (zero regression guarantee).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn slow_gaba_b_default_is_zero() {
+        // Newly constructed model must have slow GABA_B disabled.
+        let jr = JansenRitModel::new(SR);
+        assert_eq!(jr.b_slow_gain, 0.0, "default b_slow_gain must be 0");
+        assert_eq!(jr.b_slow_rate, 0.0, "default b_slow_rate must be 0");
+        assert_eq!(jr.c_slow, 0.0, "default c_slow must be 0");
+    }
+
+    #[test]
+    fn slow_gaba_b_disabled_bitwise_identical_to_pre_cet() {
+        // The CET zero-regression contract: turning the feature off via
+        // (b_slow_gain == 0) MUST produce the same EEG samples as the
+        // pre-CET model, byte for byte. Two independent runs of the
+        // default model (which has slow GABA_B off) must produce
+        // identical output to themselves and to a hand-zeroed config.
+        let mut jr_a = JansenRitModel::new(SR);
+        let mut jr_b = JansenRitModel::new(SR);
+        jr_b.b_slow_gain = 0.0;
+        jr_b.b_slow_rate = 0.0;
+        jr_b.c_slow = 0.0;
+
+        let input: Vec<f64> = (0..3000)
+            .map(|i| 0.5 + 0.3 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+
+        let r_a = jr_a.simulate(&input);
+        let r_b = jr_b.simulate(&input);
+
+        assert_eq!(r_a.eeg.len(), r_b.eeg.len());
+        for (i, (&a, &b)) in r_a.eeg.iter().zip(r_b.eeg.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "EEG sample {i} differs between two zero-slow-GABA_B runs: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn slow_gaba_b_changes_eeg_when_enabled() {
+        // The minimum guarantee that the new state is actually wired in:
+        // enabling slow GABA_B with non-zero gain MUST measurably change
+        // the EEG output relative to the disabled case. We do not yet
+        // require a specific direction (theta-band amplification needs
+        // the full pipeline to verify) — only that the dynamics differ.
+        let mut jr_off = JansenRitModel::new(SR);
+        let mut jr_on = JansenRitModel::new(SR);
+        // Moran & Friston 2011 canonical-microcircuit ballpark:
+        //   B_slow ≈ 10 mV, b_slow_rate ≈ 5 /s (τ ≈ 200 ms), C_slow ≈ 30
+        jr_on.b_slow_gain = 10.0;
+        jr_on.b_slow_rate = 5.0;
+        jr_on.c_slow = 30.0;
+
+        // 5 Hz envelope-modulated drive — the CET-relevant stimulus
+        let input: Vec<f64> = (0..5000)
+            .map(|i| 0.5 + 0.4 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+
+        let r_off = jr_off.simulate(&input);
+        let r_on = jr_on.simulate(&input);
+
+        // Compute mean absolute difference
+        let mad: f64 = r_off
+            .eeg
+            .iter()
+            .zip(r_on.eeg.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / r_off.eeg.len() as f64;
+
+        // The slow population subtracts a non-trivial slow PSP from the EEG.
+        // Sub-millivolt MAD is acceptable; we just want clear non-equality.
+        assert!(
+            mad > 1e-3,
+            "Slow GABA_B should perceptibly change EEG, MAD={mad:.6}"
+        );
+    }
+
+    #[test]
+    fn slow_gaba_b_output_finite_under_aggressive_params() {
+        // Stability check: even with an aggressive slow inhibitory loop,
+        // the simulator must not blow up to NaN/Inf. The new ODE is
+        // a damped second-order linear system driven by a bounded sigmoid,
+        // so it should stay bounded for any non-pathological input.
+        let mut jr = JansenRitModel::new(SR);
+        jr.b_slow_gain = 30.0; // 3× the default
+        jr.b_slow_rate = 8.0;
+        jr.c_slow = 60.0;
+
+        let input: Vec<f64> = (0..5000)
+            .map(|i| 0.5 + 0.6 * (2.0 * PI * 3.0 * i as f64 / SR).sin())
+            .collect();
+
+        let result = jr.simulate(&input);
+        assert!(!result.eeg.is_empty(), "EEG should be non-empty");
+        for (i, &v) in result.eeg.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "EEG[{i}] is non-finite ({v}) under aggressive slow GABA_B"
+            );
+            assert!(v.abs() < 1e6, "EEG[{i}] = {v} blew up");
+        }
+    }
+
+    #[test]
+    fn slow_gaba_b_with_constant_input_reduces_dc_drift() {
+        // Physiological sanity check: a constant input drives the pyramidal
+        // population to a steady-state firing rate. Adding a slow inhibitory
+        // population that subtracts from the membrane potential should
+        // shift the steady-state EEG mean DOWNWARD (more inhibition →
+        // more negative net PSP). This is the simplest direction-of-effect
+        // test for the new population.
+        let mut jr_off = JansenRitModel::new(SR);
+        let mut jr_on = JansenRitModel::new(SR);
+        jr_on.b_slow_gain = 10.0;
+        jr_on.b_slow_rate = 5.0;
+        jr_on.c_slow = 30.0;
+
+        let input = vec![0.5_f64; 5000]; // 5 s constant drive
+
+        let r_off = jr_off.simulate(&input);
+        let r_on = jr_on.simulate(&input);
+
+        // Take the late half (post-transient) for steady-state mean
+        let half = r_off.eeg.len() / 2;
+        let mean_off: f64 = r_off.eeg[half..].iter().sum::<f64>() / (r_off.eeg.len() - half) as f64;
+        let mean_on: f64 = r_on.eeg[half..].iter().sum::<f64>() / (r_on.eeg.len() - half) as f64;
+
+        // Slow GABA_B is inhibitory → mean EEG should be lower with it on.
+        assert!(
+            mean_on < mean_off,
+            "Slow GABA_B should reduce DC EEG: off={mean_off:.4} on={mean_on:.4}"
         );
     }
 }

@@ -138,6 +138,7 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 | `--duration` | float | `10.0` | Audio duration per evaluation (seconds) |
 | `--assr` | flag | `false` | Enable ASSR transfer function (auditory pathway filtering). Off by default for `evaluate`; always on in the `optimize` pipeline |
 | `--thalamic-gate` | flag | `false` | Enable arousal-dependent thalamic gating. Off by default for `evaluate`; always on in the `optimize` pipeline |
+| `--cet` | flag | `false` | Enable Cortical Envelope Tracking (Priority 13). Splits each band into a slow (≤10 Hz) path that bypasses ASSR and a fast (>10 Hz) path that gets ASSR, engages the slow GABA_B inhibitory population in JR, and adds envelope-phase PLV to scoring. Off by default for `evaluate`; off in `optimize` until validated. Refs: Doelling et al. 2014, Ding & Simon 2014, Moran & Friston 2011 |
 
 #### Examples
 
@@ -156,6 +157,11 @@ cargo run --release -- evaluate presets/my_preset.json --goal all --brain-type a
 
 # Match the optimize pipeline (ASSR + thalamic gate enabled)
 cargo run --release -- evaluate presets/my_preset.json --goal focus --assr --thalamic-gate
+
+# Enable Cortical Envelope Tracking — relaxation/sleep/meditation goals
+# get a new envelope-phase PLV reward channel; presets with slow NeuralLfo
+# (1–8 Hz) on broadband noise gain ~3–5% on those goals.
+cargo run --release -- evaluate presets/my_preset.json --goal sleep --cet
 
 # Longer evaluation for more stable results
 cargo run --release -- evaluate presets/my_preset.json --goal meditation --duration 20
@@ -187,8 +193,9 @@ Per-goal diagnostic table:
 ```
 
 The score is the result of `Goal::evaluate_full()` (`src/scoring.rs`):
-`final = clamp(band_weight·band_score + fhn_weight·fhn_score − asymmetry_penalty + plv_weight·PLV·0.10, 0, 1)`.
-See the Goals Reference below for per-goal weights.
+`final = clamp(band_weight·band_score + fhn_weight·fhn_score − asymmetry_penalty + plv_weight·PLV·0.10 + envelope_plv_weight·envelope_PLV·0.10, 0, 1)`.
+
+The two PLV terms are additive on different perceptual axes: `plv_weight·PLV` rewards entrainment to the carrier modulation frequency (Lachaux et al. 1999), while `envelope_plv_weight·envelope_PLV` rewards cortical envelope tracking — phase-locking of the EEG to the slow (2–9 Hz) auditory envelope, the metric Ding & Simon (2014) and Luo & Poeppel (2007) use to quantify CET. The envelope PLV bonus is only computed when `--cet` is enabled. See the Goals Reference below for per-goal weights for both PLV terms.
 
 ---
 
@@ -319,6 +326,10 @@ cargo test auditory::assr::tests
 # Thalamic gate — arousal mapping, band-dependent offset shifts
 cargo test auditory::thalamic_gate::tests
 
+# CET crossover (Priority 13a) — 1st-order LP + complementary HP, symmetric -3 dB
+# at 10 Hz, 5 Hz envelope passes, 40 Hz carrier rejected, near-bitwise reconstruction
+cargo test auditory::crossover::tests
+
 # FitzHugh-Nagumo model — ODE derivatives, spike detection, ISI CV, bifurcation
 cargo test neural::fhn::tests
 
@@ -405,19 +416,21 @@ cargo test -- --test-threads=1
 
 Available values for the `--goal` option. All 9 goals are iterated when `--goal all` is used.
 
-| Goal | Aliases | Target Brain State | Band/FHN Weights | PLV Bonus | Asymmetry Penalty |
-|------|---------|-------------------|:-:|:-:|:-:|
-| `focus` | `concentration` | Beta dominant, frontal theta. Active task engagement | 0.70 / 0.30 | 100% | 5% (thr 0.5) |
-| `deep_work` | `deepwork` | Alpha dominant with theta support. Flow for cognitively demanding work | 0.75 / 0.25 | 60% | 5% (thr 0.5) |
-| `sleep` | — | Theta dominant, delta emerging. NREM stage 1-2 | 0.65 / 0.35 | 0% | none |
-| `deep_relaxation` | `relaxation`, `relax` | Theta + alpha dominant. Pre-sleep unwinding | 0.70 / 0.30 | 0% | 12% (thr 0.3) |
-| `meditation` | `meditate` | Theta + alpha co-dominant. Focused-attention meditation (samatha) | 0.65 / 0.35 | 30% | 15% (thr 0.2) |
-| `isolation` | `masking` | Flat spectrum. Noise masking, neutral cortical state | 0.80 / 0.20 | 80% | 8% (thr 0.4) |
-| `shield` | — | Beta-dominant focused masking, minimal theta, stable FHN | 0.70 / 0.30 | 70% | 8% (thr 0.4) |
-| `flow` | — | Alpha-dominant rhythmic synchronization, moderate beta | 0.70 / 0.30 | 30% | 12% (thr 0.3) |
-| `ignition` | — | Gamma-driven activation, high FHN for ADHD cognitive binding | 0.70 / 0.30 | 100% | 3% (thr 0.6) |
+| Goal | Aliases | Target Brain State | Band/FHN Weights | Carrier PLV | Envelope PLV (CET) | Asymmetry Penalty |
+|------|---------|-------------------|:-:|:-:|:-:|:-:|
+| `focus` | `concentration` | Beta dominant, frontal theta. Active task engagement | 0.70 / 0.30 | 100% | 0% | 5% (thr 0.5) |
+| `deep_work` | `deepwork` | Alpha dominant with theta support. Flow for cognitively demanding work | 0.75 / 0.25 | 60% | 20% | 5% (thr 0.5) |
+| `sleep` | — | Theta dominant, delta emerging. NREM stage 1-2 | 0.65 / 0.35 | 0% | **80%** | none |
+| `deep_relaxation` | `relaxation`, `relax` | Theta + alpha dominant. Pre-sleep unwinding | 0.70 / 0.30 | 0% | **70%** | 12% (thr 0.3) |
+| `meditation` | `meditate` | Theta + alpha co-dominant. Focused-attention meditation (samatha) | 0.65 / 0.35 | 30% | **60%** | 15% (thr 0.2) |
+| `isolation` | `masking` | Flat spectrum. Noise masking, neutral cortical state | 0.80 / 0.20 | 80% | 0% | 8% (thr 0.4) |
+| `shield` | — | Beta-dominant focused masking, minimal theta, stable FHN | 0.70 / 0.30 | 70% | 0% | 8% (thr 0.4) |
+| `flow` | — | Alpha-dominant rhythmic synchronization, moderate beta | 0.70 / 0.30 | 30% | 40% | 12% (thr 0.3) |
+| `ignition` | — | Gamma-driven activation, high FHN for ADHD cognitive binding | 0.70 / 0.30 | 100% | 0% | 3% (thr 0.6) |
 
-**PLV bonus**: up to `10% × weight × PLV` added to the score. Goals that want genuine phase-locked entrainment (focus, ignition, isolation, shield) are rewarded when the cortical response locks onto the driving modulation frequency.
+**Carrier PLV bonus**: up to `10% × weight × PLV` added to the score. Goals that want genuine phase-locked entrainment to the modulation carrier (focus, ignition, isolation, shield) are rewarded when the cortical response locks onto the driving modulation frequency. Per Lachaux et al. (1999).
+
+**Envelope PLV bonus (CET, --cet only)**: up to `10% × weight × envelope_PLV` added on top. Goals that want natural slow-rhythm tracking (sleep, deep_relaxation, meditation) are rewarded when the cortex phase-locks to the 2–9 Hz envelope of the auditory drive — the cortical envelope tracking signal per Ding & Simon (2014) and Luo & Poeppel (2007). The two PLV terms are additive on different perceptual axes; sleep/relaxation goals get a CET reward channel they previously lacked entirely (carrier PLV was 0% for them).
 
 **Asymmetry penalty**: linear ramp from 0 at the threshold to the listed max at |asymmetry|=1. Penalizes excessive L/R alpha lateralization for balance-wanting goals; sleep ignores it entirely.
 
@@ -585,4 +598,8 @@ Reported as `(L − R) / (L + R)` on alpha-band power across hemispheres. Range 
 
 ### Phase-Locking Value (PLV)
 
-PLV ∈ [0, 1] measures phase coherence between the driving modulation frequency and the cortical response (Lachaux et al. 1999). Computed in `src/neural/performance.rs` via bandpass filter (±3 Hz) → Hilbert analytic signal → averaged unit phasors: `PLV = |1/N × Σ exp(i·Δφ)|`. Values > 0.6 indicate strong entrainment; < 0.3 is essentially noise.
+**Carrier PLV** ∈ [0, 1] measures phase coherence between the driving modulation frequency and the cortical response (Lachaux et al. 1999). Computed in `src/neural/performance.rs::compute_plv()` via bandpass filter (±3 Hz around the carrier) → Hilbert analytic signal → averaged unit phasors: `PLV = |1/N × Σ exp(i·Δφ)|` where Δφ is the phase difference between the EEG and a synthetic reference sinusoid at the LFO frequency. Values > 0.6 indicate strong entrainment; < 0.3 is essentially noise. Always computed when a NeuralLfo modulator is present.
+
+**Envelope-phase PLV (CET)** ∈ [0, 1] measures phase coherence between the EEG (bandpassed in the 2–9 Hz CET band per Doelling et al. 2014) and the *instantaneous phase of the slow auditory envelope* (Hilbert-extracted from the slow-path crossover output). This is the cortical envelope tracking metric proper — Ding & Simon (2014), Luo & Poeppel (2007), Lakatos et al. (2008). Computed in `compute_envelope_plv()`. Only available when `--cet` is enabled. Reported as `envelope_plv` on `PerformanceVector`.
+
+**Why two PLV metrics?** Carrier PLV asks "does the EEG carry power locked to the LFO frequency?" — appropriate for goals that drive entrainment to a tone (focus, ignition, isolation). Envelope PLV asks "does the EEG follow the slow envelope of the stimulus, phase by phase?" — appropriate for goals that want natural slow-rhythm tracking (sleep, relaxation, meditation). The two are additive on different perceptual axes.

@@ -63,7 +63,7 @@ mod tests {
         let bi = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
 
         let mono_norm = mono.band_powers.normalized();
@@ -113,7 +113,7 @@ mod tests {
             &left_bands, &right_bands,
             &left_energy, &right_energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
 
         // Right hemisphere (gets 65% left ear = low freq) should be slower
@@ -145,7 +145,7 @@ mod tests {
         let bi = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
 
         // Alpha asymmetry should be in [-1, 1]
@@ -177,7 +177,7 @@ mod tests {
             let bi = simulate_bilateral(
                 &bands, &bands, &energy, &energy,
                 &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-                params.jansen_rit.v0, 0.0, 0.0, 0.0,
+                params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             );
 
             dominant_freqs.push((bt, bi.combined.dominant_freq));
@@ -226,7 +226,7 @@ mod tests {
         let bi = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
 
         // Normalise EEG to [-1, 1]
@@ -257,7 +257,7 @@ mod tests {
         let bi_normal = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral_normal, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
 
         // Run with zero delay
@@ -266,7 +266,7 @@ mod tests {
         let bi_zero = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral_zero, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
 
         // They should produce different EEG (delay changes phase relationship)

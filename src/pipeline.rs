@@ -3,7 +3,7 @@
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 
-use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate};
+use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, ButterworthCrossover};
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
 use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
@@ -70,6 +70,16 @@ pub struct SimulationConfig {
     /// Enable stochastic JR (noise breaks alpha attractor).
     /// Per Ableidinger et al. (2017): enables theta/delta production.
     pub stochastic_jr_enabled: bool,
+    /// Enable Cortical Envelope Tracking (Priority 13).
+    ///
+    /// When true: (1) splits each band into a slow ≤10 Hz path and a fast
+    /// >10 Hz path via the complementary crossover; (2) bypasses ASSR on
+    /// the slow path so 1–8 Hz envelope modulations reach JR undamped;
+    /// (3) enables the slow GABA_B inhibitory population in JR so the
+    /// circuit can phase-lock to envelope rhythms; (4) computes envelope-
+    /// phase PLV against the slow drive in addition to carrier PLV.
+    /// Default false → bitwise regression-safe with all existing presets.
+    pub cet_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -82,6 +92,7 @@ impl Default for SimulationConfig {
             thalamic_gate_enabled: true,
             habituation_enabled: true,
             stochastic_jr_enabled: true,
+            cet_enabled: false,
         }
     }
 }
@@ -296,12 +307,42 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         trim(&right_bands[3]),
     ];
 
-    // 5d. (Optional) ASSR: attenuate modulation (AC) in band signals.
+    // 5d. (Optional) Cortical Envelope Tracking crossover (Priority 13a).
+    //     When CET is enabled, split each band into a SLOW (≤10 Hz) path and
+    //     a FAST (>10 Hz) path before ASSR. The slow path bypasses the ASSR
+    //     attenuation in the next step so 1–8 Hz envelope modulations reach
+    //     JR undamped. Both paths recombine into the band signal that drives
+    //     JR. Refs: Doelling et al. (2014), Ghitza (2011), Ding & Simon (2014).
+    //     Stored separately so 5e (ASSR) can scale only the fast path.
+    let mut cet_slow_left: Option<[Vec<f64>; 4]> = None;
+    let mut cet_slow_right: Option<[Vec<f64>; 4]> = None;
+    if config.cet_enabled {
+        let mut slow_l: [Vec<f64>; 4] = [vec![], vec![], vec![], vec![]];
+        let mut slow_r: [Vec<f64>; 4] = [vec![], vec![], vec![], vec![]];
+        for b in 0..4 {
+            let mut xover_l = ButterworthCrossover::cet_default(NEURAL_SR);
+            let mut xover_r = ButterworthCrossover::cet_default(NEURAL_SR);
+            let (sl, fl) = xover_l.process_signal(&left_bands_dec[b]);
+            let (sr_l, fr) = xover_r.process_signal(&right_bands_dec[b]);
+            // Replace the band with the FAST path so the ASSR block below
+            // attenuates only the carrier modulation. Stash the slow path.
+            left_bands_dec[b] = fl;
+            right_bands_dec[b] = fr;
+            slow_l[b] = sl;
+            slow_r[b] = sr_l;
+        }
+        cet_slow_left = Some(slow_l);
+        cet_slow_right = Some(slow_r);
+    }
+
+    // 5e. (Optional) ASSR: attenuate modulation (AC) in band signals.
     //     Per Picton et al. (2003), ASSR models frequency-dependent transmission
     //     of amplitude modulation through the auditory pathway.
     //     IMPORTANT: Only scale the AC component, not the DC mean.
     //     DC (mean drive level) is the thalamic gate's domain — ASSR should not
     //     shift the cortical operating point, only reduce modulation strength.
+    //     When CET is enabled, this only acts on the FAST path (slow path was
+    //     extracted in 5d above).
     if config.assr_enabled {
         let assr = AssrTransfer::new();
         let assr_mod = assr.compute_input_scale_modifier(preset);
@@ -319,6 +360,39 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
             }
         }
     }
+
+    // 5f. (CET only) Recombine slow path with the (now ASSR-attenuated) fast
+    //     path to produce the final band signal that drives JR. The slow
+    //     envelope reaches JR with full amplitude — exactly the architectural
+    //     fix the precheck identified.
+    //
+    // Also build the *envelope reference* used by 13c envelope-phase PLV:
+    // an energy-weighted average of the slow paths across all 4 bands and
+    // both ears. This is the cortex's slow drive — what JR is supposed to
+    // track. We'll bandpass it to 2-9 Hz inside compute_envelope_plv.
+    let cet_envelope_ref: Option<Vec<f64>> =
+        if let (Some(slow_l), Some(slow_r)) = (&cet_slow_left, &cet_slow_right) {
+            for b in 0..4 {
+                for i in 0..left_bands_dec[b].len() {
+                    left_bands_dec[b][i] += slow_l[b][i];
+                }
+                for i in 0..right_bands_dec[b].len() {
+                    right_bands_dec[b][i] += slow_r[b][i];
+                }
+            }
+            let n_env = slow_l[0].len();
+            let mut env = vec![0.0_f64; n_env];
+            for b in 0..4 {
+                let w = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
+                if w < 1e-10 { continue; }
+                for i in 0..n_env {
+                    env[i] += w * 0.5 * (slow_l[b][i] + slow_r[b][i]);
+                }
+            }
+            Some(env)
+        } else {
+            None
+        };
 
     // 5e. (Optional) Thalamic gate — modulates cortical operating point.
     //     Dark, reverberant, gentle presets → low arousal → lower input_offset
@@ -358,6 +432,19 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     };
 
     // input_scale is no longer modified by ASSR — ASSR operates on signal AC only.
+    //
+    // CET 13b — Slow GABA_B (CET-relevant slow inhibitory loop, τ ≈ 200 ms).
+    // Per Moran & Friston (2011) canonical microcircuit and Ghitza (2011)
+    // cascaded oscillator: CET requires a slow inhibitory feedback that
+    // canonical Wendling-JR lacks. When `cet_enabled = true`, we enable the
+    // additive parallel slow population in JR with these parameters.
+    // Default 0.0 → bitwise-identical to pre-CET model.
+    let (b_slow_gain, b_slow_rate, c_slow) = if config.cet_enabled {
+        (10.0, 5.0, 30.0)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+
     let bi_result = simulate_bilateral(
         &left_bands_dec,
         &right_bands_dec,
@@ -372,6 +459,9 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         if config.habituation_enabled { 0.0003 } else { 0.0 },
         if config.habituation_enabled { 0.0001 } else { 0.0 },
         if config.stochastic_jr_enabled { 15.0 } else { 0.0 },
+        b_slow_gain,
+        b_slow_rate,
+        c_slow,
     );
 
     let jr_result = &bi_result.combined;
@@ -425,19 +515,21 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     let eeg_mean = jr_result.eeg.iter().sum::<f64>() / jr_result.eeg.len() as f64;
     let eeg_detrended: Vec<f64> = jr_result.eeg.iter().map(|x| x - eeg_mean).collect();
 
-    let performance = PerformanceVector::compute(
+    let performance = PerformanceVector::compute_with_envelope(
         &eeg_detrended,
         &jr_result.fast_inhib_trace,
         NEURAL_SR,
         target_lfo_freq,
+        cet_envelope_ref.as_deref(),
     );
 
-    // 9. Score: neural model + asymmetry penalty + PLV entrainment bonus.
+    // 9. Score: neural model + asymmetry penalty + carrier PLV bonus + envelope PLV bonus.
     let score = goal.evaluate_full(
         &fhn_result,
         jr_result,
         bi_result.alpha_asymmetry,
         performance.plv,
+        performance.envelope_plv,
     );
     let norm_bands = jr_result.band_powers.normalized();
 
@@ -675,5 +767,117 @@ mod tests {
         let discard = 2000_usize;
         let trimmed = &dec[discard..];
         assert_eq!(trimmed.len(), 10_000);
+    }
+
+    // ---------------------------------------------------------------
+    // CET Priority 13a precheck — AC/DC ratio of band 0 with 5 Hz NeuralLfo.
+    // Decision gate documented in update_model.md Priority 13a:
+    //   AC fraction ≥ 0.30 → proceed with full CET plan (13a → 13b → 13c)
+    //   AC fraction 0.15–0.30 → implement 13b (slow GABA_B) first, then retry
+    //   AC fraction < 0.15 → JR-input-coupling is the bottleneck, abort 13a
+    // ---------------------------------------------------------------
+
+    /// Mirrors the front half of `evaluate_preset()` (engine → gammatone → global
+    /// normalize → decimate → trim) and returns the decimated band 0 signal so a
+    /// test can measure its AC/DC composition without instrumenting production
+    /// code. Kept under cfg(test) to avoid leaking debug helpers into the binary.
+    fn precheck_band0_signal(preset: &crate::preset::Preset, duration_secs: f32) -> Vec<f64> {
+        use crate::auditory::GammatoneFilterbank;
+        use noise_generator_core::NoiseEngine;
+        use std::sync::Arc;
+
+        let num_frames = (SAMPLE_RATE as f32 * duration_secs) as u32;
+        let sr = SAMPLE_RATE as f64;
+
+        let engine: Arc<NoiseEngine> = NoiseEngine::new(SAMPLE_RATE, 0.8);
+        preset.apply_to_engine(&engine);
+
+        // 1s engine warmup (matches evaluate_preset)
+        let warmup_frames = (SAMPLE_RATE as f32 * 1.0) as u32;
+        let _ = engine.render_audio(warmup_frames);
+
+        let audio = engine.render_audio(num_frames);
+        let (left, _right) = deinterleave(&audio);
+
+        let mut filterbank_l = GammatoneFilterbank::new(sr);
+        let bands_l = filterbank_l.process_to_band_groups(&left);
+
+        // Global normalisation across all bands (matches evaluate_preset)
+        let global_max_l = (0..4)
+            .map(|b| bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max))
+            .fold(0.0_f64, f64::max);
+        let norm_l = if global_max_l > 1e-10 { 1.0 / global_max_l } else { 1.0 };
+        let band0_norm: Vec<f64> = bands_l.signals[0].iter().map(|x| x * norm_l).collect();
+
+        // Decimate + 2s warmup discard (matches evaluate_preset's trim closure)
+        let dec = decimate(&band0_norm, DECIMATION_FACTOR);
+        let discard = (2.0_f64 * NEURAL_SR) as usize;
+        let skip = discard.min(dec.len());
+        dec[skip..].to_vec()
+    }
+
+    /// Build a synthetic preset: one active object emitting pink noise with a
+    /// 5 Hz NeuralLfo at depth 0.9. This is the canonical "slow envelope on
+    /// broadband noise" stimulus from the CET literature (Doelling 2014).
+    fn synthetic_5hz_pink_preset() -> crate::preset::Preset {
+        use crate::preset::{ModConfig, ObjectConfig, Preset};
+        let mut p = Preset::default();
+        p.master_gain = 0.8;
+        p.spatial_mode = 1;
+        p.source_count = 1;
+        p.anchor_color = 1; // pink
+        p.anchor_volume = 0.0;
+        p.environment = 0;
+        p.objects[0] = ObjectConfig {
+            active: true,
+            color: 1, // pink
+            x: 0.0,
+            y: 0.0,
+            z: 1.5,
+            volume: 0.9,
+            reverb_send: 0.05,
+            bass_mod: ModConfig { kind: 4, param_a: 5.0, param_b: 0.9, param_c: 0.0 },
+            satellite_mod: ModConfig { kind: 4, param_a: 5.0, param_b: 0.9, param_c: 0.0 },
+            movement: Default::default(),
+        };
+        p
+    }
+
+    fn ac_dc_stats(signal: &[f64]) -> (f64, f64, f64, f64) {
+        let n = signal.len() as f64;
+        let mean = signal.iter().sum::<f64>() / n;
+        let total_power = signal.iter().map(|x| x * x).sum::<f64>() / n;
+        let ac_power = signal.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let ac_fraction = if total_power > 1e-30 { ac_power / total_power } else { 0.0 };
+        (mean, total_power, ac_power, ac_fraction)
+    }
+
+    #[test]
+    fn cet_precheck_band0_ac_dc_5hz_neural_lfo() {
+        let preset = synthetic_5hz_pink_preset();
+        let band0 = precheck_band0_signal(&preset, 10.0);
+        assert!(!band0.is_empty(), "decimated band 0 should be non-empty");
+        let (mean, total_power, ac_power, ac_fraction) = ac_dc_stats(&band0);
+        // Print so cargo test --nocapture surfaces the precheck verdict.
+        // Decision gate per update_model.md Priority 13a.
+        eprintln!("=== CET 13a precheck ===");
+        eprintln!("  duration: 10s, preset: pink + 5 Hz NeuralLfo (depth 0.9)");
+        eprintln!("  band 0 length:    {}", band0.len());
+        eprintln!("  band 0 mean (DC): {mean:.6}");
+        eprintln!("  total power:      {total_power:.6}");
+        eprintln!("  AC power:         {ac_power:.6}");
+        eprintln!("  AC fraction:      {ac_fraction:.4}");
+        let verdict = if ac_fraction >= 0.30 {
+            "GREEN — proceed with full CET plan"
+        } else if ac_fraction >= 0.15 {
+            "YELLOW — implement 13b (slow GABA_B) first, then retry 13a"
+        } else {
+            "RED — JR input coupling is the bottleneck, revisit Priority 1b finding"
+        };
+        eprintln!("  verdict:          {verdict}");
+        // The test never fails on the verdict — its job is to MEASURE.
+        // It only fails if the pipeline produces nonsense.
+        assert!(ac_fraction.is_finite(), "AC fraction must be finite");
+        assert!(total_power.is_finite() && total_power >= 0.0, "total power finite & nonneg");
     }
 }

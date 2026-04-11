@@ -1,6 +1,6 @@
 # Working with the Brain Model — Practical Guide
 
-A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 11 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, and stochastic JR.
+A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 12 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, and Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV).
 
 ---
 
@@ -191,15 +191,22 @@ The pipeline is:
 Audio --> Cochlear filterbank (32 gammatone channels, 4 tonotopic bands)
       --> Global max normalization (all bands normalized to the global max)
       --> 95th percentile FHN scaling
+      --> [CET only] Slow/fast crossover at 10 Hz (1st-order leaky integrator + complementary HP)
+      --> ASSR DC/AC separation on FAST path only (slow path bypasses ASSR — CET fix)
+      --> [CET only] Recombine slow + (ASSR-attenuated) fast paths
       --> Band-dependent thalamic gate (arousal-driven input_offset shift)
-      --> ASSR DC/AC separation (attenuates modulation component by frequency)
       --> Bilateral Jansen-Rit cortical model (inhibitory corpus callosum coupling)
+        -->  [CET only] Slow GABA_B parallel population (B_slow=10 mV, b_slow=5/s, τ≈200 ms)
       --> Wilson-Cowan adaptive frequency tracking (within +/-5 Hz Arnold tongue)
       --> FitzHugh-Nagumo single-neuron probe
       --> Habituation (synaptic depression, rate 0.0003, recovery 0.0001)
       --> Stochastic JR (Gaussian noise sigma=15, broadens spectrum)
+      --> Carrier PLV against the LFO frequency (always)
+      --> [CET only] Envelope-phase PLV against the slow-path drive (2-9 Hz Hilbert)
       --> Score against goal-specific targets
 ```
+
+The `[CET only]` stages are gated behind `--cet` (Priority 13). Their effect is bitwise-zero when disabled — same regression-safety pattern as `--assr`, `--thalamic-gate`, and the stochastic/habituation flags.
 
 The score is now 100% neural model — brightness was removed:
 
@@ -208,23 +215,26 @@ The score is now 100% neural model — brightness was removed:
 | **Band powers** | 65–80% | How well EEG band powers match the goal targets (per-goal; see table below) |
 | **FHN firing** | 20–35% | Whether the single-neuron firing rate is in the target range |
 | **Asymmetry penalty** | (subtractive) | Excessive L/R alpha asymmetry penalized for balance-wanting goals (meditation, relaxation, flow). Sleep ignores it. |
-| **PLV bonus** | (additive) | Phase-Locking Value (Lachaux 1999) rewards true entrainment quality for goals that want it. Up to `10% × weight × PLV`. |
+| **Carrier PLV bonus** | (additive) | Phase-Locking Value (Lachaux 1999) rewards entrainment to the carrier modulation frequency for goals that want a tone-driven response. Up to `10% × weight × PLV`. |
+| **Envelope PLV bonus** (CET) | (additive) | Phase-locking of the EEG to the slow 2–9 Hz envelope of the auditory drive. Per Ding & Simon (2014) and Luo & Poeppel (2007) this is the cortical envelope tracking signal. Only computed when `--cet` is enabled. Up to `10% × envelope_weight × envelope_PLV`. |
 
 The exact split is per-goal (`src/scoring.rs`):
 
-| Goal | band / fhn | PLV weight | Asym threshold / max |
-|---|:-:|:-:|:-:|
-| Focus | 0.70 / 0.30 | 1.00 | 0.5 / 5% |
-| DeepWork | 0.75 / 0.25 | 0.60 | 0.5 / 5% |
-| Sleep | 0.65 / 0.35 | 0.00 | — / 0% |
-| DeepRelaxation | 0.70 / 0.30 | 0.00 | 0.3 / 12% |
-| Meditation | 0.65 / 0.35 | 0.30 | 0.2 / 15% |
-| Isolation | 0.80 / 0.20 | 0.80 | 0.4 / 8% |
-| Shield | 0.70 / 0.30 | 0.70 | 0.4 / 8% |
-| Flow | 0.70 / 0.30 | 0.30 | 0.3 / 12% |
-| Ignition | 0.70 / 0.30 | 1.00 | 0.6 / 3% |
+| Goal | band / fhn | Carrier PLV | Envelope PLV (CET) | Asym threshold / max |
+|---|:-:|:-:|:-:|:-:|
+| Focus | 0.70 / 0.30 | 1.00 | 0.00 | 0.5 / 5% |
+| DeepWork | 0.75 / 0.25 | 0.60 | 0.20 | 0.5 / 5% |
+| Sleep | 0.65 / 0.35 | 0.00 | **0.80** | — / 0% |
+| DeepRelaxation | 0.70 / 0.30 | 0.00 | **0.70** | 0.3 / 12% |
+| Meditation | 0.65 / 0.35 | 0.30 | **0.60** | 0.2 / 15% |
+| Isolation | 0.80 / 0.20 | 0.80 | 0.00 | 0.4 / 8% |
+| Shield | 0.70 / 0.30 | 0.70 | 0.00 | 0.4 / 8% |
+| Flow | 0.70 / 0.30 | 0.30 | 0.40 | 0.3 / 12% |
+| Ignition | 0.70 / 0.30 | 1.00 | 0.00 | 0.6 / 3% |
 
-The brightness term that used to contribute a free 10% is gone. Score is entirely driven by neural dynamics.
+The brightness term that used to contribute a free 10% is gone. Score is entirely driven by neural dynamics. The two PLV terms are additive on different perceptual axes — a preset can score on both simultaneously when its carrier locks the cortex AND its slow envelope is tracked.
+
+**Critical note for relaxation/sleep design:** Sleep, DeepRelaxation, and Meditation previously had carrier PLV weight = 0% — they had **no entrainment reward channel at all**. With CET enabled (`--cet`), they now get an envelope-tracking reward channel weighted at 60–80%. This is the first mechanism by which these goals can be rewarded for genuine slow-rhythm cortical tracking, and it directly favors presets with slow NeuralLfo modulation (1–8 Hz) on broadband noise — exactly the "organic" sound classes (wind, surf, breath-paced pink) that the literature identifies as inducing relaxation through cortical envelope tracking rather than carrier entrainment.
 
 ---
 
@@ -674,18 +684,19 @@ Habituation interacts with resilience: a habituated model may actually recover f
 
 ## Key files in this repo
 
-- `src/scoring.rs` — Goal definitions, band targets, scoring formulas. `Goal::evaluate_full()` combines band score + FHN score + asymmetry penalty + PLV bonus. `entrainment_weight()` and `asymmetry_penalty()` hold the per-goal weights. Read this to understand what each goal measures.
+- `src/scoring.rs` — Goal definitions, band targets, scoring formulas. `Goal::evaluate_full()` combines band score + FHN score + asymmetry penalty + carrier PLV bonus + envelope PLV bonus (CET). `entrainment_weight()` and `envelope_entrainment_weight()` hold the per-goal weights for the two PLV terms; `asymmetry_penalty()` holds the L/R lateralization penalty. Read this to understand what each goal measures.
 - `src/brain_type.rs` — Brain type parameter definitions (input_offset, input_scale, bilateral params).
-- `src/neural/jansen_rit.rs` — The cortical model. Inhibitory bilateral coupling, stochastic noise (sigma=15), habituation (synaptic depression) all live here.
+- `src/neural/jansen_rit.rs` — The cortical model. Inhibitory bilateral coupling, stochastic noise (sigma=15), habituation (synaptic depression), and the slow GABA_B parallel population (CET 13b) all live here. The Wendling 4-population state `[y0..y7]` is the canonical core; an additional 2-state slow inhibitory population `[y_slow_0, y_slow_1]` is integrated alongside via RK4 when `b_slow_gain > 0`. EEG = `y[1] - y[2] - y[3] - y_slow_0`.
 - `src/auditory/thalamic_gate.rs` — Band-dependent arousal shift. The reverb→arousal mapping. `band_offset_shifts()` returns `[100%, 70%, 20%, 0%]` of max reduction across bands 0-3.
-- `src/auditory/assr.rs` — DC/AC separation logic. ASSR frequency-dependent attenuation of the modulation envelope.
+- `src/auditory/assr.rs` — DC/AC separation logic. ASSR frequency-dependent attenuation of the modulation envelope. When CET is enabled, only acts on the FAST path (slow path bypasses ASSR — Priority 13a).
+- `src/auditory/crossover.rs` — **CET 13a:** 1st-order leaky integrator LP at 10 Hz with complementary HP. Splits the band envelope into a slow path (≤10 Hz, the cortical envelope tracking band per Doelling 2014) and a fast path (>10 Hz, the carrier modulation that ASSR processes). LP and HP sum to within one ULP.
 - `src/auditory/gammatone.rs` — 32-channel gammatone cochlear filterbank grouped into 4 tonotopic bands.
 - `src/neural/wilson_cowan.rs` — Adaptive frequency tracking within ±5 Hz Arnold tongue.
 - `src/neural/fhn.rs` — FitzHugh-Nagumo single-neuron probe. 95th percentile scaling is applied in `pipeline.rs` before driving FHN.
-- `src/neural/performance.rs` — Performance vector (entrainment ratio, E/I stability, spectral centroid, PLV). `compute_plv()` via Hilbert transform.
-- `src/pipeline.rs` — Audio → cochlea → neural. Global max normalization (across all 4 bands) replaces per-band. 95th percentile FHN scaling clamped to [-3, 3].
+- `src/neural/performance.rs` — Performance vector (entrainment ratio, E/I stability, spectral centroid, carrier PLV, envelope PLV). `compute_plv()` measures phase-lock against a synthetic sinusoid at the LFO frequency; `compute_envelope_plv()` measures phase-lock against the Hilbert phase of the slow auditory envelope (CET 13c). Both use the 2–9 Hz CET-relevant bandpass.
+- `src/pipeline.rs` — Audio → cochlea → neural. Global max normalization (across all 4 bands) replaces per-band. 95th percentile FHN scaling clamped to [-3, 3]. CET bifurcate-recombine logic in steps 5d/5e/5f.
 - `src/optimizer/differential_evolution.rs` — The DE optimizer.
-- `src/main.rs` — CLI entry point. `evaluate` ships `--assr` and `--thalamic-gate` off by default; `optimize` always runs them on.
+- `src/main.rs` — CLI entry point. `evaluate` ships `--assr`, `--thalamic-gate`, and `--cet` off by default; `optimize` always runs ASSR + thalamic gate, CET is off pending optimizer-side validation.
 
 ---
 

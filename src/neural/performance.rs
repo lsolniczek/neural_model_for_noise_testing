@@ -37,6 +37,24 @@ pub struct PerformanceVector {
     /// 0.0 = no phase relationship (coincidental power, not entrained).
     /// None if no target frequency.
     pub plv: Option<f64>,
+
+    /// Envelope-phase PLV (CET 13c). Phase-locking between the cortical EEG
+    /// (bandpassed in the CET-relevant 2–9 Hz band) and the *instantaneous
+    /// phase of the slow envelope* extracted from the auditory drive.
+    ///
+    /// This is the cortical envelope tracking metric proper: rather than
+    /// asking "does the EEG carry power at the LFO frequency?" (carrier PLV),
+    /// it asks "does the EEG follow the slow envelope of the stimulus
+    /// time-locked, phase by phase?" — exactly what Ding & Simon (2014)
+    /// and Luo & Poeppel (2007) measure as CET.
+    ///
+    /// Computed via Hilbert transform on both signals (Marple 1999) →
+    /// instantaneous phase difference → averaged unit phasors. Reuses 80%
+    /// of the carrier PLV machinery (`compute_plv`).
+    ///
+    /// Range [0, 1]. None if no envelope reference signal provided
+    /// (CET disabled or pre-CET legacy call site).
+    pub envelope_plv: Option<f64>,
 }
 
 impl PerformanceVector {
@@ -46,11 +64,30 @@ impl PerformanceVector {
     /// - `fast_inhib_trace`: y[3] trace from the Wendling model (empty if G=0).
     /// - `sample_rate`: Sample rate of the EEG signal (Hz).
     /// - `target_freq`: NeuralLFO frequency from the preset (None if no LFO).
+    ///
+    /// Backward-compatible legacy entry point — does not compute envelope PLV.
+    /// New CET call sites should use `compute_with_envelope` to also produce
+    /// the envelope-phase PLV metric.
     pub fn compute(
         eeg: &[f64],
         fast_inhib_trace: &[f64],
         sample_rate: f64,
         target_freq: Option<f64>,
+    ) -> Self {
+        Self::compute_with_envelope(eeg, fast_inhib_trace, sample_rate, target_freq, None)
+    }
+
+    /// CET 13c: same as `compute` but also computes envelope-phase PLV when
+    /// an envelope reference signal is supplied. The envelope is the slow
+    /// (≤10 Hz) component extracted from the auditory drive — typically the
+    /// slow path of the CET crossover. When `envelope` is `None`,
+    /// `envelope_plv` is `None` and the result is identical to `compute()`.
+    pub fn compute_with_envelope(
+        eeg: &[f64],
+        fast_inhib_trace: &[f64],
+        sample_rate: f64,
+        target_freq: Option<f64>,
+        envelope: Option<&[f64]>,
     ) -> Self {
         let spectral_centroid = compute_spectral_centroid(eeg, sample_rate);
         let entrainment_ratio = target_freq.map(|freq| {
@@ -66,13 +103,103 @@ impl PerformanceVector {
             compute_plv(eeg, sample_rate, freq)
         });
 
+        let envelope_plv = envelope.map(|env| compute_envelope_plv(eeg, env, sample_rate));
+
         PerformanceVector {
             entrainment_ratio,
             ei_stability,
             spectral_centroid,
             plv,
+            envelope_plv,
         }
     }
+}
+
+/// Envelope-phase PLV (CET 13c) per Ding & Simon (2014) and Luo & Poeppel (2007).
+///
+/// Measures phase coherence between the EEG (bandpassed in the CET-relevant
+/// 2–9 Hz delta-theta band per Doelling et al. 2014) and the instantaneous
+/// phase of the *envelope reference signal* — the slow auditory drive that
+/// the cortex is trying to track.
+///
+/// Algorithm:
+/// 1. Bandpass both signals to 2–9 Hz via FFT zero-out (matches `compute_plv`).
+/// 2. Hilbert transform → analytic signal → instantaneous phase for each.
+/// 3. Compute Δφ(t) = φ_eeg(t) − φ_envelope(t).
+/// 4. Average the unit phasors: PLV = |1/N · Σ exp(i·Δφ)|.
+///
+/// Returns 0.0 when either signal is too short or has no power in the band.
+/// Mostly mirrors `compute_plv` but the reference is the envelope's actual
+/// phase (Hilbert-extracted) rather than a synthetic sinusoid.
+pub fn compute_envelope_plv(eeg: &[f64], envelope: &[f64], sample_rate: f64) -> f64 {
+    let n = eeg.len().min(envelope.len());
+    if n < 64 {
+        return 0.0;
+    }
+    let fft_len = n.next_power_of_two();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft_fwd = planner.plan_fft_forward(fft_len);
+    let fft_inv = planner.plan_fft_inverse(fft_len);
+    let freq_res = sample_rate / fft_len as f64;
+
+    // CET-relevant band: 2–9 Hz (Doelling et al. 2014). The lo bin is clamped
+    // to ≥1 to keep DC out of the bandpass.
+    let lo_bin = (2.0 / freq_res).floor().max(1.0) as usize;
+    let hi_bin = (9.0 / freq_res).ceil().min((fft_len / 2) as f64) as usize;
+    if hi_bin <= lo_bin {
+        return 0.0;
+    }
+
+    // Helper: bandpass + Hilbert analytic signal in one FFT pass.
+    // Mirrors the structure of `compute_plv` so the two share an algorithm.
+    let analytic = |signal: &[f64]| -> Vec<Complex<f64>> {
+        let hann_denom = if n > 1 { (n - 1) as f64 } else { 1.0 };
+        let mut buf: Vec<Complex<f64>> = (0..fft_len)
+            .map(|i| {
+                if i < n {
+                    let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / hann_denom).cos());
+                    Complex::new(signal[i] * w, 0.0)
+                } else {
+                    Complex::new(0.0, 0.0)
+                }
+            })
+            .collect();
+        fft_fwd.process(&mut buf);
+        // Bandpass: zero everything outside [lo_bin, hi_bin]
+        for i in 0..fft_len {
+            let bin = if i <= fft_len / 2 { i } else { fft_len - i };
+            if bin < lo_bin || bin > hi_bin {
+                buf[i] = Complex::new(0.0, 0.0);
+            }
+        }
+        // Hilbert: zero negative frequencies, double positive
+        for i in 1..fft_len / 2 {
+            buf[i] *= 2.0;
+        }
+        for i in (fft_len / 2 + 1)..fft_len {
+            buf[i] = Complex::new(0.0, 0.0);
+        }
+        fft_inv.process(&mut buf);
+        buf
+    };
+
+    let eeg_anal = analytic(eeg);
+    let env_anal = analytic(envelope);
+
+    let mut phasor_sum = Complex::new(0.0_f64, 0.0_f64);
+    let valid = n;
+    let inv_fft_len = 1.0 / fft_len as f64;
+    for i in 0..valid {
+        let z_eeg = eeg_anal[i] * inv_fft_len;
+        let z_env = env_anal[i] * inv_fft_len;
+        let phi_eeg = z_eeg.im.atan2(z_eeg.re);
+        let phi_env = z_env.im.atan2(z_env.re);
+        let dphi = phi_eeg - phi_env;
+        phasor_sum += Complex::new(dphi.cos(), dphi.sin());
+    }
+
+    let plv = (phasor_sum / valid as f64).norm();
+    plv.clamp(0.0, 1.0)
 }
 
 /// Entrainment Ratio: power in [target_freq - 1, target_freq + 1] Hz / total power.
@@ -578,5 +705,128 @@ mod tests {
         let eeg = vec![0.5; 3000];
         let pv = PerformanceVector::compute(&eeg, &[], SR, None);
         assert!(pv.plv.is_none(), "PLV should be None without target freq");
+    }
+
+    // ---------------------------------------------------------------
+    // CET 13c: Envelope-phase PLV
+    //
+    // Per Ding & Simon (2014), Luo & Poeppel (2007), Doelling et al. (2014):
+    // CET is the phase-locking of cortical EEG (in the 2–9 Hz band) to the
+    // *instantaneous phase of the slow auditory envelope*. Tests use synthetic
+    // signals to verify the PLV detector responds correctly.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn envelope_plv_high_for_eeg_locked_to_5hz_envelope() {
+        // EEG and envelope are the same 5 Hz sine — perfect phase lock,
+        // PLV should be very close to 1.0.
+        let eeg = sine(5.0, SR, 6.0);
+        let env = sine(5.0, SR, 6.0);
+        let plv = compute_envelope_plv(&eeg, &env, SR);
+        assert!(
+            plv > 0.85,
+            "Self-locked 5 Hz envelope PLV should be high, got {plv:.3}"
+        );
+    }
+
+    #[test]
+    fn envelope_plv_low_for_independent_signals() {
+        // Two unrelated signals: EEG at 12 Hz (alpha-ish), envelope at 4 Hz.
+        // After both are bandpass-filtered to 2–9 Hz, the EEG retains very
+        // little signal in band, so the phase relationship is essentially
+        // noise — PLV should be low.
+        let eeg = sine(12.0, SR, 6.0); // out of CET band
+        let env = sine(4.0, SR, 6.0);
+        let plv = compute_envelope_plv(&eeg, &env, SR);
+        assert!(
+            plv < 0.5,
+            "Independent (12 Hz vs 4 Hz) signals envelope PLV should be low, got {plv:.3}"
+        );
+    }
+
+    #[test]
+    fn envelope_plv_high_for_phase_shifted_lock() {
+        // Constant phase offset must NOT reduce PLV — that's the whole point
+        // of phase-locking-value: it measures CONSISTENCY of the offset, not
+        // its size. EEG = sin(2π·5·t), envelope = cos(2π·5·t) (90° offset).
+        let n = (SR * 6.0) as usize;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+        let env: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 5.0 * i as f64 / SR).cos())
+            .collect();
+        let plv = compute_envelope_plv(&eeg, &env, SR);
+        assert!(
+            plv > 0.85,
+            "Phase-shifted but coherent signals should still PLV high, got {plv:.3}"
+        );
+    }
+
+    #[test]
+    fn envelope_plv_in_zero_to_one() {
+        let eeg = sine(5.0, SR, 6.0);
+        let env = sine(5.0, SR, 6.0);
+        let plv = compute_envelope_plv(&eeg, &env, SR);
+        assert!(plv >= 0.0 && plv <= 1.0, "envelope PLV out of [0,1]: {plv}");
+    }
+
+    #[test]
+    fn envelope_plv_zero_for_short_signal() {
+        let eeg = vec![0.0; 10];
+        let env = vec![0.0; 10];
+        let plv = compute_envelope_plv(&eeg, &env, SR);
+        assert_eq!(plv, 0.0);
+    }
+
+    #[test]
+    fn envelope_plv_field_present_when_envelope_supplied() {
+        let eeg = sine(5.0, SR, 5.0);
+        let env = sine(5.0, SR, 5.0);
+        let pv = PerformanceVector::compute_with_envelope(&eeg, &[], SR, None, Some(&env));
+        assert!(
+            pv.envelope_plv.is_some(),
+            "envelope_plv should be present when envelope reference is supplied"
+        );
+        assert!(
+            pv.envelope_plv.unwrap() > 0.85,
+            "self-locked envelope_plv should be high"
+        );
+    }
+
+    #[test]
+    fn envelope_plv_none_for_legacy_compute() {
+        // Backward-compat: callers using the legacy `compute()` (no envelope)
+        // must see envelope_plv = None.
+        let eeg = sine(10.0, SR, 5.0);
+        let pv = PerformanceVector::compute(&eeg, &[], SR, Some(10.0));
+        assert!(
+            pv.envelope_plv.is_none(),
+            "envelope_plv must be None for legacy compute() with no envelope reference"
+        );
+    }
+
+    #[test]
+    fn envelope_plv_finite_under_real_jr_eeg_shapes() {
+        // Stability check: realistic noisy EEG should not produce NaN/Inf.
+        let mut rng_state: u64 = 0xBEEF;
+        let n = (SR * 5.0) as usize;
+        let eeg: Vec<f64> = (0..n)
+            .map(|i| {
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let noise = ((rng_state as f64) / (u64::MAX as f64)) * 2.0 - 1.0;
+                let alpha = (2.0 * PI * 10.0 * i as f64 / SR).sin();
+                let theta = (2.0 * PI * 5.0 * i as f64 / SR).sin();
+                0.6 * alpha + 0.3 * theta + 0.2 * noise
+            })
+            .collect();
+        let env: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.4 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+        let plv = compute_envelope_plv(&eeg, &env, SR);
+        assert!(plv.is_finite(), "envelope PLV must be finite, got {plv}");
+        assert!((0.0..=1.0).contains(&plv), "envelope PLV out of range: {plv}");
     }
 }

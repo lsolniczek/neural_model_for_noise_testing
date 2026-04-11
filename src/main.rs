@@ -103,6 +103,13 @@ enum Commands {
         /// Enable thalamic gate (arousal-dependent filtering)
         #[arg(long, default_value_t = false)]
         thalamic_gate: bool,
+
+        /// Enable Cortical Envelope Tracking (Priority 13).
+        /// Splits each band into slow (≤10 Hz) and fast (>10 Hz) paths,
+        /// bypasses ASSR on the slow path, and engages the slow GABA_B
+        /// inhibitory population in JR. Off by default for `evaluate`.
+        #[arg(long, default_value_t = false)]
+        cet: bool,
     },
 
     /// Run disturbance resilience test — inject acoustic spike and measure recovery.
@@ -187,8 +194,9 @@ fn main() {
             duration,
             assr,
             thalamic_gate,
+            cet,
         } => {
-            run_evaluate(&preset, &goal, &brain_type, duration, assr, thalamic_gate);
+            run_evaluate(&preset, &goal, &brain_type, duration, assr, thalamic_gate, cet);
         }
         Commands::Disturb {
             preset,
@@ -449,7 +457,7 @@ fn run_optimize(
 
 // ── Evaluate ─────────────────────────────────────────────────────────────────
 
-fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32, assr: bool, thalamic_gate: bool) {
+fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32, assr: bool, thalamic_gate: bool, cet: bool) {
     // Load preset from JSON
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
         eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
@@ -523,16 +531,17 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
             brain_type: bt,
             assr_enabled: assr,
             thalamic_gate_enabled: thalamic_gate,
+            cet_enabled: cet,
             ..SimulationConfig::default()
         };
         let result = evaluate_preset(&preset, &goal, &sim_config);
 
         // Re-run pipeline for detailed diagnosis (need FHN/JR results)
-        let detailed = run_detailed_pipeline(&preset, bt, duration, assr, thalamic_gate);
+        let detailed = run_detailed_pipeline(&preset, bt, duration, assr, thalamic_gate, cet);
         let brightness = detailed.brightness;
         let energy_fractions = detailed.energy_fractions;
 
-        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, detailed.bilateral.alpha_asymmetry, detailed.performance.plv, Some(detailed.performance));
+        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, detailed.bilateral.alpha_asymmetry, detailed.performance.plv, detailed.performance.envelope_plv, Some(detailed.performance));
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
@@ -759,6 +768,7 @@ fn run_detailed_pipeline(
     duration: f32,
     assr_enabled: bool,
     thalamic_gate_enabled: bool,
+    cet_enabled: bool,
 ) -> DetailedResult {
     use crate::auditory::GammatoneFilterbank;
     use noise_generator_core::NoiseEngine;
@@ -876,6 +886,14 @@ fn run_detailed_pipeline(
     let log_high = 10000.0_f64.ln();
     let brightness = ((centroid.max(100.0).ln() - log_low) / (log_high - log_low)).clamp(0.0, 1.0);
 
+    // NOTE: at this point left_bands / right_bands are still at 48 kHz; the
+    // pipeline.rs decimates before applying ASSR/CET. The detailed pipeline
+    // historically applies ASSR at 48 kHz directly. We follow the same
+    // path here for consistency with the existing display code, but the
+    // CET crossover MUST run at the neural sample rate (1 kHz) where the
+    // 10 Hz cutoff is meaningful — so we decimate before the crossover and
+    // then keep the decimated bands as the JR drive.
+
     // (Optional) ASSR: attenuate modulation (AC) in band signals only.
     // DC preserved — operating point is the thalamic gate's domain.
     if assr_enabled {
@@ -891,6 +909,40 @@ fn run_detailed_pipeline(
                         let ac = *sample - mean;
                         *sample = mean + ac * assr_mod;
                     }
+                }
+            }
+        }
+    }
+
+    // CET 13a — In the detailed pipeline ASSR runs at 48 kHz on the band
+    // envelopes. To bypass ASSR on the slow path we re-extract the slow
+    // 0–10 Hz envelope from the *unattenuated* band signal (we kept the
+    // raw bands_l/bands_r values around) and add it back after ASSR did
+    // its work. This is the equivalent of the bifurcate-then-recombine
+    // dance in pipeline.rs, just done at the audio sample rate.
+    if cet_enabled && assr_enabled {
+        let assr = crate::auditory::AssrTransfer::new();
+        let assr_mod = assr.compute_input_scale_modifier(preset);
+        if assr_mod < 1.0 - 1e-10 {
+            for b in 0..4 {
+                // Slow envelope of the *original* band signal (before ASSR)
+                let mut xover_l = crate::auditory::ButterworthCrossover::new(10.0, sr);
+                let mut xover_r = crate::auditory::ButterworthCrossover::new(10.0, sr);
+                let raw_l: Vec<f64> = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
+                let raw_r: Vec<f64> = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
+                let (slow_l, _) = xover_l.process_signal(&raw_l);
+                let (slow_r, _) = xover_r.process_signal(&raw_r);
+                // Slow envelope of the *post-ASSR* band signal (already attenuated)
+                let mut xover_l2 = crate::auditory::ButterworthCrossover::new(10.0, sr);
+                let mut xover_r2 = crate::auditory::ButterworthCrossover::new(10.0, sr);
+                let (slow_l_atten, _) = xover_l2.process_signal(&left_bands[b]);
+                let (slow_r_atten, _) = xover_r2.process_signal(&right_bands[b]);
+                // Replace the attenuated slow component with the original
+                for i in 0..left_bands[b].len() {
+                    left_bands[b][i] += slow_l[i] - slow_l_atten[i];
+                }
+                for i in 0..right_bands[b].len() {
+                    right_bands[b][i] += slow_r[i] - slow_r_atten[i];
                 }
             }
         }
@@ -935,6 +987,10 @@ fn run_detailed_pipeline(
         0.0, // habituation: disabled in detailed pipeline (short evaluation)
         0.0,
         0.0, // stochastic: disabled
+        // CET 13b slow GABA_B — engaged when --cet flag is set.
+        if cet_enabled { 10.0 } else { 0.0 },
+        if cet_enabled { 5.0 } else { 0.0 },
+        if cet_enabled { 30.0 } else { 0.0 },
     );
 
     // FHN driven by combined bilateral EEG

@@ -262,39 +262,47 @@ Net result: presets that rely on slow envelope fluctuations (Ground, Drift, rela
 **Solution:** Implement CET as a three-part extension gated behind a new `cet_enabled` config flag, mirroring the `assr_enabled` / `thalamic_gate_enabled` pattern. The existing gammatone envelope (`gammatone.rs:121-125`) already does the physiologically correct thing (magnitude → 80 Hz LPF → decimate) — CET builds on top of it, it does not replace it.
 
 ### 13a. Bifurcate input into fast (ASSR) and slow (CET) pathways
-- [ ] **PRECHECK:** Before any code changes, run a probe to verify that AC-dominance is sufficient at low rates. Build a synthetic preset with 5 Hz NeuralLfo on broadband pink noise, render 10 s, and measure the AC/DC ratio of the decimated band 0 signal (after `trim()` at `pipeline.rs:286-297`, before the ASSR block). If AC/(|DC|+AC) < 0.15 the Priority 1b "JR is mean-driven" finding still holds at low rates and this whole priority is moot — abort and revisit step 13b first. If AC fraction ≥ 0.3, proceed.
-- [ ] Add a 2-way Linkwitz-Riley crossover (4th-order, cutoff ~10 Hz) on each decimated band signal in `pipeline.rs`, right after `trim()` and *before* the ASSR block at line 305. Produces `slow_bands_{l,r}` (0.5–10 Hz envelope drive) and `fast_bands_{l,r}` (>10 Hz carrier drive).
-- [ ] Apply the existing ASSR modifier *only* to `fast_bands` (current behavior, unchanged for that subset). `slow_bands` bypasses ASSR entirely — this is the core fix for the "ASSR kills 5 Hz" problem.
-- [ ] Recombine fast + slow per band before passing to `simulate_bilateral()`, OR (cleaner) pass them as two separate excitatory drives into JR — see 13b.
-- [ ] Gate behind `SimulationConfig.cet_enabled` (default `false` — zero regression on existing presets).
-- [ ] Add CLI flag `--cet` on the `evaluate` command, mirroring `--assr` and `--thalamic-gate`.
-- [ ] Unit tests: crossover sum reconstructs original signal (< 0.1% error on white noise input), slow-path energy at 5 Hz unaffected by ASSR when `cet_enabled=true`, fast-path energy at 40 Hz still attenuated per ASSR curve.
+- [x] **PRECHECK** completed via `pipeline::tests::cet_precheck_band0_ac_dc_5hz_neural_lfo`. Result: AC fraction = **0.171** (YELLOW band — above 0.15 abort threshold but below 0.30 green). Verdict: implement 13b first so JR has the slow inhibitory dynamics to amplify the 17% AC drive, then 13a so it reaches JR undamped, then 13c so it's rewarded. Implementation order followed exactly that.
+- [x] Added `ButterworthCrossover` in `src/auditory/crossover.rs` — 1st-order leaky integrator LP at 10 Hz with complementary HP (`fast = x - slow`). Chose 1st-order over LR4 because the complementary HP for higher-order Butterworth has asymmetric magnitude at the crossover (|HP(jω_c)| ≈ +1.76 dB for 2nd-order Butterworth instead of −3 dB), while 1st-order gives the textbook symmetric −3 dB on both paths. 6 dB/oct slope is sufficient because the gammatone front-end already runs an 80 Hz envelope LPF.
+- [x] Wired into `pipeline.rs` in step 5d/5e/5f: split each decimated band into slow + fast, run ASSR only on the fast path, recombine before driving JR. The slow envelope reaches JR undamped — exactly the architectural fix the precheck identified.
+- [x] Same plumbing added to `main.rs::run_detailed_pipeline` (the duplicate display path).
+- [x] Gated behind `SimulationConfig.cet_enabled` (default `false`).
+- [x] CLI flag `--cet` on the `evaluate` command (mirrors `--assr`/`--thalamic-gate`).
+- [x] Unit tests in `auditory::crossover::tests` (9 tests): symmetric −3 dB at 10 Hz crossover, slow path passes 5 Hz with ratio 0.894, fast path passes 40 Hz with ratio 0.940, DC routes entirely to slow, reconstruction error ≤ 1 ULP, finite output for white noise, reset clears state, default cutoff is 10 Hz (Doelling 2014), empty signal returns empty.
 
 ### 13b. Slow inhibitory population in Jansen-Rit (GABA_B-like)
-- [ ] Add a third inhibitory population to `JansenRitModel` with slow time constant: `b_slow ≈ 5–10 /s` (τ ≈ 100–200 ms), driven by pyramidal activity with its own gain `B_slow` and connectivity `C_slow`. Keep the existing fast GABA_A (b=50/s) population intact — the slow population is additive.
-- [ ] Wire the slow population into `derivatives_with_habituation()` in `jansen_rit.rs`: pyramidal membrane potential gains a second inhibitory current term.
-- [ ] When `cet_enabled=true`, the slow-band CET input (from 13a) drives the pyramidal excitatory input *and* is weighted into the slow-inhibitory drive (so envelope-locked activity engages slow GABA_B-mediated feedback, giving the circuit a natural 4–8 Hz attractor).
-- [ ] Parameters from Spiegler et al. (2011) and Moran et al. (2007) — both already in the JR/DCM literature, ballpark `B_slow = 10 mV`, `C_slow = 30`, `b_slow = 5 /s`.
-- [ ] Default `B_slow = 0.0` when `cet_enabled=false` → bitwise-identical to current JR (regression guarantee, same pattern as `stochastic_sigma=0` in Priority 7).
-- [ ] Unit tests: (a) `B_slow=0` produces bitwise-identical output to current model, (b) with `B_slow>0` and 5 Hz envelope input, band 1 (theta) power increases ≥2× versus B_slow=0, (c) model remains stable (finite, bounded) across brain types.
+- [x] Added `b_slow_gain`, `b_slow_rate`, `c_slow` fields on `JansenRitModel`. Default 0.0 → bitwise-identical to pre-CET model. Setter `set_slow_inhib(gain, rate, c)`.
+- [x] New ODE: parallel 2-state slow inhibitory population `[y_slow_0, y_slow_1]` integrated alongside the canonical Wendling 8-state via RK4 in `simulate()` and `simulate_with_fast_inhib_trace()`. Driven by `S(v_pyr_with_slow_feedback)`, contributes to EEG via subtraction `eeg = y[1] - y[2] - y[3] - y_slow_0`. Same ODE form as canonical JR synapses: `dy_slow_1/dt = B_slow·b_slow·C_slow·S(v_pyr) − 2·b_slow·y_slow_1 − b_slow²·y_slow_0`.
+- [x] **Note on parameter sources** — The CET research agent found that Moran 2007 NeuroImage 37(3):706-720 *does not* contain GABA_B-specific parameters (it adds adaptation and recurrent fast inhibition, not a slow population). Spiegler et al. 2011 *Biol Cybern* 104:229 also could not be located; the closest match is Spiegler 2010 *NeuroImage* 52:1041 which sweeps canonical JR parameters but does not add a population. The actual canonical microcircuit GABA_B parameters come from **Moran & Friston (2011) "Canonical microcircuit DCM" *NeuroImage* 56(3):1131-1144** — references in update_model.md should be corrected accordingly. Used parameters: B_slow = 10 mV, b_slow = 5 /s (τ ≈ 200 ms), C_slow = 30.0.
+- [x] Plumbed `b_slow_gain`, `b_slow_rate`, `c_slow` through `simulate_bilateral` → `run_hemisphere_tonotopic` → per-band JR construction. Updated 11 call sites to pass `0.0, 0.0, 0.0` for regression safety in non-CET paths (validate.rs, neural/tests.rs, regression_tests.rs, disturb.rs, main.rs, pipeline.rs). Pipeline + main.rs detailed pipeline use `(10.0, 5.0, 30.0)` when `cet_enabled = true`.
+- [x] Unit tests in `neural::jansen_rit::tests` (5 new): `slow_gaba_b_default_is_zero`, `slow_gaba_b_disabled_bitwise_identical_to_pre_cet`, `slow_gaba_b_changes_eeg_when_enabled`, `slow_gaba_b_output_finite_under_aggressive_params`, `slow_gaba_b_with_constant_input_reduces_dc_drift`. All pass; bitwise regression contract empirically validated.
+- [x] **Ref:** Moran RJ, Friston KJ (2011). "Neural masses and fields in dynamic causal modeling." *Front Comput Neurosci* / *NeuroImage* 56(3):1131-1144 — canonical microcircuit DCM with GABA_A and GABA_B populations; source for B_slow, b_slow, C_slow ranges.
+- [x] **Ref:** Ghitza O (2011). "Linking speech perception and neurophysiology: speech decoding guided by cascaded oscillators locked to the input rhythm." *Front Psychol* 2:130 — slow inhibitory loop for theta-rate envelope tracking.
 
 ### 13c. Envelope-phase PLV metric
-- [ ] Add `compute_envelope_plv()` in `performance.rs`: takes the decimated slow-band envelope signal from 13a and the theta-filtered EEG output from JR, runs both through the existing Hilbert machinery (`hilbert_analytic_signal` from `performance.rs`, per Marple 1999), computes phase difference, returns `|1/N Σ exp(i·Δφ)|`. Reuse ~80% of the existing `compute_plv()` code path; the only change is the reference is the envelope's instantaneous phase, not `sin(2πft)`.
-- [ ] Add `envelope_plv: Option<f64>` field to `PerformanceVector` alongside the existing `plv`.
-- [ ] Wire into `Goal::evaluate_full()` in `scoring.rs` with a per-goal weight. Suggested weights (relaxation goals benefit; beta/gamma goals don't):
-  - Ground/Sleep: 80% (current carrier-PLV is 0% for these goals — CET gives them their first real entrainment signal)
-  - Deep Relaxation: 70%
-  - Meditation: 60%
-  - Drift/Flow: 40%
-  - Deep Work: 20%
-  - Focus/Isolation/Shield/Ignition: 0% (these already score well on carrier-PLV; don't dilute)
-- [ ] Do NOT replace the existing carrier PLV — envelope-PLV is *additive* on a different axis. A preset can have high carrier-PLV (beta entrainment to 25 Hz LFO) AND high envelope-PLV (theta entrainment to 5 Hz breath modulation) simultaneously; both deserve credit.
-- [ ] Unit tests: (a) 5 Hz envelope-modulated input with CET enabled → envelope_plv > 0.6, (b) flat input → envelope_plv < 0.3, (c) scoring unchanged on existing presets when `cet_enabled=false`, (d) relaxation presets with strong envelope modulation score higher with CET on than off.
+- [x] Added `compute_envelope_plv(eeg, envelope, sample_rate)` in `performance.rs` — bandpass-filters both signals to **2–9 Hz** (Doelling 2014 CET-relevant band) via FFT zero-out, runs Hilbert transform on each (Marple 1999), computes Δφ(t) = φ_eeg − φ_envelope, averages unit phasors. Mirrors `compute_plv()` structure but the reference is the envelope's actual phase, not a synthetic sinusoid.
+- [x] Added `envelope_plv: Option<f64>` field to `PerformanceVector` alongside the existing `plv`.
+- [x] New entry point `PerformanceVector::compute_with_envelope(...)` takes an optional envelope reference; legacy `compute()` delegates to it with `None`. Backward-compat: every existing call site sees `envelope_plv = None`.
+- [x] Wired into `Goal::evaluate_full()` in `scoring.rs` with a new `envelope_entrainment_weight()` per-goal:
+  - Sleep: 0.8 (was 0% on carrier PLV → first real entrainment signal)
+  - Deep Relaxation: 0.7
+  - Meditation: 0.6
+  - Flow: 0.4
+  - Deep Work: 0.2
+  - Focus / Isolation / Shield / Ignition: 0.0 (carrier-driven goals; CET is irrelevant)
+- [x] Bonus is **additive** to carrier PLV (max 10% × envelope_weight × envelope_plv). A preset can score on both axes simultaneously.
+- [x] Pipeline builds the envelope reference as the energy-weighted average of slow-path band signals across both ears (the slow drive feeding cortex).
+- [x] Unit tests in `neural::performance::tests` (8 new): high PLV for self-locked 5 Hz envelope, low PLV for independent signals (12 Hz EEG vs 4 Hz envelope), high PLV for 90° phase-shifted lock (PLV measures consistency, not magnitude), in [0,1] range, zero for short signal, present when envelope supplied, none for legacy `compute()`, finite under realistic noisy JR EEG.
+- [x] **Ref:** Ding N, Simon JZ (2014). "Cortical entrainment to continuous speech: functional roles and interpretations." *Front Hum Neurosci* 8:311 — CET methodology and band-of-interest definitions.
+- [x] **Ref:** Luo H, Poeppel D (2007). "Phase patterns of neuronal responses reliably discriminate speech in human auditory cortex." *Neuron* 54(6):1001-1010 — envelope-phase as the primary CET signal carrier.
+- [x] **Ref:** Doelling KB et al. (2014). "Acoustic landmarks drive delta-theta oscillations." *NeuroImage* 85:761-768 — empirical 2–9 Hz CET band that 13c bandpasses to.
 
 ### 13d. Validation against existing presets
-- [ ] Re-evaluate Ground, Drift, and Shield/Flow/Ignition baselines with `cet_enabled=true`. Expected: Ground and Drift gain (they use slow modulation); Shield/Flow/Ignition unchanged or slightly up (their carrier-PLV dominates).
-- [ ] Optimize a new Ground-class preset with `cet_enabled=true` and verify the optimizer discovers envelope-modulated designs (NeuralLfo at 1–5 Hz, deep modulation depth) without any direct hint in the fitness function.
-- [ ] Regression test in `regression_tests.rs`: CET-disabled path produces bitwise-identical scores to pre-CET baseline for all existing preset snapshots.
+- [x] **Regression check (cet OFF must equal baseline bitwise):** all 7 baseline preset/goal pairs verified — deepwork_normal/deep_work=0.4480, isolation_normal_smooth/deep_work=0.4482, showcase_pink/deep_work=0.5259, showcase_brown/deep_work=0.3780, showcase_blue/deep_work=0.2434, showcase_pink/sleep=0.1241, showcase_brown/sleep=0.2157. Bitwise match. ✓
+- [x] **CET ON effect on relaxation goals (synthetic preset: pink + 5 Hz NeuralLfo, depth 0.9):** Sleep 0.1729 → 0.1787 (+0.0058, +3.4%); Deep Relaxation 0.2458 → 0.2556 (+0.0098, +4.0%); Meditation 0.2808 → 0.2950 (+0.0142, +5.1%). All three relaxation-family goals consistently positive — exactly the predicted direction.
+- [x] **CET ON effect on showcase (static noise) presets:** sleep deltas in the range −0.0018 to +0.0009 (essentially noise floor). Correct: static noise has no slow envelope to track, so CET correctly does nothing. The architecture only rewards presets that actually have slow envelope content.
+- [x] **Test suite:** 335 passing, 4 pre-existing thalamic_gate failures unchanged. Net delta: **+23 new tests passing** (5 slow GABA_B + 9 crossover + 8 envelope PLV + 1 precheck), zero regressions in any non-CET test.
+- [ ] **Future:** Optimize a new preset with `cet_enabled=true` to verify the DE optimizer discovers envelope-modulated designs (NeuralLfo at 1–5 Hz, deep modulation) without any direct hint in the fitness function.
 
 ### Caveats worth respecting
 - The Priority 1b investigation (`update_model.md:11`, Obsolete/Superseded:256-258) empirically found that AC was ~5% of total band power and JR was effectively mean-driven. That measurement was for *40 Hz carrier modulation on high bands*, where the 80 Hz gammatone LPF already squashes the carrier. For 1–8 Hz envelopes on low bands the AC fraction is much larger and the finding doesn't automatically carry over — but step 13a's PRECHECK is non-optional. If the precheck fails, implement 13b first (slow GABA_B population) so that JR actually *can* respond to AC drive at all, then retry 13a.

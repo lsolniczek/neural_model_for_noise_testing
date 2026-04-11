@@ -429,23 +429,35 @@ impl Goal {
         (base_score * (1.0 - penalty)).clamp(0.0, 1.0)
     }
 
-    /// Evaluate with all corrections: asymmetry penalty + PLV entrainment bonus.
+    /// Evaluate with all corrections: asymmetry penalty + carrier PLV bonus
+    /// + envelope-phase PLV bonus (CET 13c).
     ///
     /// Per Lachaux et al. (1999) and Helfrich et al. (2014), phase-locking
-    /// to the modulation frequency indicates genuine neural entrainment.
-    /// Goals that want entrainment (Focus, Isolation) get a score bonus
-    /// proportional to PLV. Goals that want natural rhythms (Sleep, Relaxation)
-    /// don't benefit from entrainment.
+    /// to the *modulation frequency* (carrier PLV) indicates entrainment to
+    /// the LFO. Goals that want carrier entrainment (Focus, Isolation,
+    /// Ignition) get a bonus proportional to carrier PLV.
+    ///
+    /// Per Ding & Simon (2014) and Luo & Poeppel (2007), phase-locking to
+    /// the *slow envelope* (envelope PLV) is the cortical envelope tracking
+    /// metric. Relaxation-family goals (Sleep, Deep Relaxation, Meditation)
+    /// — which currently have carrier PLV weight 0% because they don't want
+    /// rigid entrainment to a tone — DO benefit from envelope PLV because
+    /// that's the natural slow-rhythm tracking the brain does for organic
+    /// sounds (wind, surf, breath).
+    ///
+    /// Both bonuses are additive on different perceptual axes; a preset can
+    /// score on both simultaneously.
     pub fn evaluate_full(
         &self,
         fhn: &FhnResult,
         jansen_rit: &JansenRitResult,
         alpha_asymmetry: f64,
         plv: Option<f64>,
+        envelope_plv: Option<f64>,
     ) -> f64 {
         let base_score = self.evaluate_with_asymmetry(fhn, jansen_rit, alpha_asymmetry);
 
-        // PLV bonus: weighted by goal's entrainment relevance
+        // Carrier PLV bonus: weighted by goal's carrier entrainment relevance.
         let plv_bonus = if let Some(plv_value) = plv {
             let weight = self.entrainment_weight();
             weight * plv_value * 0.10 // max 10% bonus at PLV=1.0
@@ -453,7 +465,39 @@ impl Goal {
             0.0
         };
 
-        (base_score + plv_bonus).clamp(0.0, 1.0)
+        // Envelope-phase PLV bonus (CET 13c): weighted by goal's CET relevance.
+        // Up to 10% bonus at envelope_plv=1.0 × envelope_weight.
+        let env_plv_bonus = if let Some(env_value) = envelope_plv {
+            let weight = self.envelope_entrainment_weight();
+            weight * env_value * 0.10
+        } else {
+            0.0
+        };
+
+        (base_score + plv_bonus + env_plv_bonus).clamp(0.0, 1.0)
+    }
+
+    /// CET 13c — How much this goal values envelope-phase tracking (slow
+    /// 2–9 Hz cortical entrainment to the auditory envelope).
+    ///
+    /// Inverted from `entrainment_weight()`: relaxation goals benefit from
+    /// envelope tracking (slow natural rhythms), beta/gamma carrier-driven
+    /// goals don't (their reward channel is already saturated by carrier PLV).
+    fn envelope_entrainment_weight(&self) -> f64 {
+        match self.kind {
+            // Strong CET goals — slow natural rhythms are the whole point
+            GoalKind::Sleep => 0.8,
+            GoalKind::DeepRelaxation => 0.7,
+            GoalKind::Meditation => 0.6,
+            // Mixed — some envelope tracking benefit
+            GoalKind::Flow => 0.4,
+            GoalKind::DeepWork => 0.2,
+            // Carrier-driven goals — envelope tracking is irrelevant
+            GoalKind::Focus => 0.0,
+            GoalKind::Isolation => 0.0,
+            GoalKind::Shield => 0.0,
+            GoalKind::Ignition => 0.0,
+        }
     }
 
     /// How much this goal values entrainment (phase-locking to stimulus).
@@ -580,7 +624,7 @@ impl Goal {
     }
 
     /// Produce a detailed diagnostic breakdown of how a result matches this goal.
-    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, alpha_asymmetry: f64, plv: Option<f64>, performance: Option<PerformanceVector>) -> Diagnosis {
+    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, alpha_asymmetry: f64, plv: Option<f64>, envelope_plv: Option<f64>, performance: Option<PerformanceVector>) -> Diagnosis {
         let norm = jansen_rit.band_powers.normalized();
         let t = &self.band_targets;
 
@@ -629,7 +673,7 @@ impl Goal {
             MetricStatus::Pass
         };
 
-        let score = self.evaluate_full(fhn, jansen_rit, alpha_asymmetry, plv);
+        let score = self.evaluate_full(fhn, jansen_rit, alpha_asymmetry, plv, envelope_plv);
 
         let verdict = if score >= 0.75 {
             Verdict::Good
@@ -1114,7 +1158,7 @@ mod tests {
 
         for &kind in GoalKind::all() {
             let goal = Goal::new(kind);
-            let diag = goal.diagnose(&fhn, &jr, 0.5, 0.0, None, None);
+            let diag = goal.diagnose(&fhn, &jr, 0.5, 0.0, None, None, None);
             assert_eq!(diag.bands.len(), 5, "{kind} diagnosis should have 5 bands");
         }
     }
@@ -1125,7 +1169,7 @@ mod tests {
         let jr = make_jr(0.01, 0.18, 0.33, 0.42, 0.06); // Focus ideals
 
         let goal = Goal::new(GoalKind::Focus);
-        let diag = goal.diagnose(&fhn, &jr, 0.55, 0.0, None, None);
+        let diag = goal.diagnose(&fhn, &jr, 0.55, 0.0, None, None, None);
 
         assert!(
             matches!(diag.verdict, Verdict::Good),
