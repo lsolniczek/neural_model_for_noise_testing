@@ -1,6 +1,6 @@
 # Working with the Brain Model — Practical Guide
 
-A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 13 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV), and the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch).
+A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 14 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), and surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search).
 
 ---
 
@@ -699,7 +699,29 @@ Habituation interacts with resilience: a habituated model may actually recover f
 - `src/neural/performance.rs` — Performance vector (entrainment ratio, E/I stability, spectral centroid, carrier PLV, envelope PLV). `compute_plv()` measures phase-lock against a synthetic sinusoid at the LFO frequency; `compute_envelope_plv()` measures phase-lock against the Hilbert phase of the slow auditory envelope (CET 13c). Both use the 2–9 Hz CET-relevant bandpass.
 - `src/pipeline.rs` — Audio → cochlea → neural. Global max normalization (across all 4 bands) replaces per-band. 95th percentile FHN scaling clamped to [-3, 3]. CET bifurcate-recombine logic in steps 5d/5e/5f.
 - `src/optimizer/differential_evolution.rs` — The DE optimizer.
-- `src/main.rs` — CLI entry point. `evaluate` ships `--assr`, `--thalamic-gate`, `--cet`, and `--phys-gate` off by default; `optimize` always runs ASSR + thalamic gate (heuristic), CET and phys-gate are off pending optimizer-side validation.
+- `src/surrogate.rs` — **Priority 14c:** Hand-coded MLP inference for surrogate-assisted optimization. Loads a trained weights file (f32 little-endian binary), runs a 208→256→256→128→1 forward pass (~5 µs), predicts approximate scores. Used only for pre-screening DE candidates when `--surrogate` is active; never replaces the real pipeline for final scoring. Zero external dependencies.
+- `tools/train_surrogate.py` — **Priority 14b:** Offline Python/PyTorch script that trains the surrogate MLP from CSV data produced by `generate-data` and exports weights. Not called by Rust at runtime.
+- `src/main.rs` — CLI entry point. `evaluate` ships `--assr`, `--thalamic-gate`, `--cet`, and `--phys-gate` off by default. `optimize` adds `--cet`, `--phys-gate`, and `--surrogate` flags. `generate-data` produces training CSV for the surrogate.
+
+---
+
+## Surrogate-assisted optimization (Priority 14)
+
+The full simulation pipeline takes ~100 ms per preset evaluation. A 200-generation DE run with population 50 takes ~2.8 hours. Priority 14 adds an optional MLP surrogate that approximates the pipeline at ~5 µs per evaluation, enabling ~10x faster optimization.
+
+**How it works:** the surrogate pre-screens all DE trial candidates, then only the top-K (default 5) plus 1 random exploration candidate are validated with the real pipeline. The real pipeline's scores — never the surrogate's — enter DE's population. The surrogate is a filter, not a substitute.
+
+**Workflow:**
+1. `generate-data --count 20000 --goals all --threads 8` — sample random presets, evaluate with real pipeline, write CSV (~3.5 hours with 8 threads, one-time cost)
+2. `python tools/train_surrogate.py training_data.csv surrogate_weights.bin` — train MLP (208→256→256→128→1), export weights (~5 min, requires PyTorch)
+3. `optimize --goal sleep --surrogate --surrogate-weights surrogate_weights.bin` — DE uses surrogate for pre-screening, ~10x faster
+
+**Key properties:**
+- The NMM pipeline is NEVER modified. The surrogate is additive and flag-gated.
+- When `--surrogate` is off (default), behavior is bit-for-bit identical.
+- The surrogate becomes stale when scoring.rs changes — regenerate data and retrain.
+- Expected R² > 0.92 on held-out data for a smooth 190-dim → scalar function.
+- The surrogate inference is pure Rust (hand-coded matmul, no external dependencies).
 
 ---
 

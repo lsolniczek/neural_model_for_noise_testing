@@ -8,12 +8,13 @@ mod optimizer;
 mod pipeline;
 mod preset;
 mod scoring;
+mod surrogate;
 mod analyze_preset;
 mod regression_tests;
 mod validate;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use brain_type::BrainType;
@@ -85,6 +86,19 @@ enum Commands {
         /// Enable the physiological thalamic gate (Priority 9)
         #[arg(long = "phys-gate", default_value_t = false)]
         phys_gate: bool,
+
+        /// Enable surrogate-assisted pre-screening (Priority 14).
+        /// Uses a trained MLP to pre-filter candidates before real evaluation.
+        #[arg(long, default_value_t = false)]
+        surrogate: bool,
+
+        /// Path to surrogate weights file
+        #[arg(long, default_value = "surrogate_weights.bin")]
+        surrogate_weights: PathBuf,
+
+        /// Number of top surrogate candidates to validate with real pipeline
+        #[arg(long, default_value_t = 5)]
+        surrogate_k: usize,
     },
 
     /// Evaluate an existing preset against goal(s) and brain type(s).
@@ -156,6 +170,38 @@ enum Commands {
 
     /// Run neural model validation tests (frequency tracking, bifurcation, etc.)
     Validate,
+
+    /// Generate training data for the surrogate model (Priority 14a).
+    /// Samples random presets, evaluates with the real pipeline, writes CSV.
+    GenerateData {
+        /// Output CSV path
+        #[arg(long, default_value = "training_data.csv")]
+        output: PathBuf,
+
+        /// Number of random presets to sample
+        #[arg(long, default_value_t = 1000)]
+        count: usize,
+
+        /// Goals to evaluate (comma-separated, or "all")
+        #[arg(long, default_value = "all")]
+        goals: String,
+
+        /// Brain type (or "all")
+        #[arg(long, default_value = "normal")]
+        brain_type: String,
+
+        /// Audio duration per evaluation (seconds)
+        #[arg(long, default_value_t = 3.0)]
+        duration: f32,
+
+        /// Number of parallel threads
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
+
+        /// Random seed
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
 }
 
 fn bar(value: f64, width: usize) -> String {
@@ -190,6 +236,9 @@ fn main() {
             init_preset,
             cet,
             phys_gate,
+            surrogate,
+            surrogate_weights,
+            surrogate_k,
         } => {
             run_optimize(
                 &goal,
@@ -205,6 +254,9 @@ fn main() {
                 init_preset.as_deref(),
                 cet,
                 phys_gate,
+                surrogate,
+                &surrogate_weights,
+                surrogate_k,
             );
         }
         Commands::Evaluate {
@@ -232,6 +284,17 @@ fn main() {
         Commands::Validate => {
             validate::run_all();
         }
+        Commands::GenerateData {
+            output,
+            count,
+            goals,
+            brain_type,
+            duration,
+            threads,
+            seed,
+        } => {
+            run_generate_data(&output, count, &goals, &brain_type, duration, threads, seed);
+        }
     }
 }
 
@@ -251,6 +314,9 @@ fn run_optimize(
     init_preset: Option<&std::path::Path>,
     cet: bool,
     phys_gate: bool,
+    use_surrogate: bool,
+    surrogate_weights_path: &Path,
+    surrogate_k: usize,
 ) {
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
@@ -288,6 +354,24 @@ fn run_optimize(
     println!("  Seed:           {}", seed);
     if cet { println!("  CET:            enabled"); }
     if phys_gate { println!("  Phys gate:      enabled"); }
+
+    // Load surrogate model if requested (Priority 14).
+    let surrogate_model = if use_surrogate {
+        match surrogate::SurrogateModel::load(surrogate_weights_path) {
+            Ok(model) => {
+                println!("  Surrogate:      enabled (top-{surrogate_k} pre-screening)");
+                println!("  Weights:        {}", surrogate_weights_path.display());
+                Some(model)
+            }
+            Err(e) => {
+                eprintln!("  WARNING: Failed to load surrogate weights: {e}");
+                eprintln!("           Falling back to full pipeline evaluation.");
+                None
+            }
+        }
+    } else {
+        None
+    };
     println!();
 
     let bounds = Preset::bounds();
@@ -334,10 +418,60 @@ fn run_optimize(
     for gen in 0..generations {
         let trials = de.generate_trials();
 
-        for (target_idx, trial_genome) in trials {
-            let preset = Preset::from_genome(&trial_genome);
-            let result = evaluate_preset(&preset, &goal, &sim_config);
-            de.report_trial_result(target_idx, trial_genome, result.score);
+        if let Some(ref surr) = surrogate_model {
+            // Surrogate-assisted mode (Priority 14d):
+            // 1. Score ALL candidates with the surrogate (~µs each)
+            // 2. Rank by surrogate score, take top-K
+            // 3. Also include 1 random candidate for exploration
+            // 4. Validate only those K+1 with the real pipeline
+            // 5. For unvalidated trials, use surrogate score (approximate)
+            let mut scored: Vec<(usize, Vec<f64>, f32)> = trials
+                .iter()
+                .map(|(idx, genome)| {
+                    let input = surrogate::SurrogateModel::build_input(
+                        genome, goal_kind, bt,
+                        sim_config.assr_enabled,
+                        sim_config.thalamic_gate_enabled,
+                        sim_config.cet_enabled,
+                        sim_config.physiological_thalamic_gate_enabled,
+                    );
+                    let surr_score = surr.predict(&input);
+                    (*idx, genome.clone(), surr_score)
+                })
+                .collect();
+
+            // Sort descending by surrogate score
+            scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Top-K + 1 random exploration candidate
+            let k = surrogate_k.min(scored.len());
+            let mut validate_indices: Vec<usize> = (0..k).collect();
+            // Add one random index outside top-K for exploration
+            if scored.len() > k {
+                let rand_idx = k + (gen * 7 + 13) % (scored.len() - k);
+                if !validate_indices.contains(&rand_idx) {
+                    validate_indices.push(rand_idx);
+                }
+            }
+
+            for (rank, &(target_idx, ref trial_genome, surr_score)) in scored.iter().enumerate() {
+                if validate_indices.contains(&rank) {
+                    // Validate with real pipeline
+                    let preset = Preset::from_genome(trial_genome);
+                    let result = evaluate_preset(&preset, &goal, &sim_config);
+                    de.report_trial_result(target_idx, trial_genome.clone(), result.score);
+                } else {
+                    // Use surrogate score (approximate) for non-validated trials
+                    de.report_trial_result(target_idx, trial_genome.clone(), surr_score as f64);
+                }
+            }
+        } else {
+            // Standard mode: evaluate ALL trials with real pipeline
+            for (target_idx, trial_genome) in trials {
+                let preset = Preset::from_genome(&trial_genome);
+                let result = evaluate_preset(&preset, &goal, &sim_config);
+                de.report_trial_result(target_idx, trial_genome, result.score);
+            }
         }
 
         let best_fitness = de.best().fitness;
@@ -1397,5 +1531,163 @@ fn run_disturb_cmd(
         println!("    {:>5.1}s  {:>8}  {:>7.1} Hz  {:>6.1} Hz{}", w.time_s, ent_str, w.dominant_freq, w.spectral_centroid, marker);
     }
 
+    println!();
+}
+
+// ── Generate Training Data (Priority 14a) ──────────────────────────────────
+
+fn run_generate_data(
+    output: &Path,
+    count: usize,
+    goals_str: &str,
+    brain_type_str: &str,
+    duration: f32,
+    threads: usize,
+    seed: u64,
+) {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    let goals: Vec<GoalKind> = if goals_str.to_lowercase() == "all" {
+        GoalKind::all().to_vec()
+    } else {
+        goals_str
+            .split(',')
+            .filter_map(|s| GoalKind::from_str(s.trim()))
+            .collect()
+    };
+    if goals.is_empty() {
+        eprintln!("No valid goals specified");
+        std::process::exit(1);
+    }
+
+    let brain_types: Vec<BrainType> = if brain_type_str.to_lowercase() == "all" {
+        BrainType::all().to_vec()
+    } else {
+        brain_type_str
+            .split(',')
+            .filter_map(|s| BrainType::from_str(s.trim()))
+            .collect()
+    };
+    if brain_types.is_empty() {
+        eprintln!("No valid brain types specified");
+        std::process::exit(1);
+    }
+
+    let total_evals = count * goals.len() * brain_types.len();
+    println!();
+    println!("  Surrogate Training Data Generator");
+    println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
+    println!("  Presets:        {count}");
+    println!("  Goals:          {} ({} total)", goals.len(), goals.iter().map(|g| format!("{g}")).collect::<Vec<_>>().join(", "));
+    println!("  Brain types:    {}", brain_types.len());
+    println!("  Total evals:    {total_evals}");
+    println!("  Duration:       {duration:.1}s per eval");
+    println!("  Threads:        {threads}");
+    println!("  Output:         {}", output.display());
+    println!();
+
+    // Generate random presets using the same genome bounds as DE.
+    let bounds = Preset::bounds();
+    let mut rng_state = seed;
+    let mut next_u64 = || -> u64 {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        rng_state
+    };
+
+    let mut genomes: Vec<Vec<f64>> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let genome: Vec<f64> = bounds
+            .iter()
+            .map(|(lo, hi)| {
+                let u = next_u64() as f64 / u64::MAX as f64;
+                lo + u * (hi - lo)
+            })
+            .collect();
+        genomes.push(genome);
+    }
+
+    // Build work items: (preset_idx, genome, goal, brain_type)
+    let mut work_items: Vec<(usize, Vec<f64>, GoalKind, BrainType)> = Vec::with_capacity(total_evals);
+    for (idx, genome) in genomes.iter().enumerate() {
+        for &goal in &goals {
+            for &bt in &brain_types {
+                work_items.push((idx, genome.clone(), goal, bt));
+            }
+        }
+    }
+
+    // Thread-safe results collector
+    let results: Arc<Mutex<Vec<(usize, Vec<f64>, GoalKind, BrainType, f64)>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
+    let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Parallel evaluation
+    let chunk_size = (work_items.len() + threads - 1) / threads;
+    let work_items = Arc::new(work_items);
+
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let work = Arc::clone(&work_items);
+            let results = Arc::clone(&results);
+            let progress = Arc::clone(&progress);
+            let start_idx = t * chunk_size;
+            let end_idx = (start_idx + chunk_size).min(work.len());
+
+            s.spawn(move || {
+                for i in start_idx..end_idx {
+                    let (preset_idx, ref genome, goal_kind, bt) = work[i];
+                    let preset = Preset::from_genome(genome);
+                    let goal = Goal::new(goal_kind);
+                    let config = SimulationConfig {
+                        duration_secs: duration,
+                        brain_type: bt,
+                        ..SimulationConfig::default()
+                    };
+                    let result = evaluate_preset(&preset, &goal, &config);
+
+                    results.lock().unwrap().push((
+                        preset_idx,
+                        genome.clone(),
+                        goal_kind,
+                        bt,
+                        result.score,
+                    ));
+
+                    let done = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if done % 100 == 0 || done == total_evals {
+                        eprint!("\r  Progress: {done}/{total_evals} ({:.1}%)",
+                            100.0 * done as f64 / total_evals as f64);
+                    }
+                }
+            });
+        }
+    });
+    eprintln!();
+
+    // Write CSV
+    let results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    let mut file = std::fs::File::create(output).unwrap_or_else(|e| {
+        eprintln!("Failed to create output file: {e}");
+        std::process::exit(1);
+    });
+
+    // Header
+    let genome_cols: Vec<String> = (0..preset::GENOME_LEN).map(|i| format!("g{i}")).collect();
+    write!(file, "{},goal_id,brain_type_id,assr,thalamic_gate,cet,phys_gate,score\n",
+        genome_cols.join(",")).unwrap();
+
+    // Data rows
+    for (_, genome, goal_kind, bt, score) in &results {
+        let genome_str: Vec<String> = genome.iter().map(|v| format!("{v:.6}")).collect();
+        let goal_id = GoalKind::all().iter().position(|&g| g == *goal_kind).unwrap_or(0);
+        let bt_id = BrainType::all().iter().position(|&b| b == *bt).unwrap_or(0);
+        writeln!(file, "{},{goal_id},{bt_id},1,1,0,0,{score:.6}",
+            genome_str.join(",")).unwrap();
+    }
+
+    println!("  Wrote {} rows to {}", results.len(), output.display());
     println!();
 }

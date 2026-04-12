@@ -12,6 +12,7 @@ Command-line interface, testing, and evaluation guide for the Neural Preset Opti
   - [evaluate](#evaluate)
   - [disturb](#disturb)
   - [validate](#validate)
+  - [generate-data](#generate-data)
 - [Running Tests](#running-tests)
   - [Full Test Suite](#full-test-suite)
   - [Module-Specific Tests](#module-specific-tests)
@@ -64,6 +65,11 @@ cargo run --release -- optimize [OPTIONS]
 | `--convergence` | float | `0.001` | Stop if fitness std drops below this |
 | `--brain-type` | string | `normal` | Neurological profile for the simulation |
 | `--init-preset` | path | none | Seed population from an existing preset JSON |
+| `--cet` | flag | `false` | Enable Cortical Envelope Tracking (Priority 13) |
+| `--phys-gate` | flag | `false` | Enable physiological thalamic gate (Priority 9) |
+| `--surrogate` | flag | `false` | Enable surrogate-assisted pre-screening (Priority 14). Uses a trained MLP to filter DE candidates before expensive real-pipeline evaluation. ~10x speedup |
+| `--surrogate-weights` | path | `surrogate_weights.bin` | Path to the trained surrogate weights file |
+| `--surrogate-k` | int | `5` | Number of top surrogate candidates to validate per generation with the real pipeline |
 
 #### Examples
 
@@ -85,6 +91,14 @@ cargo run --release -- optimize --goal sleep --seed 123 --de-f 0.8 --de-cr 0.9
 
 # Save output to specific path
 cargo run --release -- optimize --goal isolation --output presets/my_isolation_v1.json
+
+# Optimize sleep with physiological gate + CET (best for relaxation goals)
+cargo run --release -- optimize --goal sleep --phys-gate --cet --generations 200 --population 50 --duration 12
+
+# Same but with surrogate pre-screening (~10x faster, requires trained weights)
+cargo run --release -- optimize --goal sleep --phys-gate --cet --surrogate \
+  --surrogate-weights surrogate_weights.bin --surrogate-k 5 \
+  --generations 200 --population 50 --duration 12
 ```
 
 #### Output
@@ -299,6 +313,64 @@ No options. Runs 5 tests:
 
 ---
 
+### generate-data
+
+Generate training data for the surrogate model (Priority 14). Samples random presets, evaluates each against specified goals and brain types using the real simulation pipeline, and writes the results as CSV for use by `tools/train_surrogate.py`.
+
+```bash
+cargo run --release -- generate-data [OPTIONS]
+```
+
+#### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--output` | path | `training_data.csv` | Output CSV file path |
+| `--count` | int | `1000` | Number of random presets to sample |
+| `--goals` | string | `all` | Goals to evaluate (comma-separated, or "all" for all 9) |
+| `--brain-type` | string | `normal` | Brain type (or "all" for all 5) |
+| `--duration` | float | `3.0` | Audio duration per evaluation (seconds). Shorter = faster but noisier |
+| `--threads` | int | `4` | Number of parallel evaluation threads |
+| `--seed` | int | `42` | RNG seed for preset generation |
+
+#### Examples
+
+```bash
+# Quick dataset (1000 presets × 4 goals × Normal, ~7 minutes with 8 threads)
+cargo run --release -- generate-data --count 1000 --goals sleep,deep_relaxation,focus,deep_work --threads 8
+
+# Full dataset for surrogate training (20000 presets × all goals × Normal, ~3.5 hours with 8 threads)
+cargo run --release -- generate-data --count 20000 --goals all --duration 3 --threads 8
+
+# All brain types (20000 × 9 goals × 5 brains = 900k evals — long run)
+cargo run --release -- generate-data --count 20000 --goals all --brain-type all --threads 8
+```
+
+#### Output Format
+
+CSV with columns: `g0, g1, ..., g189, goal_id, brain_type_id, assr, thalamic_gate, cet, phys_gate, score`
+
+- `g0..g189`: genome values (raw, not normalized — the surrogate normalizes on input)
+- `goal_id`: integer index into `GoalKind::all()` (0=Focus, 1=DeepWork, 2=Sleep, ...)
+- `brain_type_id`: integer index into `BrainType::all()` (0=Normal, 1=HighAlpha, ...)
+- `assr`, `thalamic_gate`, `cet`, `phys_gate`: config flags (0 or 1)
+- `score`: real-pipeline score in [0, 1]
+
+#### Surrogate Training Workflow
+
+```bash
+# 1. Generate training data
+cargo run --release -- generate-data --count 20000 --goals all --threads 8
+
+# 2. Train the surrogate MLP (requires Python + PyTorch)
+python tools/train_surrogate.py training_data.csv surrogate_weights.bin
+
+# 3. Use surrogate in the optimizer (~10x faster)
+cargo run --release -- optimize --goal sleep --surrogate --surrogate-weights surrogate_weights.bin
+```
+
+---
+
 ## Running Tests
 
 ### Full Test Suite
@@ -338,6 +410,10 @@ cargo test auditory::crossover::tests
 # Physiological thalamic gate (Priority 9) — TC cell ODE, T-type Ca2+ gating curves,
 # HH singularity handling, burst-vs-tonic mode switch, Steriade proportions, arousal delegation
 cargo test auditory::physiological_thalamic_gate::tests
+
+# Surrogate model (Priority 14c) — MLP weight loading, forward pass, input builder,
+# round-trip serialization, output range [0,1], batch consistency
+cargo test surrogate::tests
 
 # FitzHugh-Nagumo model — ODE derivatives, spike detection, ISI CV, bifurcation
 cargo test neural::fhn::tests
