@@ -139,6 +139,7 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 | `--assr` | flag | `false` | Enable ASSR transfer function (auditory pathway filtering). Off by default for `evaluate`; always on in the `optimize` pipeline |
 | `--thalamic-gate` | flag | `false` | Enable arousal-dependent thalamic gating. Off by default for `evaluate`; always on in the `optimize` pipeline |
 | `--cet` | flag | `false` | Enable Cortical Envelope Tracking (Priority 13). Splits each band into a slow (≤10 Hz) path that bypasses ASSR and a fast (>10 Hz) path that gets ASSR, engages the slow GABA_B inhibitory population in JR, and adds envelope-phase PLV to scoring. Off by default for `evaluate`; off in `optimize` until validated. Refs: Doelling et al. 2014, Ding & Simon 2014, Moran & Friston 2011 |
+| `--phys-gate` | flag | `false` | Enable the physiological thalamic gate (Priority 9). Replaces the linear heuristic gate with a Hodgkin-Huxley TC cell where K⁺ leak conductance is the arousal knob. Ion-channel dynamics (T-type Ca²⁺, Bazhenov 2002 / Destexhe 1996) produce a sigmoidal burst↔tonic mode switch rather than a linear ramp. Dramatically improves sleep/relaxation scores (+0.12 to +0.28); takes precedence over `--thalamic-gate` when both set. Off by default for `evaluate` |
 
 #### Examples
 
@@ -162,6 +163,10 @@ cargo run --release -- evaluate presets/my_preset.json --goal focus --assr --tha
 # get a new envelope-phase PLV reward channel; presets with slow NeuralLfo
 # (1–8 Hz) on broadband noise gain ~3–5% on those goals.
 cargo run --release -- evaluate presets/my_preset.json --goal sleep --cet
+
+# Enable the physiological thalamic gate — ion-channel-derived sigmoid
+# replaces the linear heuristic. Sleep/relaxation presets gain +0.12 to +0.28.
+cargo run --release -- evaluate presets/my_preset.json --goal sleep --phys-gate
 
 # Longer evaluation for more stable results
 cargo run --release -- evaluate presets/my_preset.json --goal meditation --duration 20
@@ -329,6 +334,10 @@ cargo test auditory::thalamic_gate::tests
 # CET crossover (Priority 13a) — 1st-order LP + complementary HP, symmetric -3 dB
 # at 10 Hz, 5 Hz envelope passes, 40 Hz carrier rejected, near-bitwise reconstruction
 cargo test auditory::crossover::tests
+
+# Physiological thalamic gate (Priority 9) — TC cell ODE, T-type Ca2+ gating curves,
+# HH singularity handling, burst-vs-tonic mode switch, Steriade proportions, arousal delegation
+cargo test auditory::physiological_thalamic_gate::tests
 
 # FitzHugh-Nagumo model — ODE derivatives, spike detection, ISI CV, bifurcation
 cargo test neural::fhn::tests

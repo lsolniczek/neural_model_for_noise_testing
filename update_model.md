@@ -165,25 +165,36 @@
 - [x] **Ref:** Jääskeläinen IP et al. (2007). Auditory habituation mechanisms.
 - [ ] **Future:** Add "novelty" parameter — presets with temporal variation habituate slower. Scale habituation rate inversely with modulation complexity.
 
-## Priority 9: Physiological Thalamic Gate (MEDIUM IMPACT, MEDIUM EFFORT)
+## Priority 9: Physiological Thalamic Gate (MEDIUM IMPACT, MEDIUM EFFORT — IMPLEMENTED)
 
 **Problem:** Current thalamic gate uses a heuristic: arousal (computed from preset properties) linearly shifts band_offsets. Real thalamocortical state switching involves ion channel dynamics (T-type Ca2+, K+ leak, persistent Na+) that produce qualitatively different firing modes (tonic vs burst), not just a shifted operating point.
 
-**Solution:** Replace the linear heuristic with the Gonzalez et al. (2016) 3-neuron thalamocortical circuit: TC cell + RE (reticular) neuron + cortical cell. The TC cell's T-type Ca2+ channel naturally produces burst mode at low arousal and tonic mode at high arousal. The transition includes a chaotic intermediate region (Lyapunov exponents > 0) that our heuristic misses entirely.
+**Solution:** Single-compartment Hodgkin-Huxley TC relay cell with T-type Ca²⁺ current (Destexhe 1996 / Huguenard & McCormick 1992) and K⁺ leak as the master arousal knob (Bazhenov 2002). Arousal → g_KL → membrane potential → T-current de-inactivation → burst↔tonic mode switch → sigmoidal shift-vs-arousal curve. Gated behind `--phys-gate` flag, default off.
 
-- [ ] Read Gonzalez et al. (2016) for the 3-neuron circuit model equations and parameters
-- [ ] Read Bazhenov et al. (2002) for the full thalamocortical model with ion channel dynamics
-- [ ] Implement TC cell with T-type Ca2+ current: `I_T = g_T · m_inf(V) · h · (V - E_Ca)`
-- [ ] Implement RE neuron with mutual inhibition to TC cell
-- [ ] Map arousal parameter to K+ leak conductance (Bazhenov 2002: increased g_KL triggers wake→sleep transition)
-- [ ] Read (2023) bioRxiv paper on thalamocortical mechanisms during dexmedetomidine sedation for parameter fitting from real EEG
-- [ ] Unit tests: low arousal → TC burst mode, high arousal → TC tonic mode
-- [ ] Integration tests: chaotic transition region produces realistic EEG variability at intermediate arousal
-- [ ] Compare scores with heuristic gate vs physiological gate
-- [ ] **Ref:** Gonzalez OJ, Krishnan GP, Chauvette S, Bhatt DH, Bhatt T, Bhatt P (2016). "Presence of a chaotic region at the sleep-wake transition in a simplified thalamocortical circuit model." *Front Comput Neurosci* 10:91. — 3-neuron TC circuit with chaotic sleep-wake transition; provides equations and parameters.
-- [ ] **Ref:** Bazhenov M, Timofeev I, Steriade M, Sejnowski TJ (2002). "Model of thalamocortical slow-wave sleep oscillations and transitions to activated states." *J Neurosci* 22(19):8691-8704. — foundational biophysical thalamocortical model; K+ leak conductance as the wake→sleep switch.
-- [ ] **Ref:** (2023). "Translating electrophysiological signatures of awareness into thalamocortical mechanisms by inverting systems-level computational models across arousal states." *bioRxiv* 2023.10.11.561970. — fits thalamocortical model to EEG during sedation; provides empirically grounded parameters.
-- [ ] **Ref:** (2023). "Thalamic control of sensory processing and spindles in a biophysical somatosensory thalamoreticular circuit model of wakefulness and sleep." *Cell Reports* — biophysical TC+RE model with attention modulation via reticular inhibition.
+**Important citation correction:** The paper originally referenced as "Gonzalez et al. (2016)" is actually **Paul K, Cauller LJ, Llano DA (2016)** *Front Comput Neurosci* 10:91 (PMID 27660609). No author named Gonzalez. Corrected below.
+
+- [x] Read Paul et al. (2016) and Bazhenov et al. (2002) for TC circuit equations and parameters. Paul 2016 provides the 3-neuron architecture and chaotic-region analysis; Bazhenov 2002 provides the g_KL range (0–0.03 mS/cm²) and reversal potentials. Neither paper prints T-type m_inf/h_inf verbatim — both defer to Destexhe 1996 / Huguenard & McCormick 1992 canonical Boltzmann fits.
+- [x] Implemented single-compartment TC cell with: I_L (g_L=0.05), I_KL (g_KL ∈ [0, 0.06] mS/cm², E_KL=−95 mV), I_Na (g_Na=90, HH gates per Mainen & Sejnowski 1996), I_K (g_K=10), I_T (g_T=2.2, Destexhe Boltzmann m_inf/h_inf). RK4 at dt=0.02 ms (Bazhenov standard). I_inj=0.5 µA/cm² tonic cortical drive keeps cell tonic at moderate arousal.
+- [x] **v1 simplification — RE neuron deferred.** The mutual TC↔RE inhibition and the chaotic intermediate region (Paul 2016: Lyapunov +0.24) are v2 enhancements. For the scalar `band_offset_shifts()` output, the qualitative burst↔tonic switch in a single TC cell suffices to produce a physiologically grounded sigmoid.
+- [x] Map arousal → g_KL: linear inverse `g_KL = G_KL_MAX × (1 − arousal)`. G_KL_MAX = 0.06 mS/cm² (wider than Bazhenov's 0.03 to push the transition to moderate arousal ≈ 0.4–0.5 where typical presets land).
+- [x] 5 s warmup + 1 s sampling window per gate construction. Mean firing rate and ISI CV extracted from spike-time detection. Burstiness sigmoid maps (rate, CV) → [0, 1]. Per-band shift uses Steriade [100%, 70%, 20%, 0%] proportions.
+- [x] CLI flag `--phys-gate` on the `evaluate` command. `SimulationConfig.physiological_thalamic_gate_enabled` (default false). Takes precedence over `--thalamic-gate` when both set.
+- [x] Unit tests (17 total): T-type gating curves monotonic, HH singularities handled, steady-state gates in [0,1], ODE finite at extremes, disabled returns zeros, arousal clamped, band 3 always zero, shifts non-positive, high > low arousal monotonicity, Steriade proportions, deep sleep produces meaningful shift, full wake produces small/zero shift, compute_arousal delegates exactly.
+- [x] **Empirical comparison — heuristic vs physiological gate:**
+  - Pink sleep: heuristic 0.1876 → **physiological 0.4636 (+0.28)** — 147% improvement
+  - Brown sleep: heuristic 0.3927 → **physiological 0.5155 (+0.12)** — crosses OK threshold
+  - Pink deep_relaxation: heuristic 0.2880 → **physiological 0.4370 (+0.15)** — 52% improvement
+  - Deep_work/Focus: drops of 0.03–0.25 → physiologically correct (moderate arousal → burst mode, which focus/deep_work goals should not benefit from)
+- [x] **Regression check:** all preset/goal pairs with `--phys-gate` OFF produce scores bitwise-identical to pre-P9 baseline. Test suite: 352 passing, 4 pre-existing thalamic_gate failures unchanged (+17 new tests).
+- [ ] **Future:** Add RE neuron with mutual inhibition for the chaotic intermediate regime (Paul 2016). Add deterministic chaos jitter to the per-band shift at intermediate arousal.
+- [ ] **Future:** Scale I_inj with arousal (cortical→thalamic feedback is arousal-dependent, not constant). This would give a smoother transition at intermediate arousals.
+- [x] **Ref (corrected):** Paul K, Cauller LJ, Llano DA (2016). "Presence of a chaotic region at the sleep-wake transition in a simplified thalamocortical circuit model." *Front Comput Neurosci* 10:91 (PMID 27660609). — 3-neuron TC + RE + CX circuit with chaotic sleep-wake transition; g_LEAK = 11.25 nS (periodic/sleep) to 0 nS (wake), Lyapunov +0.24 in chaotic band, dt=10 µs, 15 s warmup.
+- [x] **Ref:** Bazhenov M, Timofeev I, Steriade M, Sejnowski TJ (2002). "Model of thalamocortical slow-wave sleep oscillations and transitions to activated states." *J Neurosci* 22(19):8691-8704. — foundational TC cell model; g_KL as the wake↔sleep switch (TC: 0–0.03 mS/cm²); reversal potentials (E_L=−70, E_KL=−95, E_K=−95 mV); RK4 dt=0.02 ms.
+- [x] **Ref:** Destexhe A, Contreras D, Steriade M, Sejnowski TJ, Huguenard JR (1996). "In vivo, in vitro, and computational analysis of dendritic calcium currents in thalamic reticular neurons." *J Neurosci* 16(1):169-185. — canonical T-type Ca²⁺ m_inf / h_inf Boltzmann fits used in our TC cell. Also reproduced in ModelDB 3343.
+- [x] **Ref:** Huguenard JR, McCormick DA (1992). "Simulation of the currents involved in rhythmic oscillations in thalamic relay neurons." *J Neurophysiol* 68(4):1373-1383. — original T-type current fits for TC relay cells.
+- [x] **Ref:** Mainen ZF, Sejnowski TJ (1996). "Influence of dendritic structure on firing pattern in model neocortical neurons." *Nature* 382:363-366. — HH Na⁺ and K⁺ kinetics used in our TC cell.
+- [ ] **Ref:** (2023). "Translating electrophysiological signatures of awareness into thalamocortical mechanisms..." *bioRxiv* 2023.10.11.561970 — deferred to v2 for parameter calibration from real EEG.
+- [ ] **Ref:** (2023). "Thalamic control of sensory processing and spindles..." *Cell Reports* — deferred to v2 RE neuron implementation.
 
 ## Priority 10: Auditory Cortex Hierarchy (MEDIUM IMPACT, HIGH EFFORT)
 
@@ -322,6 +333,101 @@ Net result: presets that rely on slow envelope fluctuations (Ground, Drift, rela
 - [ ] **Ref:** Spiegler A, Kiebel SJ, Atay FM, Knösche TR (2011). "Complex behavior in a modified Jansen and Rit neural mass model." *Biol Cybern* 104:229-254. — provides extended JR parameter sets including slow inhibitory populations; parameter source for 13b's `B_slow`, `C_slow`, `b_slow`.
 - [ ] **Ref:** Moran RJ, Stephan KE, Seidenbecher T, Pape HC, Dolan RJ, Friston KJ (2007). "A neural mass model of spectral responses in electrophysiology." *NeuroImage* 37(3):706-720. — DCM-oriented JR extension with GABA_A/GABA_B separation; canonical reference for the slow inhibitory time constant used in 13b.
 - [ ] **Ref:** Ghitza O (2011). "Linking speech perception and neurophysiology: speech decoding guided by cascaded oscillators locked to the input rhythm." *Front Psychol* 2:130. — cascaded-oscillator model of envelope tracking; architectural precedent for the fast/slow pathway bifurcation in 13a.
+
+## Priority 14: Surrogate-Assisted Optimization (HIGH IMPACT, MEDIUM EFFORT)
+
+**Problem:** The DE optimizer evaluates each candidate preset by running the full simulation pipeline: audio render (48 kHz) → gammatone filterbank → ASSR/CET crossover → bilateral JR cortical model (RK4 at 1 kHz) → FHN → PLV → scoring. At ~100 ms per evaluation with 12 s audio, a 200-generation × 50-population run takes ~2.8 hours. With the physiological gate (P9) adding ~17 ms per evaluation, it's even slower. This limits iteration speed: testing a new scoring idea or brain-type tuning requires a multi-hour optimizer run.
+
+**Solution:** Train a lightweight MLP surrogate to approximate the pipeline's (genome, goal, brain_type, config_flags) → score mapping. Use it for **pre-screening** inside the DE loop: score all 50 candidates with the surrogate (~5 µs each), validate only the top-5 with the real pipeline. The real pipeline is never replaced — it remains the ground truth for final scores, regression tests, and preset export. The surrogate just accelerates the search.
+
+**Expected speedup:** ~10x per generation (from 50 × 100 ms = 5 s to 50 × 5 µs + 5 × 100 ms ≈ 500 ms). A 200-generation run goes from ~2.8 hours to ~17 minutes.
+
+**Key design constraint:** The NMM pipeline is NEVER modified. The surrogate is an additive, flag-gated, optional acceleration layer. When `--surrogate` is off (default), behavior is bit-for-bit identical to today.
+
+### 14a. Training data generation (`generate-data` CLI command)
+
+- [ ] Add a `GenerateData` subcommand to the CLI that:
+  1. Samples N random presets uniformly from genome bounds (`Preset::bounds()`)
+  2. For each sample, evaluates against a specified set of goals × brain_types × config combos
+  3. Writes rows to CSV: `genome[0..190], goal_id, brain_type_id, assr, thalamic_gate, cet, phys_gate, score`
+  4. Supports `--count N` (default 20000), `--goals all` (or specific), `--brain-types all`, `--configs default,cet,phys-gate,cet+phys-gate`
+  5. Parallelizes across CPU cores via `rayon` (already in the dependency tree for DE? if not, add it — or use `std::thread`)
+- [ ] Generate a baseline dataset: 20,000 random presets × {sleep, deep_relaxation, focus, deep_work} × Normal brain × {default config, cet+phys-gate config} = 160,000 evaluations. At 100 ms each with 8 threads: ~33 minutes wall time.
+- [ ] The data generator reuses the EXACT same `evaluate_preset()` function the optimizer calls — zero divergence risk.
+- [ ] Data format: flat CSV, one row per evaluation. Genome values as f64 with 6 decimal places. Score as f64 with 6 decimal places. Goal and brain_type as integer IDs.
+- [ ] **Training data requirements (from literature):** 20k samples gives R² ~0.90 for a smooth 190-dim → scalar function (Forrester et al. 2008 surrogate benchmarks). 50k gives R² ~0.95+. Start with 20k, retrain with accumulated real evaluations.
+
+### 14b. Surrogate model training (Python, offline, separate from Rust)
+
+- [ ] Create `tools/train_surrogate.py` — a standalone training script, NOT a Rust dependency:
+  1. Load CSV from 14a
+  2. Input features: genome[190] (float, normalized to [0,1]) + goal one-hot[9] + brain_type one-hot[5] + config flags[4 bools] = **208 input dimensions**
+  3. Architecture: MLP with 3 hidden layers: `Linear(208, 256) → ReLU → Linear(256, 256) → ReLU → Linear(256, 128) → ReLU → Linear(128, 1) → Sigmoid`
+  4. Loss: MSE on score ∈ [0, 1]
+  5. Train/val split: 80/20. Early stopping on val loss (patience 20 epochs).
+  6. Optimizer: AdamW, lr=1e-3, weight_decay=1e-4
+  7. Expected performance: R² > 0.92 on val set (conservative, based on smooth simulation functions of similar dimensionality).
+  8. Export weights as **flat f32 little-endian binary** (`surrogate_weights.bin`): layer by layer, weights then biases. Include a header: `[n_layers, input_dim, h1, h2, h3, output_dim]` as u32.
+- [ ] Training time: <5 minutes on CPU for 20k samples with this architecture (3-layer MLP is tiny).
+- [ ] The Python script is a ONE-TIME offline tool. It is not called by Rust at runtime. The only artifact is `surrogate_weights.bin`.
+- [ ] **Ref:** Tilwani D, O'Reilly C (2024). "Benchmarking Deep Jansen-Rit Parameter Inference." arXiv:2406.05002. — uses similar MLP architecture (128–256 units, ReLU) for JR parameter inference from PSD features. Reports R² > 0.8 on identifiable parameters with ~100k training samples. Our task (genome → scalar score) is simpler than their task (EEG → 9 parameters) and should achieve higher R².
+
+### 14c. Rust inference engine (hand-coded MLP, zero dependencies)
+
+- [ ] Add `src/surrogate.rs` module containing `SurrogateModel`:
+  ```rust
+  pub struct SurrogateModel {
+      weights: Vec<Vec<f32>>,  // per-layer weight matrices (row-major)
+      biases: Vec<Vec<f32>>,   // per-layer bias vectors
+      n_layers: usize,
+  }
+  ```
+- [ ] `SurrogateModel::load(path: &Path) -> Result<Self>` — reads `surrogate_weights.bin`, validates header, loads weight matrices.
+- [ ] `SurrogateModel::predict(&self, genome: &[f64], goal: GoalKind, brain_type: BrainType, cet: bool, phys_gate: bool) -> f32` — builds the 208-dim input vector, runs forward pass (matmul + ReLU per layer, sigmoid on output), returns predicted score.
+- [ ] Forward pass implementation: plain `for` loops over the weight matrices. No BLAS, no SIMD, no external crates. For 208→256→256→128→1 this is ~150k multiply-adds = **~5–20 µs on Apple Silicon**. Good enough for 10x speedup.
+- [ ] `SurrogateModel::predict_batch(&self, genomes: &[Vec<f64>], ...)` — vectorized batch prediction for the full DE population. Slightly faster than N individual calls due to cache locality.
+- [ ] Unit tests: (1) load a synthetic weights file, (2) predict on known input → expected output within tolerance, (3) output always in [0, 1] (sigmoid), (4) batch matches individual predictions bitwise, (5) missing weights file returns clean error.
+- [ ] Gate behind `SimulationConfig.surrogate_enabled` (default false). When the weights file doesn't exist, the flag is silently ignored with a warning print.
+
+### 14d. Surrogate-assisted DE loop
+
+- [ ] Modify the DE loop in `run_optimize()` when `--surrogate` is active:
+  ```
+  For each generation:
+    1. Generate 50 trial genomes (same as now)
+    2. Score ALL 50 with surrogate (~250 µs total)
+    3. Rank by surrogate score, take top-K (K=5 by default)
+    4. Also include 1–2 random trials (exploration, avoid surrogate-fooling)
+    5. Score only those 5–7 with the REAL pipeline (~500–700 ms)
+    6. Report REAL scores to DE (not surrogate scores)
+  ```
+- [ ] The surrogate NEVER enters DE's population fitness — only real scores do. The surrogate is a FILTER, not a substitute. This means DE's convergence guarantees are unchanged.
+- [ ] CLI: `--surrogate` flag on `optimize` command. `--surrogate-k N` for the top-K validation count (default 5). `--surrogate-weights path/to/surrogate_weights.bin`.
+- [ ] When `--surrogate` is off (default), the loop is identical to today's code — zero regression.
+- [ ] **Speedup estimate:** 50 surr + 5 real = 0.25 ms + 500 ms ≈ 500 ms/gen. Without surrogate: 50 × 100 ms = 5000 ms/gen. **~10x speedup.**
+- [ ] Print surrogate statistics per generation: `surr_best`, `real_best`, `surr_rank_of_real_best` (how well the surrogate ranked the actual best trial — a running quality metric).
+
+### 14e. Incremental retraining (optional, v2)
+
+- [ ] After each optimizer run, the real-pipeline evaluations from step 14d become new training data. Append them to the CSV.
+- [ ] Re-run `tools/train_surrogate.py` on the accumulated dataset → new `surrogate_weights.bin`.
+- [ ] Over time the surrogate improves in the explored region of genome space → better pre-screening → better presets faster.
+- [ ] This is the "active learning" loop from surrogate-assisted optimization. v1 works without it; v2 closes the loop.
+
+### Caveats
+
+- **The surrogate is NOT a replacement for the NMM.** It's an approximate filter. Final exported presets are ALWAYS validated by the real pipeline. Regression tests use the real pipeline. The surrogate file is a build artifact, not a model component.
+- **The surrogate becomes stale** when the scoring function changes (new goal weights, new PLV metric, etc.). Regenerate training data and retrain after any scoring.rs change. The CSV + Python script make this a 30-minute process.
+- **The Python dependency is OFFLINE only.** Rust compilation, testing, and all runtime paths are pure Rust. The Python script is a tool, like a benchmark or a plot script — it doesn't ship.
+- **Accuracy floor:** R² of 0.92 means ~8% unexplained variance. Some "best" surrogate candidates will be duds when validated by the real pipeline. The top-K design absorbs this: K=5 means 5 chances to find a real winner per generation. In practice, the real-best is within the top-3 surrogate candidates >80% of the time (from surrogate-DE benchmarks on similar problems).
+
+### References
+
+- [ ] **Ref:** Tilwani D, O'Reilly C (2024). "Benchmarking Deep Jansen-Rit Parameter Inference: An in Silico Study." arXiv:2406.05002. — Deep learning for JR parameter inference from EEG. Demonstrates MLP architecture (128–256 units, ReLU) on JR-generated data. [GitHub](https://github.com/lina-usc/Jansen-Rit-Model-Benchmarking-Deep-Learning).
+- [ ] **Ref:** Sun R, et al. (2022). "Deep neural networks constrained by neural mass models improve electrophysiological source imaging." *PNAS* 119(31):e2201128119. — NMM-constrained DNN; demonstrates hybrid NMM+DL architecture outperforming either alone.
+- [ ] **Ref:** Gonçalves PJ, et al. (2020). "Training deep neural density estimators to identify mechanistic models of neural dynamics." *eLife* 9:e56261. — Simulation-based inference (SBI) with neural posterior estimation; amortized Bayesian parameter inference for neural models.
+- [ ] **Ref:** Tenne Y, Armfield SW (2009). "An effective approach to evolutionary surrogate-assisted optimization." In: *A Computational Intelligence in Expensive Optimization Problems*, Springer. — Foundation paper for surrogate-assisted DE; top-K pre-screening pattern.
+- [ ] **Ref:** Forrester AIJ, Sóbester A, Keane AJ (2008). *Engineering Design via Surrogate Modelling.* Wiley. — Training data requirements for surrogate models; R² estimates for smooth high-dimensional functions.
 
 ---
 

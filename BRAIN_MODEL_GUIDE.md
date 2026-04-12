@@ -1,6 +1,6 @@
 # Working with the Brain Model — Practical Guide
 
-A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 12 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, and Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV).
+A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 13 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV), and the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch).
 
 ---
 
@@ -195,6 +195,8 @@ Audio --> Cochlear filterbank (32 gammatone channels, 4 tonotopic bands)
       --> ASSR DC/AC separation on FAST path only (slow path bypasses ASSR — CET fix)
       --> [CET only] Recombine slow + (ASSR-attenuated) fast paths
       --> Band-dependent thalamic gate (arousal-driven input_offset shift)
+        -->  [--phys-gate only] Physiological gate: HH TC cell (Bazhenov 2002) with
+             T-type Ca2+ and K+ leak. Sigmoidal burst↔tonic switch replaces linear ramp
       --> Bilateral Jansen-Rit cortical model (inhibitory corpus callosum coupling)
         -->  [CET only] Slow GABA_B parallel population (B_slow=10 mV, b_slow=5/s, τ≈200 ms)
       --> Wilson-Cowan adaptive frequency tracking (within +/-5 Hz Arnold tongue)
@@ -687,7 +689,8 @@ Habituation interacts with resilience: a habituated model may actually recover f
 - `src/scoring.rs` — Goal definitions, band targets, scoring formulas. `Goal::evaluate_full()` combines band score + FHN score + asymmetry penalty + carrier PLV bonus + envelope PLV bonus (CET). `entrainment_weight()` and `envelope_entrainment_weight()` hold the per-goal weights for the two PLV terms; `asymmetry_penalty()` holds the L/R lateralization penalty. Read this to understand what each goal measures.
 - `src/brain_type.rs` — Brain type parameter definitions (input_offset, input_scale, bilateral params).
 - `src/neural/jansen_rit.rs` — The cortical model. Inhibitory bilateral coupling, stochastic noise (sigma=15), habituation (synaptic depression), and the slow GABA_B parallel population (CET 13b) all live here. The Wendling 4-population state `[y0..y7]` is the canonical core; an additional 2-state slow inhibitory population `[y_slow_0, y_slow_1]` is integrated alongside via RK4 when `b_slow_gain > 0`. EEG = `y[1] - y[2] - y[3] - y_slow_0`.
-- `src/auditory/thalamic_gate.rs` — Band-dependent arousal shift. The reverb→arousal mapping. `band_offset_shifts()` returns `[100%, 70%, 20%, 0%]` of max reduction across bands 0-3.
+- `src/auditory/thalamic_gate.rs` — *Heuristic* band-dependent arousal shift. The reverb→arousal mapping. `band_offset_shifts()` returns `[100%, 70%, 20%, 0%]` of max reduction across bands 0-3. Linear ramp. Default gate used by `--thalamic-gate`.
+- `src/auditory/physiological_thalamic_gate.rs` — **Priority 9:** *Physiological* thalamic gate. Single-compartment Hodgkin-Huxley TC cell with T-type Ca²⁺ (Destexhe 1996), Na⁺/K⁺ (Mainen-Sejnowski 1996), and K⁺ leak (Bazhenov 2002). Arousal → g_KL → membrane potential → burst↔tonic mode switch → sigmoidal shift-vs-arousal. Same `band_offset_shifts()` output with Steriade [100%, 70%, 20%, 0%] proportions. Used by `--phys-gate`. Dramatically improves sleep/relaxation (+0.12 to +0.28) because ion-channel dynamics push harder into burst mode at low arousal than the linear heuristic. Drops focus/deep_work because moderate arousal → burst mode, which is physiologically correct (TC cells don't provide partial relay at intermediate states).
 - `src/auditory/assr.rs` — DC/AC separation logic. ASSR frequency-dependent attenuation of the modulation envelope. When CET is enabled, only acts on the FAST path (slow path bypasses ASSR — Priority 13a).
 - `src/auditory/crossover.rs` — **CET 13a:** 1st-order leaky integrator LP at 10 Hz with complementary HP. Splits the band envelope into a slow path (≤10 Hz, the cortical envelope tracking band per Doelling 2014) and a fast path (>10 Hz, the carrier modulation that ASSR processes). LP and HP sum to within one ULP.
 - `src/auditory/gammatone.rs` — 32-channel gammatone cochlear filterbank grouped into 4 tonotopic bands.
@@ -696,7 +699,7 @@ Habituation interacts with resilience: a habituated model may actually recover f
 - `src/neural/performance.rs` — Performance vector (entrainment ratio, E/I stability, spectral centroid, carrier PLV, envelope PLV). `compute_plv()` measures phase-lock against a synthetic sinusoid at the LFO frequency; `compute_envelope_plv()` measures phase-lock against the Hilbert phase of the slow auditory envelope (CET 13c). Both use the 2–9 Hz CET-relevant bandpass.
 - `src/pipeline.rs` — Audio → cochlea → neural. Global max normalization (across all 4 bands) replaces per-band. 95th percentile FHN scaling clamped to [-3, 3]. CET bifurcate-recombine logic in steps 5d/5e/5f.
 - `src/optimizer/differential_evolution.rs` — The DE optimizer.
-- `src/main.rs` — CLI entry point. `evaluate` ships `--assr`, `--thalamic-gate`, and `--cet` off by default; `optimize` always runs ASSR + thalamic gate, CET is off pending optimizer-side validation.
+- `src/main.rs` — CLI entry point. `evaluate` ships `--assr`, `--thalamic-gate`, `--cet`, and `--phys-gate` off by default; `optimize` always runs ASSR + thalamic gate (heuristic), CET and phys-gate are off pending optimizer-side validation.
 
 ---
 

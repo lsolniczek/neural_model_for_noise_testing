@@ -77,6 +77,14 @@ enum Commands {
         /// Seed population from an existing preset JSON (explores around it)
         #[arg(long)]
         init_preset: Option<PathBuf>,
+
+        /// Enable Cortical Envelope Tracking (Priority 13)
+        #[arg(long, default_value_t = false)]
+        cet: bool,
+
+        /// Enable the physiological thalamic gate (Priority 9)
+        #[arg(long = "phys-gate", default_value_t = false)]
+        phys_gate: bool,
     },
 
     /// Evaluate an existing preset against goal(s) and brain type(s).
@@ -110,6 +118,14 @@ enum Commands {
         /// inhibitory population in JR. Off by default for `evaluate`.
         #[arg(long, default_value_t = false)]
         cet: bool,
+
+        /// Enable the physiological thalamic gate (Priority 9). Replaces
+        /// the linear heuristic gate with an ion-channel-based TC cell
+        /// (Bazhenov 2002 / Paul 2016) where K+ leak conductance is the
+        /// arousal knob. Sigmoidal shape derived from real ion-channel
+        /// dynamics. Takes precedence over --thalamic-gate when both set.
+        #[arg(long = "phys-gate", default_value_t = false)]
+        phys_gate: bool,
     },
 
     /// Run disturbance resilience test — inject acoustic spike and measure recovery.
@@ -172,6 +188,8 @@ fn main() {
             convergence,
             brain_type,
             init_preset,
+            cet,
+            phys_gate,
         } => {
             run_optimize(
                 &goal,
@@ -185,6 +203,8 @@ fn main() {
                 convergence,
                 &brain_type,
                 init_preset.as_deref(),
+                cet,
+                phys_gate,
             );
         }
         Commands::Evaluate {
@@ -195,8 +215,9 @@ fn main() {
             assr,
             thalamic_gate,
             cet,
+            phys_gate,
         } => {
-            run_evaluate(&preset, &goal, &brain_type, duration, assr, thalamic_gate, cet);
+            run_evaluate(&preset, &goal, &brain_type, duration, assr, thalamic_gate, cet, phys_gate);
         }
         Commands::Disturb {
             preset,
@@ -228,6 +249,8 @@ fn run_optimize(
     convergence: f64,
     brain_type_str: &str,
     init_preset: Option<&std::path::Path>,
+    cet: bool,
+    phys_gate: bool,
 ) {
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
@@ -249,6 +272,8 @@ fn run_optimize(
     let sim_config = SimulationConfig {
         duration_secs: duration,
         brain_type: bt,
+        cet_enabled: cet,
+        physiological_thalamic_gate_enabled: phys_gate,
         ..SimulationConfig::default()
     };
 
@@ -261,6 +286,8 @@ fn run_optimize(
     println!("  Max generations:{}", generations);
     println!("  Audio duration: {:.1}s per evaluation", duration);
     println!("  Seed:           {}", seed);
+    if cet { println!("  CET:            enabled"); }
+    if phys_gate { println!("  Phys gate:      enabled"); }
     println!();
 
     let bounds = Preset::bounds();
@@ -457,7 +484,7 @@ fn run_optimize(
 
 // ── Evaluate ─────────────────────────────────────────────────────────────────
 
-fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32, assr: bool, thalamic_gate: bool, cet: bool) {
+fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32, assr: bool, thalamic_gate: bool, cet: bool, phys_gate: bool) {
     // Load preset from JSON
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
         eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
@@ -519,7 +546,7 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
 
     if is_matrix {
         // ── Matrix mode ─────────────────────────────────────────────────────
-        print_comparison_matrix(&preset, &goals, &brain_types, duration, assr, thalamic_gate);
+        print_comparison_matrix(&preset, &goals, &brain_types, duration, assr, thalamic_gate, cet, phys_gate);
     } else {
         // ── Single evaluation with full diagnosis ───────────────────────────
         let bt = brain_types[0];
@@ -532,12 +559,13 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
             assr_enabled: assr,
             thalamic_gate_enabled: thalamic_gate,
             cet_enabled: cet,
+            physiological_thalamic_gate_enabled: phys_gate,
             ..SimulationConfig::default()
         };
         let result = evaluate_preset(&preset, &goal, &sim_config);
 
         // Re-run pipeline for detailed diagnosis (need FHN/JR results)
-        let detailed = run_detailed_pipeline(&preset, bt, duration, assr, thalamic_gate, cet);
+        let detailed = run_detailed_pipeline(&preset, bt, duration, assr, thalamic_gate, cet, phys_gate);
         let brightness = detailed.brightness;
         let energy_fractions = detailed.energy_fractions;
 
@@ -769,6 +797,7 @@ fn run_detailed_pipeline(
     assr_enabled: bool,
     thalamic_gate_enabled: bool,
     cet_enabled: bool,
+    physiological_thalamic_gate_enabled: bool,
 ) -> DetailedResult {
     use crate::auditory::GammatoneFilterbank;
     use noise_generator_core::NoiseEngine;
@@ -952,16 +981,24 @@ fn run_detailed_pipeline(
     let neural_params = brain_type.params();
     let mut bilateral = brain_type.bilateral_params();
 
-    // (Optional) Thalamic gate: per-band offset shifts (Steriade et al. 1993)
-    if thalamic_gate_enabled {
+    // (Optional) Thalamic gate: per-band offset shifts (Steriade et al. 1993).
+    // The physiological gate (Priority 9, Bazhenov 2002 / Paul 2016 TC cell)
+    // takes precedence over the heuristic gate when both flags are set.
+    let band_shifts = if physiological_thalamic_gate_enabled {
+        let arousal = crate::auditory::PhysiologicalThalamicGate::compute_arousal(preset, brightness);
+        let gate = crate::auditory::PhysiologicalThalamicGate::new(arousal);
+        gate.band_offset_shifts()
+    } else if thalamic_gate_enabled {
         let arousal = crate::auditory::ThalamicGate::compute_arousal(preset, brightness);
         let gate = crate::auditory::ThalamicGate::new(arousal);
-        let band_shifts = gate.band_offset_shifts();
-        for b in 0..4 {
-            if band_shifts[b].abs() > 1e-10 {
-                bilateral.left.band_offsets[b] += band_shifts[b];
-                bilateral.right.band_offsets[b] += band_shifts[b];
-            }
+        gate.band_offset_shifts()
+    } else {
+        [0.0; 4]
+    };
+    for b in 0..4 {
+        if band_shifts[b].abs() > 1e-10 {
+            bilateral.left.band_offsets[b] += band_shifts[b];
+            bilateral.right.band_offsets[b] += band_shifts[b];
         }
     }
 
@@ -1052,6 +1089,8 @@ fn print_comparison_matrix(
     duration: f32,
     assr: bool,
     thalamic_gate: bool,
+    cet: bool,
+    phys_gate: bool,
 ) {
     // Header
     print!("  {:<12}", "Brain Type");
@@ -1076,6 +1115,8 @@ fn print_comparison_matrix(
                 brain_type: *bt,
                 assr_enabled: assr,
                 thalamic_gate_enabled: thalamic_gate,
+                cet_enabled: cet,
+                physiological_thalamic_gate_enabled: phys_gate,
                 ..SimulationConfig::default()
             };
 

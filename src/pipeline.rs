@@ -3,7 +3,7 @@
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 
-use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, ButterworthCrossover};
+use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, PhysiologicalThalamicGate, ButterworthCrossover};
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
 use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
@@ -80,6 +80,20 @@ pub struct SimulationConfig {
     /// phase PLV against the slow drive in addition to carrier PLV.
     /// Default false → bitwise regression-safe with all existing presets.
     pub cet_enabled: bool,
+    /// Enable the physiological thalamic gate (Priority 9).
+    ///
+    /// When true, replaces the linear arousal → band_offset heuristic
+    /// (`thalamic_gate_enabled`) with a single-compartment Hodgkin-Huxley
+    /// TC cell whose K⁺ leak conductance (g_KL) is the master arousal knob.
+    /// Burst↔tonic mode switching is driven by ion-channel dynamics
+    /// (T-type Ca²⁺, Bazhenov 2002 / Paul 2016 / Destexhe 1996), producing
+    /// a sigmoidal shift-vs-arousal shape rather than a linear ramp.
+    ///
+    /// Takes precedence over `thalamic_gate_enabled` when both are set:
+    /// only one gate is applied per evaluation. Default false → bitwise
+    /// regression-safe; the heuristic gate path is unchanged when this
+    /// flag is off.
+    pub physiological_thalamic_gate_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -93,6 +107,7 @@ impl Default for SimulationConfig {
             habituation_enabled: true,
             stochastic_jr_enabled: true,
             cet_enabled: false,
+            physiological_thalamic_gate_enabled: false,
         }
     }
 }
@@ -397,11 +412,22 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     // 5e. (Optional) Thalamic gate — modulates cortical operating point.
     //     Dark, reverberant, gentle presets → low arousal → lower input_offset
     //     → JR model shifts toward bifurcation → theta/delta possible.
-    // 5e. (Optional) Thalamic gate — compute per-band offset shifts.
     //     Per Steriade et al. (1993): thalamic burst mode is frequency-selective.
     //     Low bands (delta/theta) shift fully toward bifurcation.
     //     High bands (beta/gamma) stay in tonic mode for fast rhythms.
-    let thalamic_band_shifts = if config.thalamic_gate_enabled {
+    //
+    // Two implementations available:
+    //   - heuristic ThalamicGate (linear arousal → shift, default)
+    //   - PhysiologicalThalamicGate (Priority 9: HH TC cell with T-current
+    //     and K⁺ leak as the wake↔sleep knob — Bazhenov 2002 / Paul 2016 /
+    //     Destexhe 1996). Sigmoidal shape derived from ion-channel dynamics.
+    //
+    // The physiological gate takes precedence when both flags are set.
+    let thalamic_band_shifts = if config.physiological_thalamic_gate_enabled {
+        let arousal = PhysiologicalThalamicGate::compute_arousal(preset, brightness);
+        let gate = PhysiologicalThalamicGate::new(arousal);
+        gate.band_offset_shifts()
+    } else if config.thalamic_gate_enabled {
         let arousal = ThalamicGate::compute_arousal(preset, brightness);
         let gate = ThalamicGate::new(arousal);
         gate.band_offset_shifts()
