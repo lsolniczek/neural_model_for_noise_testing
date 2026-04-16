@@ -170,24 +170,21 @@ impl AssrTransfer {
                 continue;
             }
 
-            // Check bass_mod — NeuralLfo (kind 4)
-            if obj.bass_mod.kind == 4 && obj.bass_mod.param_a > 0.5 {
-                let freq = obj.bass_mod.param_a as f64;
-                let depth = obj.bass_mod.param_b as f64; // modulation depth [0, 1]
-                let vol = obj.volume as f64;
-                let weight = depth * vol;
-                weighted_gain_sum += self.gain(freq) * weight;
-                weight_sum += weight;
-            }
-
-            // Check satellite_mod — NeuralLfo (kind 4)
-            if obj.satellite_mod.kind == 4 && obj.satellite_mod.param_a > 0.5 {
-                let freq = obj.satellite_mod.param_a as f64;
-                let depth = obj.satellite_mod.param_b as f64;
-                let vol = obj.volume as f64;
-                let weight = depth * vol;
-                weighted_gain_sum += self.gain(freq) * weight;
-                weight_sum += weight;
+            // Check bass_mod and satellite_mod for entrainment modulators:
+            // NeuralLfo (kind=4) and Isochronic (kind=5) both produce AM at
+            // a defined frequency. Isochronic tones have sharper transients
+            // (square-wave envelope) which produce stronger ASSR per Schwarz
+            // & Taylor (2005), but the ASSR frequency-dependent gain curve
+            // applies equally to both modulator types.
+            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
+                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
+                    let freq = modcfg.param_a as f64;
+                    let depth = modcfg.param_b as f64;
+                    let vol = obj.volume as f64;
+                    let weight = depth * vol;
+                    weighted_gain_sum += self.gain(freq) * weight;
+                    weight_sum += weight;
+                }
             }
         }
 

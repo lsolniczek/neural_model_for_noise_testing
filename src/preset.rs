@@ -21,9 +21,10 @@ pub const MAX_OBJECTS: usize = 8;
 //               + sat_kind(1) + sat_a(1) + sat_b(1) + sat_c(1)
 //               + mov_kind(1) + mov_radius(1) + mov_speed(1) + mov_phase(1)
 //               + mov_depth_min(1) + mov_depth_max(1) + mov_reverb_min(1)
-//               + mov_reverb_max(1) = 23
-// Total: 6 + 8×23 = 190
-pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 23;
+//               + mov_reverb_max(1) + tint_freq(1) + tint_db(1)
+//               + source_kind(1) + tone_freq(1) + tone_amplitude(1) = 28
+// Total: 6 + 8×28 = 230
+pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 28;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModConfig {
@@ -75,7 +76,7 @@ impl ModConfig {
 
     /// Clamp parameters to valid ranges based on kind.
     fn clamp(&mut self) {
-        self.kind = self.kind.min(4);
+        self.kind = self.kind.min(6);
         match self.kind {
             1 => {
                 // SineLfo: freq 0.01–2.0, depth 0.0–1.0
@@ -98,6 +99,18 @@ impl ModConfig {
                 self.param_a = self.param_a.clamp(1.0, 40.0);
                 self.param_b = self.param_b.clamp(0.0, 1.0);
             }
+            5 => {
+                // Isochronic: freq 1.0–40.0 Hz, depth 0.0–1.0, duty cycle 0.2–0.8
+                self.param_a = self.param_a.clamp(1.0, 40.0);
+                self.param_b = self.param_b.clamp(0.0, 1.0);
+                self.param_c = self.param_c.clamp(0.2, 0.8);
+            }
+            6 => {
+                // RandomPulse: rate 0.1–20 bursts/s, depth 0.0–1.0, duration 20–500 ms
+                self.param_a = self.param_a.clamp(0.1, 20.0);
+                self.param_b = self.param_b.clamp(0.0, 1.0);
+                self.param_c = self.param_c.clamp(20.0, 500.0);
+            }
             _ => {} // Flat: no params
         }
     }
@@ -116,7 +129,24 @@ pub struct ObjectConfig {
     pub satellite_mod: ModConfig,
     #[serde(default)]
     pub movement: MovementConfig,
+    /// Per-object spectral tint: peak EQ frequency (Hz). 0 = disabled.
+    #[serde(default)]
+    pub tint_freq: f32,
+    /// Per-object spectral tint: gain (dB). 0 = flat passthrough.
+    #[serde(default)]
+    pub tint_db: f32,
+    /// Source kind: 0 = Noise (default), 1 = Tone (pure sine).
+    #[serde(default)]
+    pub source_kind: u8,
+    /// Tone frequency (Hz). Only used when source_kind = 1.
+    #[serde(default = "default_tone_freq")]
+    pub tone_freq: f32,
+    /// Tone amplitude (0.0–1.0). Only used when source_kind = 1.
+    #[serde(default)]
+    pub tone_amplitude: f32,
 }
+
+fn default_tone_freq() -> f32 { 200.0 }
 
 impl Default for ObjectConfig {
     fn default() -> Self {
@@ -131,13 +161,18 @@ impl Default for ObjectConfig {
             bass_mod: ModConfig::default(),
             satellite_mod: ModConfig::default(),
             movement: MovementConfig::default(),
+            tint_freq: 0.0,
+            tint_db: 0.0,
+            source_kind: 0,
+            tone_freq: 200.0,
+            tone_amplitude: 0.0,
         }
     }
 }
 
 impl ObjectConfig {
     fn clamp(&mut self) {
-        self.color = self.color.min(6);
+        self.color = self.color.min(7); // 0-7: White,Pink,Brown,Green,Grey,Black,SSN,Blue
         self.x = self.x.clamp(-5.0, 5.0);
         self.y = self.y.clamp(-3.0, 3.0);
         self.z = self.z.clamp(-5.0, 5.0);
@@ -146,6 +181,19 @@ impl ObjectConfig {
         self.bass_mod.clamp();
         self.satellite_mod.clamp();
         self.movement.clamp();
+        // Per-object color tint (DSP Priority 2b). freq=0 means disabled.
+        if self.tint_freq > 0.0 {
+            self.tint_freq = self.tint_freq.clamp(100.0, 8000.0);
+            self.tint_db = self.tint_db.clamp(-6.0, 6.0);
+        } else {
+            self.tint_db = 0.0;
+        }
+        // Tone source
+        self.source_kind = self.source_kind.min(1);
+        if self.source_kind == 1 {
+            self.tone_freq = self.tone_freq.clamp(20.0, 8000.0);
+            self.tone_amplitude = self.tone_amplitude.clamp(0.0, 1.0);
+        }
     }
 }
 
@@ -246,6 +294,15 @@ impl Preset {
                 obj.satellite_mod.param_b,
                 obj.satellite_mod.param_c,
             );
+            // Color tint (DSP Priority 2b): per-object spectral EQ.
+            // freq=0 means disabled → set to default flat.
+            if obj.tint_freq >= 100.0 && obj.tint_db.abs() > 0.01 {
+                engine.set_object_color_tint(i as u32, obj.tint_freq, obj.tint_db);
+            }
+            // Tone source: switch from noise to pure sine oscillator.
+            if obj.source_kind == 1 && obj.tone_amplitude > 0.0 {
+                engine.set_object_source_tone(i as u32, obj.tone_freq, obj.tone_amplitude);
+            }
         }
     }
 
@@ -288,6 +345,13 @@ impl Preset {
             g.push(obj.movement.depth_max as f64);
             g.push(obj.movement.reverb_min as f64);
             g.push(obj.movement.reverb_max as f64);
+            // Color tint (DSP Priority 2b)
+            g.push(obj.tint_freq as f64);
+            g.push(obj.tint_db as f64);
+            // Tone source
+            g.push(obj.source_kind as f64);
+            g.push(obj.tone_freq as f64);
+            g.push(obj.tone_amplitude as f64);
         }
 
         g
@@ -308,7 +372,7 @@ impl Preset {
         };
 
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 23;
+            let base = 6 + i * 28;
             let obj = ObjectConfig {
                 active: g[base] > 0.5,
                 color: g[base + 1].round() as u8,
@@ -345,6 +409,11 @@ impl Preset {
                     reverb_min: g[base + 21] as f32,
                     reverb_max: g[base + 22] as f32,
                 },
+                tint_freq: g[base + 23] as f32,
+                tint_db: g[base + 24] as f32,
+                source_kind: g[base + 25].round() as u8,
+                tone_freq: g[base + 26] as f32,
+                tone_amplitude: g[base + 27] as f32,
             };
             preset.objects.push(obj);
         }
@@ -369,7 +438,7 @@ impl Preset {
 
         // Per-object discrete params
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 23;
+            let base = 6 + i * 28;
             indices.push(base);      // active (0/1)
             indices.push(base + 1);  // color
             indices.push(base + 7);  // bass_mod.kind
@@ -400,14 +469,14 @@ impl Preset {
             b.push((-5.0, 5.0));    // z
             b.push((0.0, 1.0));     // volume
             b.push((0.0, 1.0));     // reverb_send
-            b.push((0.0, 4.0));     // bass_mod.kind (0=Flat,1=SineLfo,2=Breathing,3=Stochastic,4=NeuralLfo)
-            b.push((0.0, 40.0));    // bass_mod.param_a (max covers NeuralLfo 40 Hz)
+            b.push((0.0, 6.0));     // bass_mod.kind (0=Flat,1=SineLfo,2=Breathing,3=Stochastic,4=NeuralLfo,5=Isochronic,6=RandomPulse)
+            b.push((0.0, 40.0));    // bass_mod.param_a (max covers NeuralLfo/Isochronic 40 Hz)
             b.push((0.0, 1.0));     // bass_mod.param_b
-            b.push((0.0, 0.5));     // bass_mod.param_c
-            b.push((0.0, 4.0));     // sat_mod.kind
+            b.push((0.0, 0.8));     // bass_mod.param_c (covers Isochronic duty cycle 0.2–0.8)
+            b.push((0.0, 6.0));     // sat_mod.kind (same range as bass)
             b.push((0.0, 40.0));    // sat_mod.param_a
             b.push((0.0, 1.0));     // sat_mod.param_b
-            b.push((0.0, 0.5));     // sat_mod.param_c
+            b.push((0.0, 0.8));     // sat_mod.param_c
             b.push((0.0, 5.0));     // movement.kind
             b.push((0.0, 5.0));     // movement.radius
             b.push((0.0, 5.0));     // movement.speed
@@ -416,6 +485,13 @@ impl Preset {
             b.push((0.5, 6.0));     // movement.depth_max
             b.push((0.0, 1.0));     // movement.reverb_min
             b.push((0.0, 1.0));     // movement.reverb_max
+            // Color tint (DSP Priority 2b): per-object spectral EQ
+            b.push((0.0, 8000.0)); // tint_freq (0 = disabled, 100-8000 when active)
+            b.push((-6.0, 6.0));   // tint_db (-6 to +6 dB)
+            // Tone source
+            b.push((0.0, 1.0));    // source_kind (0=Noise, 1=Tone)
+            b.push((20.0, 8000.0)); // tone_freq
+            b.push((0.0, 1.0));    // tone_amplitude
         }
 
         b
@@ -431,9 +507,9 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn genome_len_is_190() {
-        assert_eq!(GENOME_LEN, 6 + MAX_OBJECTS * 23);
-        assert_eq!(GENOME_LEN, 190);
+    fn genome_len_is_230() {
+        assert_eq!(GENOME_LEN, 6 + MAX_OBJECTS * 28);
+        assert_eq!(GENOME_LEN, 230);
     }
 
     // ---------------------------------------------------------------
@@ -659,7 +735,7 @@ mod tests {
         genome[3] = 6.0;  // anchor_color
         genome[5] = 4.0;  // environment
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 23;
+            let base = 6 + i * 28;
             genome[base + 1] = 6.0;  // color
             genome[base + 7] = 0.0;  // bass kind (Flat)
             genome[base + 11] = 0.0; // sat kind (Flat)

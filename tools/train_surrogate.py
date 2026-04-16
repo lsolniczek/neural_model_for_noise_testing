@@ -28,25 +28,26 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # ── Architecture (must match src/surrogate.rs) ──────────────────────────────
 
-GENOME_DIM = 190
+GENOME_DIM = 206
 GOAL_DIM = 9
 BRAIN_TYPE_DIM = 5
 CONFIG_DIM = 4
 INPUT_DIM = GENOME_DIM + GOAL_DIM + BRAIN_TYPE_DIM + CONFIG_DIM  # 208
 
-HIDDEN_DIMS = [256, 256, 128]
+DEFAULT_HIDDEN_DIMS = [256, 256, 128]
 OUTPUT_DIM = 1
 
 
 class SurrogateMLP(nn.Module):
-    """MLP matching the Rust SurrogateModel architecture:
-    Linear(208,256) -> ReLU -> Linear(256,256) -> ReLU ->
-    Linear(256,128) -> ReLU -> Linear(128,1) -> Sigmoid
+    """MLP with configurable hidden dims. Default matches the Rust SurrogateModel
+    architecture (208->256->256->128->1), but can be shrunk for small datasets.
     """
 
-    def __init__(self):
+    def __init__(self, hidden_dims=None):
         super().__init__()
-        dims = [INPUT_DIM] + HIDDEN_DIMS + [OUTPUT_DIM]
+        if hidden_dims is None:
+            hidden_dims = DEFAULT_HIDDEN_DIMS
+        dims = [INPUT_DIM] + hidden_dims + [OUTPUT_DIM]
         layers = []
         for i in range(len(dims) - 1):
             layers.append(nn.Linear(dims[i], dims[i + 1]))
@@ -70,9 +71,18 @@ def load_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
     n_rows = len(df)
     print(f"Loaded {n_rows} rows from {path}")
 
-    # Genome columns: g0..g189
+    # Genome columns: g0..g189, normalized to [0, 1] per-column.
+    # The Rust SurrogateModel::build_input() normalizes using Preset::bounds();
+    # here we approximate the same by normalizing to the data's own min/max
+    # (which closely matches bounds since generate-data samples uniformly).
     genome_cols = [f"g{i}" for i in range(GENOME_DIM)]
-    genomes = df[genome_cols].values.astype(np.float32)
+    genomes_raw = df[genome_cols].values.astype(np.float64)
+    g_min = genomes_raw.min(axis=0)
+    g_max = genomes_raw.max(axis=0)
+    g_range = g_max - g_min
+    g_range[g_range < 1e-10] = 1.0  # avoid division by zero for constant columns
+    genomes = ((genomes_raw - g_min) / g_range).astype(np.float32)
+    print(f"  Genome range: min={genomes.min():.3f}, max={genomes.max():.3f} (normalized)")
 
     # Goal one-hot
     goal_ids = df["goal_id"].values.astype(int)
@@ -141,8 +151,21 @@ def export_weights(model: SurrogateMLP, path: Path):
 # ── Training loop ───────────────────────────────────────────────────────────
 
 def train(X: np.ndarray, y: np.ndarray, epochs: int = 200, lr: float = 1e-3,
-          batch_size: int = 256, patience: int = 20, val_frac: float = 0.2):
+          batch_size: int = 256, patience: int = 20, val_frac: float = 0.2,
+          hidden_dims=None):
     """Train the surrogate MLP with early stopping on validation loss."""
+
+    # Auto-size the architecture based on training data size.
+    # Rule of thumb: total params should be ~1/5 of training samples.
+    n_train_est = int(len(X) * (1 - val_frac))
+    if hidden_dims is None:
+        if n_train_est < 5000:
+            hidden_dims = [64, 32]
+        elif n_train_est < 20000:
+            hidden_dims = [128, 64]
+        else:
+            hidden_dims = DEFAULT_HIDDEN_DIMS
+        print(f"  Auto-selected hidden dims: {hidden_dims} (for {n_train_est} train samples)")
 
     # Train/val split
     n = len(X)
@@ -158,7 +181,7 @@ def train(X: np.ndarray, y: np.ndarray, epochs: int = 200, lr: float = 1e-3,
     train_ds = TensorDataset(X_train, y_train)
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-    model = SurrogateMLP()
+    model = SurrogateMLP(hidden_dims=hidden_dims)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = nn.MSELoss()
 
@@ -237,6 +260,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--hidden", type=str, default=None,
+                        help="Hidden layer dims, comma-separated (e.g. '128,64'). Auto-sized if omitted.")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -245,9 +270,13 @@ def main():
     print(f"Loading data from {args.csv_path}...")
     X, y = load_csv(args.csv_path)
 
-    print(f"\nTraining surrogate MLP ({INPUT_DIM} -> {HIDDEN_DIMS} -> {OUTPUT_DIM})...")
+    hidden = None
+    if args.hidden:
+        hidden = [int(x) for x in args.hidden.split(",")]
+    print(f"\nTraining surrogate MLP ({INPUT_DIM} -> {hidden or 'auto'} -> {OUTPUT_DIM})...")
     model = train(X, y, epochs=args.epochs, lr=args.lr,
-                  batch_size=args.batch_size, patience=args.patience)
+                  batch_size=args.batch_size, patience=args.patience,
+                  hidden_dims=hidden)
 
     print(f"\nExporting weights to {args.output_path}...")
     export_weights(model, args.output_path)

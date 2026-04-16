@@ -424,6 +424,281 @@ Deep relaxation 0.9237 is the highest score this model has ever produced on any 
 - [x] **Ref:** Tenne Y, Armfield SW (2009). "An effective approach to evolutionary surrogate-assisted optimization." In: *Computational Intelligence in Expensive Optimization Problems*, Springer. — Foundation for surrogate-assisted DE; top-K pre-screening pattern.
 - [x] **Ref:** Forrester AIJ, Sóbester A, Keane AJ (2008). *Engineering Design via Surrogate Modelling.* Wiley. — Training data requirements (~50–100 samples per effective input dim); R² benchmarks for smooth high-dimensional surrogates.
 
+## Priority 15: Brain-Type-Dependent GABA Inhibitory Time Constants (HIGH IMPACT, LOW EFFORT)
+
+**Problem:** JR fast inhibitory time constant `b_rate` is fixed at 50.0/s for Normal, HighAlpha, ADHD, and Anxious brain types (Aging uses 40.0). The `g_fast_rate` already varies (ADHD 450/s, Anxious 500/s) for the Wendling fast inhibitory population, but the canonical JR slow inhibitory rate `b_rate` is uniform. This contradicts the GABA literature: ADHD shows reduced GABAergic tone (weaker, slower inhibition), while anxiety shows increased GABAergic activity (faster, stronger inhibition). The 40 Hz ASSR — the primary gamma entrainment mechanism — is directly shaped by IPSC decay time, meaning the current model under-differentiates brain types for gamma/beta-related goals (Ignition, Shield, Focus).
+
+**Solution:** Adjust `b_rate` per brain type in `brain_type.rs` to match the known GABA phenotypes:
+- ADHD: `b_rate` 50.0 → **45.0** (slower GABA-B → weaker slow inhibition → reduced gamma capacity, matching Edden et al. 2012 GABA deficit in ADHD)
+- Anxious: `b_rate` 50.0 → **55.0** (faster GABA-B → stronger inhibitory tone → more beta, matching the hyperactive inhibition phenotype already documented in code comments at line 178-181)
+- Normal, HighAlpha, Aging: unchanged
+
+Also propagate to bilateral `band_rates` where the `b` component of `(a_rate, b_rate)` tuples should reflect the same per-brain-type inhibitory profile for consistency with the scalar `b_rate`.
+
+- [ ] Change ADHD `b_rate` from 50.0 to 45.0 in `brain_type.rs` (scalar JansenRitParams)
+- [ ] Change Anxious `b_rate` from 50.0 to 55.0 in `brain_type.rs` (scalar JansenRitParams)
+- [ ] Propagate ADHD b_rate adjustment to bilateral `band_rates` tuples where appropriate
+- [ ] Propagate Anxious b_rate adjustment to bilateral `band_rates` tuples where appropriate
+- [ ] Run `cargo test` — all existing tests pass (the changes only affect ADHD and Anxious brain types)
+- [ ] Evaluate: compare ADHD Ignition scores before/after (expect: slight reduction in gamma PLV, reflecting weaker 40 Hz ASSR — physiologically correct)
+- [ ] Evaluate: compare Anxious Shield/Focus scores before/after (expect: slight increase in beta stability — matching hyperactive inhibition)
+- [ ] Evaluate: confirm Normal/HighAlpha/Aging scores are bitwise identical (no change to these brain types)
+- [ ] **Ref:** (2024). "40 Hz Steady-State Response in Human Auditory Cortex Is Shaped by Gabaergic Neuronal Inhibition." *J Neurosci* 44(24):e2029232024. — Direct evidence that IPSC decay time and amplitude on PV+ interneurons are critical for 40 Hz ASSR generation. GABA parameters modulate the ASSR transfer function. [Link](https://www.jneurosci.org/content/44/24/e2029232024)
+- [ ] **Ref:** Edden RAE, Crocetti D, Zhu H, Gilbert DL, Mostofsky SH (2012). "Reduced GABA concentration in attention-deficit/hyperactivity disorder." *Arch Gen Psychiatry* 69(7):750-753. — MRS evidence of reduced GABA in ADHD sensorimotor cortex; establishes the GABA deficit that motivates slower b_rate for ADHD.
+- [ ] **Ref:** Whittington MA, Traub RD, Jefferys JGR (1995). "Synchronized oscillations in interneuron networks driven by metabotropic glutamate receptor activation." *Nature* 373(6515):612-615. — Foundational evidence that GABA-A IPSC decay time determines gamma frequency; tau_i ~20ms → ~40 Hz, slower → lower frequency.
+- [ ] **Ref:** Traub RD, Whittington MA, Colling SB, Buzsáki G, Jefferys JGR (1996). "Analysis of gamma rhythms in the rat hippocampus in vitro and in vivo." *J Physiol* 493(2):471-484. — Quantitative relationship between inhibitory time constant and gamma oscillation frequency.
+- [ ] **Ref:** (2024). "Systematic Review and Meta-Analysis: Do White Noise and Pink Noise Help With Attention in ADHD?" *J Am Acad Child Adolesc Psychiatry* 63(8):859-870. — Meta-analysis (k=13, N=335, I²<0.01) confirming noise benefits ADHD (g=0.249) but hurts neurotypicals (g=−0.212); validates brain-type-dependent scoring. [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC11283987/)
+
+## Priority 16: L-SHADE Adaptive DE (with P14 Surrogate Integration) (HIGH IMPACT, MEDIUM EFFORT)
+
+**Problem:** The current optimizer uses DE/rand/1/bin with fixed F=0.7 and CR=0.8 (`src/optimizer/differential_evolution.rs`). On the 190-dimensional genome space, fixed F/CR is suboptimal: some parameters (reverb_send, anchor_color) dominate the fitness landscape while others (movement phase, z-position) barely matter. The optimizer spends equal mutation energy on all dimensions. Population size is also fixed throughout the run, wasting evaluations in late generations when the population has converged.
+
+**Solution:** Replace DE/rand/1/bin with L-SHADE (Linear Success-History Adaptive DE) inside the existing optimizer framework. L-SHADE adds three mechanisms:
+1. **Success-history parameter adaptation:** F and CR are sampled from Cauchy/Normal distributions centered on values that produced successful mutations in previous generations. The optimizer learns which mutation scales work.
+2. **Current-to-pbest/1 mutation:** `donor = x_i + F * (x_pbest - x_i) + F * (x_r1 - x_r2)` where x_pbest is a random member of the top-p% of the population. Better exploitation than rand/1.
+3. **Linear population size reduction (LPSR):** Population shrinks linearly from N_init to N_min over the generation budget. Early: wide exploration. Late: focused exploitation.
+
+**CRITICAL: Implement together with P14 surrogate, not standalone.** Recent benchmarks (2024) show L-SHADE has premature convergence on high-D spaces when used alone. The surrogate pre-screening from P14 compensates: fewer wasted real evaluations → L-SHADE's exploitation bias becomes a strength rather than a weakness.
+
+- [ ] Implement `LShadeOptimizer` in `src/optimizer/` alongside existing `DifferentialEvolution`
+- [ ] Success history: circular buffer of H=6 entries for F and CR (Tanabe & Fukunaga recommend H=6)
+- [ ] F sampled from Cauchy(μ_F, 0.1), CR sampled from Normal(μ_CR, 0.1), both clamped to [0,1]
+- [ ] μ_F and μ_CR updated via weighted Lehmer mean of successful parameters each generation
+- [ ] Current-to-pbest/1 mutation with p decreasing linearly from 0.2 to 0.05
+- [ ] LPSR: population reduces linearly from N_init to max(N_init/5, 10) over max_generations
+- [ ] External archive of replaced individuals (size ≤ N_init) for donor selection diversity
+- [ ] Wire into `run_optimize()` with `--optimizer lshade` CLI flag (default remains `de` for regression safety)
+- [ ] Unit tests: convergence on Rastrigin 10-D, Rosenbrock 10-D — verify improvement over DE/rand/1/bin
+- [ ] Integration test: optimize a known goal (Focus/Normal) with L-SHADE vs DE — compare convergence speed
+- [ ] When P14 surrogate is ready: integrate L-SHADE as the DE backend inside the surrogate-assisted loop
+- [ ] **Ref:** Tanabe R, Fukunaga AS (2014). "Improving the search performance of SHADE using linear population size reduction." *Proc IEEE CEC* 2014:1658-1665. — Original L-SHADE paper: success-history adaptation + LPSR. CEC 2014 competition winner.
+- [ ] **Ref:** Tanabe R, Fukunaga A (2013). "Success-History Based Parameter Adaptation for Differential Evolution." *Proc IEEE CEC* 2013:71-78. — SHADE foundation paper: success-history F/CR adaptation mechanism.
+- [ ] **Ref:** Zhang J, Sanderson AC (2009). "JADE: Adaptive Differential Evolution with Optional External Archive." *IEEE Trans Evol Comput* 13(5):945-958. — JADE: current-to-pbest/1 mutation strategy and external archive mechanism used by L-SHADE.
+- [ ] **Ref:** (2025). "Weighted Committee-Based Surrogate-Assisted Differential Evolution Framework." *Int J Machine Learning & Cybernetics.* — Ensemble surrogate approach; consider for P14 v2 if single MLP shows instability. [Link](https://link.springer.com/article/10.1007/s13042-025-02632-x)
+
+## Priority 17: Dynamic Feedback Inhibitory Control (dFIC) for Bilateral Coupling (MEDIUM IMPACT, LOW EFFORT)
+
+**Problem:** The bilateral callosal coupling uses a fixed weight `k` per brain type (`callosal_coupling` in `BilateralParams`, range 0.11–0.15). The coupling formula in `simulate_bilateral()` is `rh_coupled[i] = rh_eeg[i] - k * delayed_lh` (and vice versa). This fixed inhibitory coupling, combined with the AST hemispheric specialization (left WC-beta, right JR-alpha), produces a structural left-beta/right-alpha split that is "not shapeable by preset-level parameters" (BRAIN_MODEL_GUIDE.md line 505). This is the model's most documented limitation — it prevents bilateral alpha states and limits preset design space for meditation/relaxation goals.
+
+**Solution:** Replace the fixed coupling weight `k` with a dynamic feedback inhibitory control (dFIC) rule that adapts `k` per hemisphere per timestep based on local activity. The rule from Stasinski et al. (2024): `dk/dt = η * (E_target - |EEG(t)|)` where η is a learning rate and E_target is the desired activity level. When a hemisphere is too active (|EEG| > E_target), coupling increases (more inhibition from the other side). When under-active, coupling decreases.
+
+This is a homeostatic mechanism — it pulls both hemispheres toward a common activity level, which could break the structural asymmetry enough for bilateral alpha to emerge on Normal brain type.
+
+**v1 simplification:** Use a single scalar dFIC rule on the callosal coupling weight, not per-band adaptation. Per-band dFIC is a v2 enhancement.
+
+- [ ] Add `dfic_enabled: bool`, `dfic_eta: f64` (learning rate, default 0.001), `dfic_target: f64` (target RMS EEG, default computed from first 500ms of simulation) to `SimulationConfig`
+- [ ] In `simulate_bilateral()` coupling loop: replace fixed `k` with `k_left` and `k_right` that adapt per timestep:
+  ```
+  k_left += eta * (target - rms_left_window)   // if left is over-active, increase its inhibition
+  k_right += eta * (target - rms_right_window)  // if right is over-active, increase its inhibition
+  clamp k_left, k_right to [0.0, 0.5]
+  ```
+- [ ] RMS window: exponential moving average with tau=50ms (50 samples at 1kHz)
+- [ ] CLI flag `--dfic` on `evaluate` command. Default off. Takes no precedence over other flags — orthogonal to `--phys-gate`, `--cet`, etc.
+- [ ] When disabled: coupling loop is bitwise identical to pre-P17 (regression safety)
+- [ ] Unit tests: (1) disabled returns zeros / no change, (2) symmetric input → k_left ≈ k_right, (3) asymmetric input → the more active hemisphere gets higher coupling, (4) k stays within [0, 0.5], (5) output finite under aggressive eta
+- [ ] Evaluate: compare per-hemisphere band powers with dFIC on vs off for Normal brain type with symmetric pink anchor preset. If dFIC reduces the left-beta/right-alpha gap, it's working.
+- [ ] Evaluate: confirm dFIC OFF scores are bitwise identical to pre-P17 baseline
+- [ ] **Ref:** Stasinski J, Taher H, Meier JM, Schirner M, Perdikis D, Ritter P (2024). "Homeodynamic feedback inhibition control in whole-brain simulations." *PLOS Comput Biol* 20(12):e1012595. — dFIC plasticity rule for JR: adapts inhibitory coupling to reach desired dynamic regimes. Validated on TVB whole-brain simulations. [Link](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012595)
+- [ ] **Ref:** Bloom JS, Hynd GW (2005). "The role of the corpus callosum in interhemispheric transfer of information: excitation or inhibition?" *Neuropsychol Rev* 15(2):59-71. — Establishes that callosal coupling is primarily inhibitory and activity-dependent, not a fixed constant.
+- [ ] **Ref:** Vogels TP, Sprekeler H, Zenke F, Clopath C, Gerstner W (2011). "Inhibitory Plasticity Balances Excitation and Inhibition in Sensory Pathways and Memory Networks." *Science* 334(6062):1569-1572. — Foundational paper on inhibitory synaptic plasticity as a homeostatic mechanism for E/I balance.
+- [ ] **Future:** Per-band dFIC — adapt k separately for each tonotopic band pair, allowing frequency-specific bilateral balancing. Per-band would let low bands (theta/alpha) converge bilaterally while high bands (beta) remain differentiated.
+- [ ] **Future:** Activity-dependent E_target — instead of a fixed target, compute E_target from the running mean of both hemispheres combined, so the system seeks bilateral balance rather than a preset target level.
+
+## Priority 15: Spectral Disturbance Resilience Metrics (HIGH IMPACT, MEDIUM EFFORT — IMPLEMENTED)
+
+**Problem:** The current disturbance test (`src/disturb.rs`) measures resilience via entrainment ratio recovery — how fast the EEG phase-locks back to a driving LFO frequency after an acoustic spike. This fails completely when:
+1. No NeuralLfo/Isochronic modulator is present (static noise presets)
+2. Binaural beat tones are used (tone objects have no LFO the model can detect)
+3. The modulation depth is too subtle for measurable entrainment baseline
+
+**Solution:** Added 3 spectral metrics (BPPR, SRT, SCDI) that work for ALL preset types, alongside the existing entrainment-based metrics (kept for backward compatibility). Both are now displayed in the CLI disturbance output.
+
+### Bug fix: Isochronic detection in disturb.rs
+
+- [x] Fixed `target_lfo_freq` detection to scan for `kind == 4` (NeuralLfo) AND `kind == 5` (Isochronic) on both bass_mod and satellite_mod. Uses the same strongest-by-depth×volume pattern as `pipeline.rs`. This alone fixed the "N/A entrainment" bug for isochronic presets — Shield v3 now reports entrainment ratio 0.570 and entrainment resilience 0.92.
+
+### 15a. Per-band powers in WindowMetrics
+
+- [x] Added `band_powers: [f64; 5]` (delta, theta, alpha, beta, gamma) to `WindowMetrics`. Computed per sliding window via FFT band integration using the same frequency ranges as `JansenRitModel::compute_band_powers()`: delta 0.5-4 Hz, theta 4-8 Hz, alpha 8-13 Hz, beta 13-30 Hz, gamma 30-50 Hz.
+- [x] Normalized to fractions summing to 1.0.
+- [x] Unit test: `band_powers_sum_to_one` — 10 Hz sine at 1 kHz sample rate, band powers sum to ~1.0.
+
+### 15b. BPPR (Band Power Preservation Ratio)
+
+- [x] Implemented `compute_bppr()`: computes worst-case preservation ratio across all 5 bands. For each post-spike window, the ratio `min(P_b(t) / P_b_baseline, 1.0)` is averaged across bands. The minimum across all windows is the BPPR.
+- [x] Added `bppr: f64` to `DisturbResult`. Added `baseline_band_powers: [f64; 5]`.
+- [x] Unit tests: `bppr_perfect_when_no_change` (1.0), `bppr_drops_when_bands_shift` (< 1.0 for shifted, < 0.3 for total collapse), `bppr_in_unit_range`.
+- [x] **Ref:** Pfurtscheller G, Lopes da Silva FH (1999). ERD% = (P(t) - R) / R × 100.
+- [ ] **Future:** Goal-specific band weighting (Shield → alpha-weighted, Flow → alpha+beta, etc.)
+
+### 15c. SRT (Spectral Recovery Time)
+
+- [x] Implemented `compute_spectral_recovery()`: computes normalized band power deviation at each post-spike window, finds the nadir (maximum deviation), then finds the first window after nadir where deviation drops below `(1-fraction)` of the nadir value.
+- [x] Added `spectral_recovery_50_ms` and `spectral_recovery_90_ms` to `DisturbResult`.
+- [x] Unit tests: `spectral_recovery_zero_when_no_deviation` (0 ms), `spectral_recovery_positive_after_spike` (> 0 ms).
+
+### 15d. SCDI (Spectral Centroid Deviation Integral)
+
+- [x] Implemented `compute_scdi()`: mean absolute centroid deviation from baseline across all post-spike windows. Lower is better.
+- [x] Added `scdi_hz: f64` to `DisturbResult`.
+- [x] Unit tests: `scdi_zero_when_no_deviation`, `scdi_positive_when_centroid_shifts` (verifies (5+2)/2 = 3.5 Hz).
+
+### 15e. Composite Spectral Resilience Score
+
+- [x] Implemented `compute_spectral_resilience()`: `0.40×BPPR + 0.30×(1-norm_SRT_90) + 0.30×(1-norm_SCDI)`. SRT normalized to 2 s max, SCDI normalized to 5 Hz max.
+- [x] Added `spectral_resilience: f64` to `DisturbResult`.
+- [x] Unit tests: `resilience_perfect_when_no_disturbance` (1.0), `resilience_zero_when_worst_case` (0.0), `resilience_in_unit_range` (sweeps all combinations).
+
+### 15f. Display and backward compatibility
+
+- [x] CLI `disturb` command now shows BOTH entrainment resilience (when available) AND spectral resilience (always).
+- [x] Entrainment resilience labeled "Entrainment Resilience" (was just "Resilience Score").
+- [x] New section "Spectral Resilience (Priority 15)" shows BPPR, SRT 50%/90%, SCDI, and composite score.
+- [x] Old entrainment-based metrics unchanged — backward compatible. Existing presets with NeuralLfo show both scores.
+- [ ] **Future:** Add `--goal` flag to `disturb` command for goal-specific BPPR weighting.
+
+### Empirical validation
+
+Shield v3 (binaural beats 400/410 Hz + isochronic L10/R12):
+- Entrainment Resilience: **0.92** (preservation=0.87, speed=0.99)
+- Spectral Resilience: **0.43** (BPPR=0.50, SRT=3650ms, SCDI=1.14Hz)
+
+The two scores tell different stories: phase-locking recovers instantly (0.92) but the band power distribution takes 3.6 seconds to resettle (0.43). This nuance was invisible with the entrainment-only metric.
+
+### Test suite
+
+- 11 new unit tests in `disturb::tests`. 375 total passing, 4 pre-existing thalamic_gate failures unchanged.
+
+### Implementation notes
+
+- All new metrics reuse the existing sliding-window infrastructure in `disturb.rs`. No new FFT passes needed — just integrate band powers from the existing per-window FFT.
+- The per-band power computation mirrors `JansenRitModel::compute_band_powers()` frequency ranges: delta 0.5-4 Hz, theta 4-8 Hz, alpha 8-13 Hz, beta 13-30 Hz, gamma 30-50 Hz.
+- Recovery time constants from the literature: psychoacoustic forward masking recovers in 100-200 ms (Jesteadt 1982), neural alpha oscillations recover in 500-800 ms (Pfurtscheller 1999), attentional capture (P3a) peaks at 250-350 ms. Our SRT_90 should land somewhere in this 200-800 ms range for a healthy preset.
+
+### References
+
+- [ ] **Ref:** Pfurtscheller G, Lopes da Silva FH (1999). "Event-related EEG/MEG synchronization and desynchronization: basic principles." *Clin Neurophysiol* 110(11):1842-1857. — ERD/ERS formula and methodology.
+- [ ] **Ref:** Casali AG, et al. (2013). "A theoretically based index of consciousness independent of sensory processing and behavior." *Sci Transl Med* 5(198):198ra105. — PCI methodology (Lempel-Ziv complexity of perturbation response).
+- [ ] **Ref:** Jesteadt W, Bacon SP, Lehman JR (1982). "Forward masking as a function of frequency, masker level, and signal delay." *J Acoust Soc Am* 71(4):950-962. — Forward masking growth and recovery dynamics.
+- [ ] **Ref:** Klimesch W (2012). "Alpha-band oscillations, attention, and controlled access to stored information." *Trends Cogn Sci* 16(12):606-617. — Alpha suppression and rebound dynamics.
+- [ ] **Ref:** Schröger E, Marzecová A, SanMiguel I (2015). "Attention and prediction in human audition: a lesson from cognitive psychophysiology." *Eur J Neurosci* 41(5):641-664. — Three-phase distraction model (P3a/RON).
+
+## Priority 18: Theta-Alpha Coexistence — Breaking the Single-Attractor Limit (CRITICAL IMPACT, LOW-MEDIUM EFFORT)
+
+**Problem:** The JR model's alpha attractor at ~10 Hz is a mathematical fixed point (limit cycle) determined by the excitatory/inhibitory time constants (a=100/s τ_e≈10ms, b=50/s τ_i≈20ms). At any given operating point, the system has ONE dominant eigenfrequency. The thalamic gate shifts this eigenfrequency (alpha→theta), but the system then locks into the NEW attractor just as hard. No preset-level manipulation (noise color, spatial movement, modulation, spectral tint, binaural beats, hemispheric decoupling) can produce a stable mixed theta-alpha state at durations >60 seconds.
+
+This was empirically proven across 50+ experiments during Deep Relaxation preset design (2026-04-15/16):
+- Without gate: alpha locks at ~90% regardless of input (brown, pink, any movement)
+- With thalamic gate: theta locks at ~90% regardless of reverb tuning
+- With CET (GABA_B): same single-attractor behavior, GABA_B acts as DC shift not theta resonator
+- With phys-gate: delta locks at ~70% (different attractor, same problem)
+- Hemispheric decoupling (Chimera Split): left hemisphere showed 56% theta / 38% alpha at 600s — real split but right hemisphere still locked at 89% theta
+
+The deep relaxation goal requires: theta ideal 35%, alpha ideal 36%, delta ideal 22% — a MIXED state that the current model cannot sustain.
+
+**Root cause analysis:** The existing stochastic JR (Priority 7, sigma=15.0) and GABA_B slow population (Priority 13b, b_slow=5/s τ=200ms) are implemented but misconfigured for this purpose:
+1. Sigma=15.0 is ~10x too low for basin hopping between alpha and theta attractors
+2. b_slow=5/s (τ=200ms) is too slow to resonate at theta — it acts as a DC shift, not a frequency generator
+
+**Solution:** Three complementary approaches, ranked by effort and scientific backing. All modify existing code — no new architecture required.
+
+### 18a. Increase Stochastic Sigma for Basin Hopping (TRIVIAL — parameter change)
+
+**The science:** Ableidinger et al. (2017) tested noise intensity sigma_4 (input drive noise) at values of **200 and 1000** on the JR model. At sigma_4=1000 with connectivity C=270, the probability density becomes multimodal — the system stochastically hops between the alpha limit cycle and the theta/delta basin. The time-averaged power spectrum shows both bands simultaneously. Grimbert & Faugeras (2006) showed the alpha limit cycle exists for input p ∈ [89.83, 315.70] via Hopf bifurcations, with a fold bifurcation of limit cycles at p≈137.5 where alpha and slow-oscillation cycles coexist bistably. Noise of sufficient amplitude can drive transitions between these coexisting basins.
+
+**Our current state:** sigma=15.0 (Priority 7). This is ~10x too low for basin escape. The alpha basin is deep enough that sigma=15 merely adds spectral broadening around the 10 Hz peak without ever escaping to the theta basin.
+
+**Implementation:**
+- [ ] Test sigma sweep: 50, 100, 150, 200, 300 on the deep relaxation preset with thalamic gate at the theta-alpha boundary (reverb≈0.25)
+- [ ] Find the critical sigma threshold where the 300s band power distribution shows theta 25-40% AND alpha 25-40% simultaneously
+- [ ] Scale sigma with arousal: `sigma = sigma_base × (1 + k × (1 - arousal))` so low-arousal presets (relaxation) get more noise → more basin hopping, while high-arousal presets (focus, ignition) stay near-deterministic
+- [ ] CLI: expose sigma as `--jr-sigma N` parameter (default: current 15.0 for backward compat)
+- [ ] Unit tests: verify higher sigma broadens spectrum more, sigma=0 is deterministic, output finite at sigma=300
+- [ ] Regression: sigma=15 (default) produces bitwise-identical scores to pre-P18
+
+**Expected outcome:** At sigma=100-200, the JR system should intermittently escape the alpha basin, spend time in theta, and return — producing a time-averaged spectrum with both bands represented. The exact ratio depends on the operating point (thalamic gate setting).
+
+- [ ] **Ref:** Ableidinger M, Buckwar E, Hinterleitner H (2017). "A Stochastic Version of the Jansen and Rit Neural Mass Model: Analysis and Numerics." *J Math Neurosci* 7:8. — Tested sigma_4 values of 200 and 1000. At high noise, multimodal probability density emerges at C=270, indicating noise-induced transitions between attractor basins. [PMC5567162](https://pmc.ncbi.nlm.nih.gov/articles/PMC5567162/)
+- [ ] **Ref:** Grimbert F, Faugeras O (2006). "Bifurcation analysis of Jansen's neural mass model." *Neural Comput* 18(12):3052-3068. — Alpha limit cycle exists for p ∈ [89.83, 315.70]. Fold bifurcation at p≈137.5 where alpha and slow oscillation coexist bistably. Noise can drive transitions between coexisting basins.
+
+### 18b. Retune GABA_B Time Constant for Theta Resonance (LOW EFFORT — parameter change)
+
+**The science:** Ursino, Cona & Zavaglia (2010) demonstrated that a single cortical region with **two inhibitory populations having different synaptic kinetics** produces simultaneous multi-band rhythms. GABA_A,slow (τ_s ≈ 20-25ms, i.e., b=40-50/s) drives alpha/beta. A second, separate inhibitory population with τ ≈ 33-50ms (b=20-30/s) places its resonance in the theta range (5-8 Hz). When both compete for the pyramidal population output, the time-averaged spectrum shows both alpha and theta.
+
+Wendling et al. (2002) showed the critical transition is controlled by B (slow inhibitory gain): B=45 produces normal background alpha; B=38 produces sporadic spikes; B=8 produces gamma. Theta emerges as B decreases from 45 toward 38. However, Wendling found no stable coexistence in the original parameterization — the transitions are sharp bifurcations. Ursino's key insight was that **time constant separation** (not gain reduction) is what produces coexistence.
+
+**Our current state:** b_slow=5/s (τ=200ms), B_slow=10mV, C_slow=30.0. This is far too slow for theta resonance — at τ=200ms the population's natural frequency is ~0.8 Hz (sub-delta). It acts as a pure DC offset reducer, not a theta oscillator.
+
+**Implementation:**
+- [ ] Change `b_slow` from 5.0 to **25.0** (τ=40ms → resonance near 6-7 Hz, squarely in theta)
+- [ ] Change `B_slow` from 10.0 to **15.0-20.0** mV (increase gain to compete with the alpha loop)
+- [ ] Keep `C_slow` at 30.0 (connectivity from pyramidal to slow inhibitory population)
+- [ ] Test parameter sweep: b_slow ∈ {15, 20, 25, 30}, B_slow ∈ {12, 15, 18, 20} with CET enabled
+- [ ] Measure: does the 300s spectrum show theta 20-40% AND alpha 20-40% simultaneously?
+- [ ] The alpha loop (a=100/s, τ=10ms) and theta loop (b_slow=25/s, τ=40ms) will compete for the pyramidal population output — this is the cross-frequency coupling mechanism
+- [ ] CLI: expose b_slow tuning as `--gaba-b-rate N` (default: 5.0 for backward compat, 25.0 recommended for relaxation)
+- [ ] Regression: b_slow=5.0 (default) produces bitwise-identical scores to pre-P18
+
+**Expected outcome:** With b_slow=25/s, the slow inhibitory population resonates at theta frequencies. The fast inhibitory population (b=50/s) continues resonating at alpha. The pyramidal population output is the difference of both — producing a mixed spectrum where both alpha and theta are present. This is not two separate oscillators averaged, but genuine cross-frequency coupling (theta modulating alpha envelope), exactly as seen in real EEG during deep relaxation (Klimesch 1999).
+
+- [ ] **Ref:** Ursino M, Cona F, Zavaglia M (2010). "A neural mass model for the simulation of cortical activity estimated from high resolution EEG during cognitive or motor tasks." *Comput Intell Neurosci* 2010:456140. — Single cortical region with two inhibitory populations (slow τ_s≈20-25ms and fast τ_f≈3-5ms) produces simultaneous multi-band rhythms. Connectivity strengths C_pf vs C_ps control the power distribution between frequency bands. [DOI](https://onlinelibrary.wiley.com/doi/10.1155/2010/456140)
+- [ ] **Ref:** Ursino M, Cona F (2010). "Independent component analysis and variable neural coupling in the generation of cortical rhythms." *NeuroImage* 52(3):839-854. — Companion paper showing variable connectivity between inhibitory populations produces different spectral compositions (alpha-dominant, theta-dominant, mixed). [PMID 20045071](https://pubmed.ncbi.nlm.nih.gov/20045071/)
+- [ ] **Ref:** Wendling F, Bartolomei F, Bellanger JJ, Chauvel P (2002). "Epileptic fast activity can be explained by a model of impaired GABAergic dendritic inhibition." *Eur J Neurosci* 15(9):1499-1508. — Standard Wendling parameters: a=100/s, b=50/s, g=350/s, A=5mV. B=45 → alpha, B=38 → sporadic, B=8 → gamma. Transitions are sharp bifurcations. [PMID 12028360](https://pubmed.ncbi.nlm.nih.gov/12028360/)
+- [ ] **Ref:** Wendling F, Hernandez A, Bellanger JJ, Chauvel P, Bartolomei F (2005). "Interictal to ictal transition in human temporal lobe epilepsy: insights from a computational model of intracerebral EEG." *J Clin Neurophysiol* 22(5):343-356. — Extended Wendling model parameter analysis confirming the role of slow inhibition time constant in frequency selection. [PMC4838812](https://pmc.ncbi.nlm.nih.gov/articles/PMC4838812/)
+- [ ] **Ref:** Klimesch W (1999). "EEG alpha and theta oscillations reflect cognitive and memory performance: a review and analysis." *Brain Res Rev* 29(2-3):169-195. — Establishes that theta-alpha coexistence (not alternation) is the normal EEG signature during relaxed wakefulness and memory encoding.
+
+### 18c. Two Coupled JR Columns at Different Operating Points (MEDIUM EFFORT — new architecture)
+
+**The science:** Ahmadizadeh et al. (2018) analyzed two coupled JR columns with coupling gains K = 25, 50, 100, 150. At **K=25-50**, asymmetric equilibria emerge where the two columns settle at different amplitude states. Alpha activity spans input u ∈ [87.43, 106] for asymmetric vs [71.56, 313.4] for symmetric cases. Neimark-Sacker and period-doubling bifurcations produce quasi-periodic oscillations at moderate coupling — exactly the mixed-frequency behavior we need.
+
+The key insight: with weak coupling (K=25-50), each column preserves its intrinsic frequency while the summed output yields a mixed spectrum. One column biased toward theta (lower band_offset) and one toward alpha (higher band_offset) produces a guaranteed mixed state by construction.
+
+**Implementation:**
+- [ ] For each tonotopic band, instantiate TWO JansenRitModel instances instead of one:
+  - Column A: band_offset biased toward theta (offset reduced by ~30 from default)
+  - Column B: band_offset at default (alpha-producing)
+- [ ] Add excitatory coupling: `input_A += K * S(v_pyr_B)` and `input_B += K * S(v_pyr_A)` with K=25-50
+- [ ] Sum outputs: `eeg = mix_ratio * eeg_A + (1 - mix_ratio) * eeg_B` with mix_ratio=0.5 default
+- [ ] The mix_ratio could be goal-dependent: relaxation → 0.6 (more theta column), focus → 0.3 (more alpha column)
+- [ ] Gate behind `--dual-column` CLI flag. Default off. When off, behavior is bitwise identical (single column path unchanged)
+- [ ] Unit tests: dual column produces broader spectrum than single, K=0 produces independent oscillations, K=inf produces synchronized, output finite at K=150
+- [ ] Regression: single column path unchanged when flag off
+
+**Expected outcome:** The summed output of two columns at different operating points inherently contains both alpha and theta. The coupling prevents complete independence (avoids artificial-sounding summation) while preserving frequency diversity. This approach guarantees a mixed spectrum by construction but requires more code changes than 18a/18b.
+
+- [ ] **Ref:** Ahmadizadeh S, Karoly PJ, Nešić D, Grayden DB, Cook MJ, Soudry D, Freestone DR (2018). "Bifurcation analysis of two coupled Jansen-Rit neural mass models." *PLoS One* 13(2):e0192842. — Two coupled JR columns with K=25-150. Asymmetric equilibria at K=25-50. Neimark-Sacker bifurcations produce quasi-periodic oscillations. [DOI](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0192842)
+- [ ] **Ref:** Ableidinger M, Buckwar E, Hinterleitner H (2018). "Bifurcation analysis of two coupled Jansen-Rit neural mass models." Documented synchronization, anti-phase oscillation, and emergent dynamics in coupled JR. (Already cited in Priority 11.)
+
+### Implementation order
+
+**Phase 1 (test immediately — parameter changes only):**
+1. 18a: Sweep sigma from 50 to 300 on deep relaxation preset with thalamic gate at reverb≈0.25
+2. 18b: Sweep b_slow from 15 to 30 with B_slow from 12 to 20, CET enabled
+
+**Phase 2 (implement if Phase 1 insufficient):**
+3. 18a+18b combined: higher sigma + retuned GABA_B together
+4. 18a arousal-scaled sigma: low arousal → higher sigma automatically
+
+**Phase 3 (implement if Phase 1+2 insufficient):**
+5. 18c: Dual coupled columns (requires new code in jansen_rit.rs)
+
+### Empirical evidence from Deep Relaxation experiments (2026-04-15/16)
+
+The following results motivated this priority. All use the same base preset (2 static brown front/back + 2 fig8 pink at prime speeds 0.43/0.53, DeepSanctuary environment):
+
+| Configuration | θ 10s | θ 300s | α 10s | α 300s | Score 300s |
+|---|---|---|---|---|---|
+| No gate, no CET | 22.5% | 5.4% | 75.7% | 92.8% | 0.341 |
+| Thalamic gate (rev=0.25) | 34.7% | 86.2% | 62.7% | 10.9% | 0.349 |
+| CET + thalamic gate (rev=0.25) | 34.7% | 86.3% | 62.7% | 10.8% | 0.348 |
+| Phys-gate | 68.7% | 67.8% | 11.7% | 14.4% | 0.442 |
+| CET + phys-gate | 76.7% | 78.5% | 8.7% | 9.0% | 0.477 |
+| Chimera Split (hemispheric) | LH:47/47 | LH:56/38 | RH:74/24 | RH:89/9 | 0.340 |
+| **Target (ideal)** | **35%** | **35%** | **36%** | **36%** | **>0.60** |
+
+The Chimera Split showed genuine hemispheric decoupling at 600s (LH: theta 56% / alpha 38%), proving the JR model CAN sustain a mixed state in one hemisphere when the input spectrum is sufficiently different. The missing piece is a mechanism to sustain this at the single-column level.
+
 ---
 
 ## Obsolete / Superseded

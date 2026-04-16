@@ -163,21 +163,106 @@ Research survey of recent (2024-2026) neuroscience, computational, and math pape
 
 Based on this research, here are the highest-value improvements ranked by impact/effort:
 
-### Tier 1 -- Proven, actionable now
-1. **Brain-type-dependent GABA parameters** -- Vary fast inhibitory time constant `b` by brain type (ADHD: longer tau_i -> weaker 40 Hz ASSR; Anxious: shorter tau_i -> stronger beta). Currently `b=50/s` is fixed across all brain types. Evidence: HIGH (J Neuroscience 2024, decades of GABA-gamma research). Low implementation effort -- `b` is already a per-model parameter.
-2. **L-SHADE + surrogate (as part of P14)** -- Do NOT switch to L-SHADE alone (premature convergence on 190-D). Implement L-SHADE together with the surrogate pre-screening from P14. Evidence: HIGH for the combined approach, MEDIUM for L-SHADE standalone.
+---
 
-### Tier 2 -- Promising, needs testing
-3. **dFIC adaptive inhibitory coupling** -- Replace fixed bilateral coupling weight with dynamic feedback inhibitory control (Stasinski 2024). Could partially break the hardcoded AST left-beta/right-alpha pattern. Evidence: MEDIUM (proven in silico on whole-brain, untested on 2-node bilateral).
-4. **Surrogate ensemble** -- Use 3 MLPs instead of 1 for P14 surrogate, with disagreement-based confidence for more robust pre-screening. Evidence: MEDIUM (benchmarked at 30-100D, not 190D).
+## Final Implementation Order (strict evidence-based ranking)
 
-### Tier 3 -- Future / needs more evidence
-5. **RE neuron for physiological gate v2** -- Use the Dec 2024 bioRxiv TRN modeling paper for RE parameters. Evidence: LOW (preprint, 25C parameters).
-6. **PAC metric** -- Add phase-amplitude coupling measurement (theta-phase x gamma-amplitude) for meditation scoring. Evidence: LOW-MEDIUM (real phenomenon but EEG measurement has artifact problems).
-7. **SBI/SNPE** -- Long-term replacement for iterative optimization. Evidence: HIGH for the method, LOW for near-term practicality.
+Each item is evaluated on three axes:
+- **Science proven?** Is the underlying neuroscience settled, peer-reviewed, replicated?
+- **Will it improve THIS NMM?** Not "is it interesting" but "does it fix a known limitation or add measurable scoring accuracy?"
+- **Implementation risk?** Can it break existing behavior? How much code? Regression surface?
 
-### Deferred -- insufficient evidence
-8. ~~**Aperiodic slope metric**~~ -- Originally proposed as Tier 1. Downgraded after evidence review: the metric is actively debated, FOOOF decomposition has known confounds, developmental ADHD studies show contradictory findings, and a 2024 systematic review found "lack of clarity." Wait for methodological consensus before implementing.
+---
+
+### #1. Brain-type-dependent GABA `b_rate` for ADHD and Anxious
+
+**Science: PROVEN (no doubts).**
+The link between GABA-A IPSC decay time and 40 Hz ASSR generation has decades of evidence. The 2024 J Neuroscience paper (top-tier, pharmacological + computational) is the latest in a line going back to Traub 1996 and Whittington 1995. The mechanism is simple: faster IPSC decay (shorter tau_i) = better 40 Hz resonance. Slower decay = weaker gamma. This is one of the most established findings in computational neuroscience.
+
+**Will it improve this NMM: YES -- directly fixes a known gap.**
+Looking at the actual code: `b_rate` is already per-brain-type in `brain_type.rs`. Normal/HighAlpha/ADHD/Anxious all use `b_rate: 50.0`, except Aging which uses `40.0`. But this is the *scalar* JR parameter, not the bilateral tonotopic `band_rates`. In the bilateral path, `band_rates` are already per-band AND per-hemisphere -- and they already vary the `b` component (e.g., right hemi band 0 uses `(75.0, 37.0)` for Normal). The infrastructure is fully in place.
+
+What the paper says we should change:
+- **ADHD:** `g_fast_rate: 450.0` is already lower than Normal's 500.0 -- this is the fast (GABA-A) inhibition, correctly slower for ADHD. But `b_rate` (the GABA-B slow inhibition) is identical to Normal at 50.0. The literature says ADHD should have weaker overall inhibition. **Change ADHD `b_rate` from 50.0 to 45.0** to reflect reduced GABA-B tone, matching the ADHD phenotype of weakened slow inhibition and reduced gamma capacity.
+- **Anxious:** Already has `g_fast_gain: 15.0` (vs Normal 10.0) for hyperactive fast inhibition. But `b_rate: 50.0` is identical to Normal. Anxiety shows increased GABAergic activity (already noted in the code comment at line 180). **Change Anxious `b_rate` from 50.0 to 55.0** to reflect faster GABA-B kinetics = stronger inhibitory control = more beta, matching the anxious phenotype.
+
+**Implementation risk: NEAR-ZERO.**
+Two constant changes in `brain_type.rs`. The parameter is already plumbed through the entire pipeline. Existing regression tests catch any unexpected score changes. Gated by brain type -- Normal/HighAlpha/Aging are untouched.
+
+**Effort: 15 minutes.** Change two numbers, run tests, evaluate scores on ADHD and Anxious.
+
+**Files:** `src/brain_type.rs` lines 136 (ADHD) and 195 (Anxious)
+
+---
+
+### #2. L-SHADE adaptive DE (as part of P14 surrogate work)
+
+**Science: PROVEN (no doubts about the algorithm).**
+L-SHADE won CEC 2014 competition. The success-history parameter adaptation is well-understood mathematically. The linear population reduction schedule is standard. Published by Tanabe & Fukunaga in multiple peer-reviewed venues.
+
+**Will it improve this NMM: YES, but ONLY with the surrogate.**
+Critical nuance from the evidence review: vanilla L-SHADE has **premature convergence issues on high-D spaces** (our 190-D is at the edge). The fix is the surrogate pre-screening from P14 -- the surrogate filters out bad candidates before the real pipeline evaluates them, which compensates for L-SHADE's exploitation bias by reducing the cost of wasted evaluations.
+
+**Do NOT implement L-SHADE standalone.** Implement it as part of P14 (the surrogate-assisted optimization). The two components are synergistic:
+- L-SHADE's adaptive F/CR learns which mutation scales work in different regions of genome space
+- Surrogate pre-screening reduces wasted real evaluations (from 50/gen to ~5/gen)
+- Together: 10x speedup + better convergence
+
+**Implementation risk: MEDIUM.**
+Replacing the DE core is a moderate refactor of `src/optimizer/differential_evolution.rs`. L-SHADE adds: success history for F/CR, linear population reduction, current-to-pbest/1 mutation. The existing `generate_trials()` / `report_trial_result()` API can be preserved.
+
+**Effort: 2-3 days** (L-SHADE algorithm + P14 surrogate integration).
+
+**Files:** `src/optimizer/differential_evolution.rs`, new `src/surrogate.rs`, new `tools/train_surrogate.py`
+
+---
+
+### #3. dFIC adaptive bilateral coupling
+
+**Science: PROVEN IN SILICO (Stasinski 2024, PLOS Comput Biol).**
+The plasticity rule itself is mathematically well-defined and produces correct behavior in whole-brain simulations. No doubts about the algorithm. The doubt is whether it helps in a 2-node bilateral system vs a 68-node whole brain.
+
+**Will it improve this NMM: LIKELY YES -- addresses the most documented limitation.**
+The BRAIN_MODEL_GUIDE.md explicitly says the AST left-beta/right-alpha split is "not shapeable by preset-level parameters" (line 505). This is the single most limiting structural property of the model. dFIC could make the coupling weight k adaptive, letting the bilateral system self-balance toward more realistic E/I equilibria.
+
+The coupling code (jansen_rit.rs lines 1019-1020) is a simple loop:
+```rust
+rh_coupled[i] = rh_eeg[i] - k * delayed_lh;
+lh_coupled[i] = lh_eeg[i] - k * delayed_rh;
+```
+Making `k` adaptive means adding per-timestep modulation based on local activity -- a few lines of code in a well-isolated location.
+
+**But there is genuine uncertainty about the outcome.** dFIC was validated on whole-brain FC patterns, not on bilateral auditory models. It might:
+- Work as hoped: hemispheres converge toward balanced alpha
+- Do nothing: in a 2-node system, the plasticity rule might not have enough dynamics to modulate
+- Break things: adaptive k could destabilize the bilateral system in ways the current fixed k doesn't
+
+**Implementation risk: MEDIUM.**
+The coupling loop is well-isolated. The change can be gated behind a flag (`--dfic`) following the same pattern as `--phys-gate`, `--cet`, etc. Zero regression when disabled. But requires empirical validation: run evaluate on all presets with dFIC on/off and compare.
+
+**Effort: 1-2 days.** Small code change + thorough evaluation.
+
+**Files:** `src/neural/jansen_rit.rs` (simulate_bilateral), `src/brain_type.rs` (add dFIC parameters), `src/pipeline.rs` + `src/main.rs` (wire flag)
+
+---
+
+### STOP HERE for implementation -- everything below needs more evidence
+
+---
+
+### Not recommended for implementation now
+
+**Surrogate ensemble (WCBDEF)** -- Sound in theory, but benchmarked only at 30-100D. At 190D the scaling behavior is unknown. Start with single MLP (P14 design), upgrade only if single MLP shows instability. Premature optimization of the optimization.
+
+**RE neuron for phys-gate v2** -- bioRxiv preprint, not peer-reviewed. Parameters at 25C, not physiological 37C. Current TC-only gate already produces the qualitative burst/tonic switch. No demonstrated gap that RE fixes.
+
+**PAC metric** -- Real phenomenon, but EEG measurement has documented artifact problems (filtering artifacts produce spurious PAC). Implementing a metric that's hard to validate correctly is worse than not having it.
+
+**Aperiodic slope** -- Actively debated methodology. FOOOF has known confounds. ADHD studies show contradictory findings. 2024 systematic review: "lack of clarity." Do not build scoring around this.
+
+**SBI/SNPE** -- Proven method, wrong time. Requires 50-100K training samples and complete retraining on any scoring change. The surrogate-DE in P14 is the right near-term step. SBI is v3+.
+
+**Next-gen NMMs with gap junctions** -- Different model architecture (theta neurons, not JR). Relevant only for P11 multi-column work. Current bilateral model is adequate.
 
 ---
 

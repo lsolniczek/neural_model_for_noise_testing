@@ -1,6 +1,6 @@
 # Working with the Brain Model — Practical Guide
 
-A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 14 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), and surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search).
+A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 14 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search), and DSP integration of isochronic tones, RandomPulse, color tint, and tone generator (binaural beats).
 
 ---
 
@@ -681,6 +681,21 @@ cargo run --release -- disturb presets/your_preset.json \
 | < 0.70 | Bad — preset is fragile |
 
 Habituation interacts with resilience: a habituated model may actually recover faster from disturbance (the depression provides a reset). Test at both short (15s) and long (60s) windows.
+
+### Spectral resilience (Priority 15)
+
+The disturbance test now reports TWO resilience scores:
+
+**Entrainment Resilience** (requires NeuralLfo or Isochronic): how fast the EEG phase-locks back to the driving frequency. Based on PLV recovery. Fast (50 ms) for well-designed presets.
+
+**Spectral Resilience** (works for ALL presets including binaural beats): how fast the EEG band power distribution returns to its pre-spike baseline. Based on three metrics from the ERD/ERS literature (Pfurtscheller & Lopes da Silva 1999):
+
+- **BPPR** (Band Power Preservation Ratio): worst-case fractional preservation of band powers. 1.0 = shield held perfectly, 0.0 = complete desynchronization.
+- **SRT** (Spectral Recovery Time): milliseconds until band powers return to within 50%/90% of baseline. Literature reference: psychoacoustic forward masking recovers in 100-200 ms (Jesteadt 1982), neural alpha oscillations in 500-800 ms (Pfurtscheller 1999).
+- **SCDI** (Spectral Centroid Deviation Integral): mean spectral centroid displacement from baseline. Lower = less disruption.
+- **Composite**: `0.40×BPPR + 0.30×(1-norm_SRT) + 0.30×(1-norm_SCDI)`.
+
+The two scores can diverge: Shield v3 shows entrainment resilience 0.92 (phase-locking recovers in 50 ms) but spectral resilience 0.43 (band powers take 3.6 seconds to resettle). This means the "shield" re-locks to the rhythm quickly but the spectral balance is temporarily disrupted — the user might briefly notice a change in the noise character even though the entrainment holds.
 
 ---
 

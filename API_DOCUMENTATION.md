@@ -260,34 +260,53 @@ cargo run --release -- disturb presets/my_preset.json --duration 20 --spike-time
 
 #### Output
 
-Sliding-window timeline showing entrainment, dominant frequency, and spectral centroid before and after the spike, plus recovery metrics:
+Sliding-window timeline showing entrainment, dominant frequency, and spectral centroid before and after the spike, plus two resilience scores:
+
+**Entrainment Resilience** (requires NeuralLfo or Isochronic modulator): measures how fast the EEG phase-locks back to the driving frequency. Based on PLV recovery.
+
+**Spectral Resilience** (Priority 15 — works for ALL preset types including binaural beats and static noise): measures how fast the EEG band power distribution returns to its pre-spike baseline. Based on three metrics from the ERD/ERS literature (Pfurtscheller & Lopes da Silva 1999):
+
+| Metric | What it measures | Range |
+|---|---|---|
+| **BPPR** (Band Power Preservation Ratio) | Worst-case fractional preservation of band powers during spike | 0-1 (1=perfect) |
+| **SRT** (Spectral Recovery Time) | Milliseconds until band powers return to within 50%/90% of baseline | 0-∞ ms |
+| **SCDI** (Spectral Centroid Deviation Integral) | Mean spectral centroid displacement from baseline post-spike | 0-∞ Hz (0=none) |
+| **Composite score** | `0.40×BPPR + 0.30×(1-norm_SRT) + 0.30×(1-norm_SCDI)` | 0-1 (1=perfect) |
 
 ```
 === Disturbance Resilience Test ===
-  Preset: balanced_theta_smr.json
-  Spike: 0.05s at 4.0s, gain=0.80
+  Preset: normal_set_shield.json
+  Spike: 0.05s at 5.0s, gain=0.80
+  Target LFO: 12.0 Hz
 
   Baseline (pre-spike):
-    Entrainment:     0.72
-    Dominant freq:   10.2 Hz
-    Spectral centroid: 11.4 Hz
+    Dominant freq:   9.48 Hz
+    Spectral centroid: 11.80 Hz
+    Entrainment ratio: 0.570
 
-  Nadir (post-spike):
-    Entrainment:     0.31 at 4.2s
-    Frequency dev:   3.8 Hz
+  Spike Impact:
+    Entrainment nadir: 0.189 (67% drop)
+    Peak freq deviation: ±6.14 Hz
 
   Recovery:
-    50% recovery:    180 ms
-    90% recovery:    520 ms
+    50% recovery:    50 ms
+    90% recovery:    50 ms
+
+    Entrainment Resilience: 0.92
+       (preservation=0.87, speed=0.99)
+
+  Spectral Resilience (Priority 15):
+    BPPR (band preservation):  0.501
+    Spectral recovery 50%:     3650 ms
+    Spectral recovery 90%:     3650 ms
+    SCDI (centroid deviation):  1.14 Hz
+
+    Spectral Resilience Score: 0.43
+       (BPPR=0.50, SRT=3650ms, SCDI=1.14Hz)
 
   Timeline:
     Time   Entrain   DomFreq   Centroid
-    1.0s   0.71      10.2 Hz   11.3 Hz
-    2.0s   0.73      10.1 Hz   11.5 Hz
-    3.0s   0.72      10.2 Hz   11.4 Hz
-    4.0s   0.31      13.8 Hz   14.2 Hz   <-- SPIKE
-    4.5s   0.58      11.1 Hz   12.0 Hz
-    5.0s   0.69      10.4 Hz   11.6 Hz
+    0.2s   0.803      9.8 Hz   10.9 Hz
     ...
 ```
 
@@ -591,13 +610,15 @@ Presets are JSON files with this structure:
 
 **Noise colors** (`anchor_color`, `color`): 0=White, 1=Pink, 2=Brown, 3=Green, 4=Grey, 5=Black, 6=SSN, 7=Blue
 
+**Source kind** (`source_kind`): 0=Noise (default, colored noise through filter chain), 1=Tone (pure sine oscillator, bypasses color filters). When `source_kind=1`, use `tone_freq` (20-8000 Hz) and `tone_amplitude` (0.0-1.0) to control the sine. Useful for binaural beats (two tone objects at L/R with a frequency difference = beat rate).
+
 (Canonical source: `NoiseColor::from_u8` in `noise_generator_dsp/crates/core/src/lib.rs:176–188`, labels from `src/main.rs:1048`.)
 
 **Spatial modes** (`spatial_mode`): 0=Stereo, 1=Immersive
 
 **Environments** (`environment`): 0=AnechoicChamber, 1=FocusRoom, 2=OpenLounge, 3=VastSpace, 4=DeepSanctuary
 
-**Modulator kinds** (`bass_mod.kind`, `satellite_mod.kind`): 0=Flat, 1=SineLfo, 2=Breathing, 3=Stochastic, 4=NeuralLfo
+**Modulator kinds** (`bass_mod.kind`, `satellite_mod.kind`): 0=Flat, 1=SineLfo, 2=Breathing, 3=Stochastic, 4=NeuralLfo, 5=Isochronic, 6=RandomPulse
 
 **Movement kinds** (`movement.kind`): 0=Static, 1=Orbit, 2=FigureEight, 3=RandomWalk, 4=DepthBreathing, 5=Pendulum
 

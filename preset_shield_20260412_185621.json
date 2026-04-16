@@ -1,0 +1,279 @@
+{
+  "meta": {
+    "goal": "shield",
+    "score": 0.47211131595720296,
+    "generated_at": "2026-04-12T18:56:21.733881+00:00",
+    "optimizer_generations": 3,
+    "audio_duration_secs": 3.0
+  },
+  "preset": {
+    "master_gain": 0.7768719,
+    "spatial_mode": 0,
+    "source_count": 5,
+    "anchor_color": 5,
+    "anchor_volume": 0.37681597,
+    "environment": 3,
+    "objects": [
+      {
+        "active": false,
+        "color": 0,
+        "x": -3.3302388,
+        "y": -3.0,
+        "z": -2.2242522,
+        "volume": 0.0,
+        "reverb_send": 0.9070148,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 2.0,
+          "param_b": 0.49584442,
+          "param_c": 0.53421307
+        },
+        "satellite_mod": {
+          "kind": 5,
+          "param_a": 33.60512,
+          "param_b": 0.0,
+          "param_c": 0.2
+        },
+        "movement": {
+          "kind": 5,
+          "radius": 4.4009604,
+          "speed": 3.5029356,
+          "phase": 0.96731806,
+          "depth_min": 0.5,
+          "depth_max": 2.144857,
+          "reverb_min": 0.8582652,
+          "reverb_max": 0.28284693
+        }
+      },
+      {
+        "active": true,
+        "color": 5,
+        "x": 5.0,
+        "y": -2.852119,
+        "z": 4.3552885,
+        "volume": 0.17209737,
+        "reverb_send": 0.5756833,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 4.368808,
+          "param_b": 0.48432705,
+          "param_c": 0.8
+        },
+        "satellite_mod": {
+          "kind": 5,
+          "param_a": 40.0,
+          "param_b": 0.9820877,
+          "param_c": 0.8
+        },
+        "movement": {
+          "kind": 2,
+          "radius": 0.49909282,
+          "speed": 3.887924,
+          "phase": 6.283,
+          "depth_min": 2.0777206,
+          "depth_max": 1.9798735,
+          "reverb_min": 0.56674796,
+          "reverb_max": 0.7653686
+        }
+      },
+      {
+        "active": true,
+        "color": 2,
+        "x": 3.2691383,
+        "y": -3.0,
+        "z": 1.7314004,
+        "volume": 0.2810749,
+        "reverb_send": 0.69414127,
+        "bass_mod": {
+          "kind": 3,
+          "param_a": 0.1,
+          "param_b": 414.84177,
+          "param_c": 0.37337178
+        },
+        "satellite_mod": {
+          "kind": 1,
+          "param_a": 2.0,
+          "param_b": 0.5406781,
+          "param_c": 0.3015804
+        },
+        "movement": {
+          "kind": 5,
+          "radius": 3.8427532,
+          "speed": 1.4646505,
+          "phase": 0.71385336,
+          "depth_min": 1.7030482,
+          "depth_max": 5.941637,
+          "reverb_min": 0.7394043,
+          "reverb_max": 0.9523685
+        }
+      },
+      {
+        "active": false,
+        "color": 1,
+        "x": -4.8919883,
+        "y": 3.0,
+        "z": 0.9777133,
+        "volume": 0.6354427,
+        "reverb_send": 0.7645934,
+        "bass_mod": {
+          "kind": 3,
+          "param_a": 10.0,
+          "param_b": 79.80782,
+          "param_c": 0.06599165
+        },
+        "satellite_mod": {
+          "kind": 3,
+          "param_a": 10.0,
+          "param_b": 312.83124,
+          "param_c": 0.5
+        },
+        "movement": {
+          "kind": 3,
+          "radius": 3.8046298,
+          "speed": 2.808681,
+          "phase": 3.0554574,
+          "depth_min": 2.6273518,
+          "depth_max": 4.541719,
+          "reverb_min": 0.63454455,
+          "reverb_max": 0.76845795
+        }
+      },
+      {
+        "active": false,
+        "color": 0,
+        "x": -1.1064126,
+        "y": 0.53323615,
+        "z": 0.33538818,
+        "volume": 0.34675005,
+        "reverb_send": 0.30579197,
+        "bass_mod": {
+          "kind": 5,
+          "param_a": 32.247524,
+          "param_b": 0.0,
+          "param_c": 0.2
+        },
+        "satellite_mod": {
+          "kind": 3,
+          "param_a": 3.0550673,
+          "param_b": 110.13488,
+          "param_c": 0.3776476
+        },
+        "movement": {
+          "kind": 4,
+          "radius": 4.82707,
+          "speed": 0.0,
+          "phase": 0.0,
+          "depth_min": 3.075367,
+          "depth_max": 4.1829023,
+          "reverb_min": 1.0,
+          "reverb_max": 0.7792523
+        }
+      },
+      {
+        "active": true,
+        "color": 0,
+        "x": 1.5186995,
+        "y": 2.166297,
+        "z": 2.7078269,
+        "volume": 0.27051052,
+        "reverb_send": 0.96033573,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 32.104103,
+          "param_b": 0.026515247,
+          "param_c": 0.25118834
+        },
+        "satellite_mod": {
+          "kind": 2,
+          "param_a": 3.0,
+          "param_b": 1.0,
+          "param_c": 0.48614937
+        },
+        "movement": {
+          "kind": 5,
+          "radius": 3.1460562,
+          "speed": 3.6128252,
+          "phase": 4.395852,
+          "depth_min": 2.789118,
+          "depth_max": 2.349249,
+          "reverb_min": 0.5633849,
+          "reverb_max": 0.0
+        }
+      },
+      {
+        "active": false,
+        "color": 1,
+        "x": 0.21844064,
+        "y": -0.5412632,
+        "z": -1.1617754,
+        "volume": 0.012437149,
+        "reverb_send": 0.92869663,
+        "bass_mod": {
+          "kind": 4,
+          "param_a": 7.2203455,
+          "param_b": 0.8071277,
+          "param_c": 0.53817856
+        },
+        "satellite_mod": {
+          "kind": 2,
+          "param_a": 3.0,
+          "param_b": 0.71907467,
+          "param_c": 0.8
+        },
+        "movement": {
+          "kind": 3,
+          "radius": 5.0,
+          "speed": 1.1395746,
+          "phase": 2.8964276,
+          "depth_min": 4.835879,
+          "depth_max": 6.0,
+          "reverb_min": 0.83955395,
+          "reverb_max": 0.007563167
+        }
+      },
+      {
+        "active": true,
+        "color": 5,
+        "x": 2.1919825,
+        "y": -0.554132,
+        "z": 2.4753544,
+        "volume": 0.11315037,
+        "reverb_send": 0.0,
+        "bass_mod": {
+          "kind": 2,
+          "param_a": 3.0,
+          "param_b": 0.9249355,
+          "param_c": 0.8
+        },
+        "satellite_mod": {
+          "kind": 5,
+          "param_a": 33.137432,
+          "param_b": 0.634573,
+          "param_c": 0.41290954
+        },
+        "movement": {
+          "kind": 1,
+          "radius": 4.636601,
+          "speed": 5.0,
+          "phase": 3.8992317,
+          "depth_min": 1.1275642,
+          "depth_max": 5.5484877,
+          "reverb_min": 0.4009002,
+          "reverb_max": 0.45887494
+        }
+      }
+    ]
+  },
+  "analysis": {
+    "fhn_firing_rate": 7.0,
+    "fhn_isi_cv": 0.08633173274972054,
+    "dominant_freq_hz": 7.8125,
+    "band_powers": {
+      "delta": 0.03534397069347679,
+      "theta": 0.8344330014631826,
+      "alpha": 0.10491876452173514,
+      "beta": 0.024818483322571753,
+      "gamma": 0.0004857799990336781
+    }
+  }
+}

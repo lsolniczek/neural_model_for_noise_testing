@@ -96,6 +96,12 @@ enum Commands {
         #[arg(long, default_value = "surrogate_weights.bin")]
         surrogate_weights: PathBuf,
 
+        /// Log every real-pipeline evaluation to a CSV file for surrogate training.
+        /// Appends to the file (doesn't overwrite), so multiple runs accumulate.
+        /// Format matches generate-data output — can be concatenated directly.
+        #[arg(long)]
+        log_evaluations: Option<PathBuf>,
+
         /// Number of top surrogate candidates to validate with real pipeline
         #[arg(long, default_value_t = 5)]
         surrogate_k: usize,
@@ -236,6 +242,7 @@ fn main() {
             init_preset,
             cet,
             phys_gate,
+            log_evaluations,
             surrogate,
             surrogate_weights,
             surrogate_k,
@@ -257,6 +264,7 @@ fn main() {
                 surrogate,
                 &surrogate_weights,
                 surrogate_k,
+                log_evaluations.as_deref(),
             );
         }
         Commands::Evaluate {
@@ -317,6 +325,7 @@ fn run_optimize(
     use_surrogate: bool,
     surrogate_weights_path: &Path,
     surrogate_k: usize,
+    log_evaluations_path: Option<&Path>,
 ) {
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
@@ -354,6 +363,52 @@ fn run_optimize(
     println!("  Seed:           {}", seed);
     if cet { println!("  CET:            enabled"); }
     if phys_gate { println!("  Phys gate:      enabled"); }
+
+    // Set up evaluation logger for surrogate training data collection.
+    // Appends every real-pipeline evaluation to a CSV file. The file is
+    // created with a header if it doesn't exist, or appended to if it does.
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    let eval_logger: Option<Arc<Mutex<std::fs::File>>> = log_evaluations_path.map(|path| {
+        let file_exists = path.exists();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to open log file: {e}");
+                std::process::exit(1);
+            });
+        if !file_exists {
+            // Write CSV header
+            let mut f = file;
+            let genome_cols: Vec<String> = (0..preset::GENOME_LEN).map(|i| format!("g{i}")).collect();
+            writeln!(f, "{},goal_id,brain_type_id,assr,thalamic_gate,cet,phys_gate,score",
+                genome_cols.join(",")).unwrap();
+            println!("  Log evals:      {} (new file)", path.display());
+            Arc::new(Mutex::new(f))
+        } else {
+            println!("  Log evals:      {} (appending)", path.display());
+            Arc::new(Mutex::new(file))
+        }
+    });
+
+    let log_eval = |genome: &[f64], score: f64| {
+        if let Some(ref logger) = eval_logger {
+            let mut f = logger.lock().unwrap();
+            let genome_str: Vec<String> = genome.iter().map(|v| format!("{v:.6}")).collect();
+            let goal_id = GoalKind::all().iter().position(|&g| g == goal_kind).unwrap_or(0);
+            let bt_id = BrainType::all().iter().position(|&b| b == bt).unwrap_or(0);
+            let _ = writeln!(f, "{},{goal_id},{bt_id},{},{},{},{},{score:.6}",
+                genome_str.join(","),
+                if sim_config.assr_enabled { 1 } else { 0 },
+                if sim_config.thalamic_gate_enabled { 1 } else { 0 },
+                if sim_config.cet_enabled { 1 } else { 0 },
+                if sim_config.physiological_thalamic_gate_enabled { 1 } else { 0 },
+            );
+        }
+    };
 
     // Load surrogate model if requested (Priority 14).
     let surrogate_model = if use_surrogate {
@@ -401,6 +456,7 @@ fn run_optimize(
     for (idx, genome) in &pending {
         let preset = Preset::from_genome(genome);
         let result = evaluate_preset(&preset, &goal, &sim_config);
+        log_eval(genome, result.score);
         de.report_fitness(*idx, result.score);
     }
 
@@ -459,6 +515,7 @@ fn run_optimize(
                     // Validate with real pipeline
                     let preset = Preset::from_genome(trial_genome);
                     let result = evaluate_preset(&preset, &goal, &sim_config);
+                    log_eval(trial_genome, result.score);
                     de.report_trial_result(target_idx, trial_genome.clone(), result.score);
                 } else {
                     // Use surrogate score (approximate) for non-validated trials
@@ -470,6 +527,7 @@ fn run_optimize(
             for (target_idx, trial_genome) in trials {
                 let preset = Preset::from_genome(&trial_genome);
                 let result = evaluate_preset(&preset, &goal, &sim_config);
+                log_eval(&trial_genome, result.score);
                 de.report_trial_result(target_idx, trial_genome, result.score);
             }
         }
@@ -1284,7 +1342,7 @@ fn print_preset_summary(preset: &Preset) {
         "VastSpace",
         "DeepSanctuary",
     ];
-    let mod_kind_names = ["Flat", "SineLfo", "Breathing", "Stochastic", "NeuralLfo"];
+    let mod_kind_names = ["Flat", "SineLfo", "Breathing", "Stochastic", "NeuralLfo", "Isochronic", "RandomPulse"];
 
     println!("  Preset Configuration:");
     println!("    Master gain:    {:.2}", preset.master_gain);
@@ -1493,7 +1551,7 @@ fn run_disturb_cmd(
         });
         println!("    Final dominant freq: {:.2} Hz", final_freq);
 
-        // Resilience score: weighted combination of recovery speed and entrainment preservation
+        // Entrainment resilience (original, requires LFO target)
         if let (Some(base), Some(fin)) = (result.baseline_entrainment, final_ent) {
             let preservation = if base > 1e-10 { (fin / base).min(1.0) } else { 0.0 };
             let speed_score = match result.recovery_90_ms {
@@ -1503,10 +1561,34 @@ fn run_disturb_cmd(
             };
             let resilience = 0.6 * preservation + 0.4 * speed_score;
             println!();
-            println!("    \u{2550}\u{2550} Resilience Score: {:.2} \u{2550}\u{2550}", resilience);
+            println!("    \u{2550}\u{2550} Entrainment Resilience: {:.2} \u{2550}\u{2550}", resilience);
             println!("       (preservation={:.2}, speed={:.2})", preservation, speed_score);
         }
     }
+
+    // Spectral resilience (Priority 15 — works for ALL presets including binaural)
+    println!();
+    println!("  \u{2500}\u{2500} Spectral Resilience (Priority 15) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+    println!("    BPPR (band preservation):  {:.3}", result.bppr);
+    println!("    Spectral recovery 50%:     {}", match result.spectral_recovery_50_ms {
+        Some(ms) => format!("{:.0} ms", ms),
+        None => "NOT RECOVERED".to_string(),
+    });
+    println!("    Spectral recovery 90%:     {}", match result.spectral_recovery_90_ms {
+        Some(ms) => format!("{:.0} ms", ms),
+        None => "NOT RECOVERED".to_string(),
+    });
+    println!("    SCDI (centroid deviation):  {:.2} Hz", result.scdi_hz);
+    println!();
+    println!("    \u{2550}\u{2550} Spectral Resilience Score: {:.2} \u{2550}\u{2550}", result.spectral_resilience);
+    println!("       (BPPR={:.2}, SRT={}, SCDI={:.2}Hz)",
+        result.bppr,
+        match result.spectral_recovery_90_ms {
+            Some(ms) => format!("{:.0}ms", ms),
+            None => "N/R".to_string(),
+        },
+        result.scdi_hz,
+    );
 
     // Timeline (sampled every ~0.5s for compact output)
     println!();

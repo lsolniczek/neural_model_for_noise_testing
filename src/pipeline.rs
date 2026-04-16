@@ -521,16 +521,19 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     //    Extract the STRONGEST NeuralLFO frequency from the preset.
     //    "Strongest" = highest (depth × volume) product, which is the actual
     //    entrainment driver — not just the first one found.
+    //    Recognizes both NeuralLfo (kind=4) and Isochronic (kind=5) as
+    //    entrainment modulators. Isochronic tones produce stronger cortical
+    //    FFR due to sharp transients (Chaieb et al. 2015).
     let target_lfo_freq = preset.objects.iter()
         .filter(|obj| obj.active)
         .flat_map(|obj| {
             let vol = obj.volume as f64;
             let mut lfos = Vec::new();
-            if obj.bass_mod.kind == 4 && obj.bass_mod.param_a > 0.5 {
-                lfos.push((obj.bass_mod.param_a as f64, obj.bass_mod.param_b as f64 * vol));
-            }
-            if obj.satellite_mod.kind == 4 && obj.satellite_mod.param_a > 0.5 {
-                lfos.push((obj.satellite_mod.param_a as f64, obj.satellite_mod.param_b as f64 * vol));
+            // NeuralLfo (kind=4) and Isochronic (kind=5) both drive entrainment
+            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
+                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
+                    lfos.push((modcfg.param_a as f64, modcfg.param_b as f64 * vol));
+                }
             }
             lfos
         })
@@ -865,7 +868,7 @@ mod tests {
             bass_mod: ModConfig { kind: 4, param_a: 5.0, param_b: 0.9, param_c: 0.0 },
             satellite_mod: ModConfig { kind: 4, param_a: 5.0, param_b: 0.9, param_c: 0.0 },
             movement: Default::default(),
-        };
+            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0 };
         p
     }
 

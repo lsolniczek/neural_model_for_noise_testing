@@ -305,18 +305,30 @@ impl Goal {
             // mind-wandering, stable moderate FHN firing.
             // Ref: Engel & Fries 2010 (beta maintenance hypothesis),
             //      Cavanagh & Frank 2014 (theta suppression in focused attention).
+            // Shield: Alpha-dominant masking. "The Shield" — the brain recognizes
+            // pink 1/f noise as "no information" and habituates rapidly. Alpha
+            // dominant = cortex in idle-ready state; moderate beta = baseline
+            // alertness without anxiety; minimal theta = no mind-wandering;
+            // minimal delta = no drowsiness; minimal gamma = no external binding.
+            //
+            // This is NOT beta-dominant focus — it's the neurological state of
+            // "ready but unstimulated" that enables the fastest habituation.
+            //
+            // Ref: Klimesch 1999 (alpha as cortical idle rhythm),
+            //      Engel & Fries 2010 (beta as status-quo maintenance),
+            //      Bastiaansen & Hagoort 2003 (theta suppression in masking).
             GoalKind::Shield => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.00, ideal: 0.05, max: 0.15 },
-                    theta: BandTarget { min: 0.00, ideal: 0.03, max: 0.10 },
-                    alpha: BandTarget { min: 0.15, ideal: 0.30, max: 0.50 },
-                    beta:  BandTarget { min: 0.30, ideal: 0.50, max: 0.70 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.05, max: 0.15 },
+                    delta: BandTarget { min: 0.00, ideal: 0.03, max: 0.08 },
+                    theta: BandTarget { min: 0.00, ideal: 0.05, max: 0.12 },
+                    alpha: BandTarget { min: 0.35, ideal: 0.50, max: 0.65 },
+                    beta:  BandTarget { min: 0.20, ideal: 0.30, max: 0.40 },
+                    gamma: BandTarget { min: 0.00, ideal: 0.03, max: 0.08 },
                 },
                 fhn_targets: FhnTargets {
-                    firing_rate_range: (5.0, 15.0),
-                    target_isi_cv: Some(0.25), // Stable, low jitter
+                    firing_rate_range: (5.0, 12.0),
+                    target_isi_cv: Some(0.15), // Very regular — no novelty response
                     weight: 0.30,
                 },
                 band_weight: 0.70,

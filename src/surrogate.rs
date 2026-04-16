@@ -42,7 +42,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 /// Number of genome dimensions (from `preset::GENOME_LEN`).
-const GENOME_DIM: usize = 190;
+const GENOME_DIM: usize = 230;
 /// Number of goal kinds (from `GoalKind::all().len()`).
 const GOAL_DIM: usize = 9;
 /// Number of brain types (from `BrainType::all().len()`).

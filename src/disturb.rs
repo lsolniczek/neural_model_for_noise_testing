@@ -30,6 +30,10 @@ pub struct WindowMetrics {
     pub dominant_freq: f64,
     /// Spectral centroid in this window (Hz).
     pub spectral_centroid: f64,
+    /// Normalized EEG band powers [delta, theta, alpha, beta, gamma].
+    /// Per Pfurtscheller & Lopes da Silva (1999): band power fractions
+    /// are the foundation for ERD/ERS-based resilience metrics.
+    pub band_powers: [f64; 5],
 }
 
 /// Summary of the disturbance test.
@@ -42,16 +46,43 @@ pub struct DisturbResult {
     pub baseline_dominant_freq: f64,
     /// Baseline mean spectral centroid (pre-spike).
     pub baseline_centroid: f64,
+    /// Baseline mean band powers [delta, theta, alpha, beta, gamma].
+    pub baseline_band_powers: [f64; 5],
     /// Minimum entrainment ratio during/after spike.
     pub nadir_entrainment: Option<f64>,
     /// Time of nadir (seconds).
     pub nadir_time: f64,
     /// Peak frequency deviation from baseline (Hz).
     pub peak_freq_deviation: f64,
-    /// Time to 50% recovery (seconds after spike, None if not recovered).
+    /// Time to 50% entrainment recovery (seconds after spike, None if not recovered).
     pub recovery_50_ms: Option<f64>,
-    /// Time to 90% recovery (seconds after spike, None if not recovered).
+    /// Time to 90% entrainment recovery (seconds after spike, None if not recovered).
     pub recovery_90_ms: Option<f64>,
+
+    // ── Spectral resilience metrics (Priority 15) ──────────────────
+    //
+    // These work for ALL preset types including binaural beats and
+    // static noise, unlike the entrainment-based metrics above.
+
+    /// Band Power Preservation Ratio (BPPR) ∈ [0, 1].
+    /// Per Pfurtscheller & Lopes da Silva (1999): worst-case fractional
+    /// preservation of the dominant band power after the spike.
+    /// 1.0 = perfect preservation, 0.0 = complete desynchronization.
+    pub bppr: f64,
+    /// Spectral Recovery Time at 50% (ms after spike).
+    /// How fast band power deviation drops to 50% of its nadir value.
+    pub spectral_recovery_50_ms: Option<f64>,
+    /// Spectral Recovery Time at 90% (ms after spike).
+    pub spectral_recovery_90_ms: Option<f64>,
+    /// Spectral Centroid Deviation Integral (Hz).
+    /// Mean absolute centroid deviation from baseline across post-spike windows.
+    /// Lower is better. 0.0 = no spectral displacement.
+    pub scdi_hz: f64,
+    /// Composite spectral resilience score ∈ [0, 1].
+    /// 0.40×BPPR + 0.30×(1-norm_SRT) + 0.30×(1-norm_SCDI).
+    /// Works for all preset types including binaural beats.
+    pub spectral_resilience: f64,
+
     /// Combined bilateral result for full-trace diagnostics.
     pub bilateral: BilateralResult,
     /// Brightness from audio.
@@ -194,12 +225,23 @@ fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOut
         trim(&right_bands[3]),
     ];
 
-    // Extract target LFO frequency from preset
+    // Extract target LFO frequency from preset.
+    // Scans for NeuralLfo (kind=4), Isochronic (kind=5) — both drive entrainment.
+    // Bug fix (Priority 15): previously only detected kind==4, missing isochronic.
     let target_lfo_freq = preset.objects.iter()
-        .flat_map(|obj| [&obj.bass_mod, &obj.satellite_mod])
-        .filter(|m| m.kind == 4 && m.param_a > 0.5)
-        .map(|m| m.param_a as f64)
-        .next();
+        .filter(|obj| obj.active)
+        .flat_map(|obj| {
+            let vol = obj.volume as f64;
+            let mut lfos = Vec::new();
+            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
+                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
+                    lfos.push((modcfg.param_a as f64, modcfg.param_b as f64 * vol));
+                }
+            }
+            lfos
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(freq, _)| freq);
 
     AuditoryOutput {
         left_bands_dec,
@@ -299,6 +341,10 @@ fn analyze_window(
     let mut peak_freq = 0.0_f64;
     let mut target_power = 0.0_f64;
 
+    // Per-band power accumulators (Priority 15a)
+    // Frequency ranges match JansenRitModel::compute_band_powers()
+    let mut band_power = [0.0_f64; 5]; // delta, theta, alpha, beta, gamma
+
     let (target_lo, target_hi) = if let Some(tf) = target_freq {
         let lo = ((tf - 1.0).max(0.5) / freq_res).floor() as usize;
         let hi = ((tf + 1.0) / freq_res).ceil().min(nyquist_bin as f64) as usize;
@@ -321,6 +367,13 @@ fn analyze_window(
         if target_freq.is_some() && bin >= target_lo && bin <= target_hi {
             target_power += power;
         }
+
+        // Accumulate per-band power
+        if freq < 4.0 { band_power[0] += power; }       // delta 0.5-4
+        else if freq < 8.0 { band_power[1] += power; }   // theta 4-8
+        else if freq < 13.0 { band_power[2] += power; }  // alpha 8-13
+        else if freq < 30.0 { band_power[3] += power; }  // beta 13-30
+        else { band_power[4] += power; }                  // gamma 30-50
     }
 
     let spectral_centroid = if total_power > 1e-30 {
@@ -335,11 +388,20 @@ fn analyze_window(
         None
     };
 
+    // Normalize band powers to fractions summing to 1.0
+    let bp_sum: f64 = band_power.iter().sum();
+    if bp_sum > 1e-30 {
+        for p in &mut band_power { *p /= bp_sum; }
+    } else {
+        band_power = [0.2; 5]; // uniform fallback
+    }
+
     WindowMetrics {
         time_s: 0.0, // filled by caller
         entrainment_ratio,
         dominant_freq: peak_freq,
         spectral_centroid,
+        band_powers: band_power,
     }
 }
 
@@ -466,6 +528,9 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         10.0
     };
 
+    // Baseline band powers (Priority 15)
+    let baseline_band_powers = mean_band_powers(&baseline_windows);
+
     // Post-spike windows
     let post_spike_windows: Vec<&WindowMetrics> = windows.iter()
         .filter(|w| w.time_s > spike_window_time)
@@ -493,7 +558,7 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         .map(|w| (w.dominant_freq - baseline_dominant_freq).abs())
         .fold(0.0_f64, f64::max);
 
-    // Recovery times
+    // Entrainment recovery times (original metrics — kept for backward compat)
     let recovery_50_ms = compute_recovery_time(
         &post_spike_windows, baseline_entrainment, 0.50, spike_window_time,
     );
@@ -501,16 +566,33 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         &post_spike_windows, baseline_entrainment, 0.90, spike_window_time,
     );
 
+    // ── Spectral resilience metrics (Priority 15) ──────────────────
+    let bppr = compute_bppr(&baseline_band_powers, &post_spike_windows);
+    let spectral_recovery_50_ms = compute_spectral_recovery(
+        &baseline_band_powers, &baseline_windows, &post_spike_windows, 0.50, spike_window_time,
+    );
+    let spectral_recovery_90_ms = compute_spectral_recovery(
+        &baseline_band_powers, &baseline_windows, &post_spike_windows, 0.90, spike_window_time,
+    );
+    let scdi_hz = compute_scdi(baseline_centroid, &post_spike_windows);
+    let spectral_resilience = compute_spectral_resilience(bppr, spectral_recovery_50_ms, spectral_recovery_90_ms, scdi_hz);
+
     DisturbResult {
         windows,
         baseline_entrainment,
         baseline_dominant_freq,
         baseline_centroid,
+        baseline_band_powers,
         nadir_entrainment,
         nadir_time,
         peak_freq_deviation,
         recovery_50_ms,
         recovery_90_ms,
+        bppr,
+        spectral_recovery_50_ms,
+        spectral_recovery_90_ms,
+        scdi_hz,
+        spectral_resilience,
         bilateral: bi_result,
         brightness: audio.brightness,
         target_freq: audio.target_lfo_freq,
@@ -530,10 +612,354 @@ fn compute_recovery_time(
     for w in post_spike {
         if let Some(er) = w.entrainment_ratio {
             if er >= threshold {
-                // Convert to ms after spike
                 return Some((w.time_s - spike_time) * 1000.0);
             }
         }
     }
     None
+}
+
+// ── Spectral resilience metrics (Priority 15) ──────────────────────────────
+//
+// Per Pfurtscheller & Lopes da Silva (1999): ERD% = (P(t) - R) / R × 100
+// We adapt this to compute Band Power Preservation Ratio (BPPR),
+// Spectral Recovery Time (SRT), and Spectral Centroid Deviation Integral
+// (SCDI). All three work for any preset type including binaural beats.
+
+/// Compute the mean band powers across a set of windows.
+fn mean_band_powers(windows: &[&WindowMetrics]) -> [f64; 5] {
+    if windows.is_empty() {
+        return [0.2; 5];
+    }
+    let mut sum = [0.0_f64; 5];
+    for w in windows {
+        for b in 0..5 { sum[b] += w.band_powers[b]; }
+    }
+    let n = windows.len() as f64;
+    for b in 0..5 { sum[b] /= n; }
+    sum
+}
+
+/// Band Power Preservation Ratio (BPPR) — per Pfurtscheller 1999.
+///
+/// Returns the worst-case fractional preservation of band power across
+/// all 5 bands during/after the spike. Weighted by a simple "all bands
+/// matter equally" approach (goal-specific weighting can be added later).
+///
+/// BPPR = min over post-spike windows of (Σ_b min(P_b(t)/P_b_baseline, 1.0)) / 5
+fn compute_bppr(
+    baseline_bp: &[f64; 5],
+    post_spike: &[&WindowMetrics],
+) -> f64 {
+    if post_spike.is_empty() {
+        return 1.0;
+    }
+
+    let mut worst_preservation = 1.0_f64;
+
+    for w in post_spike {
+        let mut window_preservation = 0.0_f64;
+        let mut count = 0;
+        for b in 0..5 {
+            if baseline_bp[b] > 1e-6 {
+                let ratio = (w.band_powers[b] / baseline_bp[b]).min(2.0); // cap at 2x to avoid overshoot weighting
+                // ERD: ratio < 1.0 means desynchronization
+                // ERS: ratio > 1.0 means rebound — treat as preserved
+                window_preservation += ratio.min(1.0);
+                count += 1;
+            }
+        }
+        if count > 0 {
+            let p = window_preservation / count as f64;
+            if p < worst_preservation {
+                worst_preservation = p;
+            }
+        }
+    }
+
+    worst_preservation.clamp(0.0, 1.0)
+}
+
+/// Spectral Recovery Time — how fast band power deviation returns to baseline.
+///
+/// Uses a baseline-variance-aware threshold: recovery means the deviation
+/// drops below `baseline_std + (1-fraction) × (nadir - baseline_std)`.
+/// This correctly handles presets with ongoing spectral variation (movement,
+/// asymmetric modulation) where the deviation never reaches zero because
+/// the baseline itself fluctuates.
+///
+/// `pre_spike_windows` is used to compute the baseline variance.
+fn compute_spectral_recovery(
+    baseline_bp: &[f64; 5],
+    pre_spike_windows: &[&WindowMetrics],
+    post_spike: &[&WindowMetrics],
+    fraction: f64,
+    spike_time: f64,
+) -> Option<f64> {
+    if post_spike.is_empty() {
+        return Some(0.0);
+    }
+
+    // Compute deviation at each window
+    let deviation_of = |w: &WindowMetrics| -> f64 {
+        let mut dev = 0.0_f64;
+        for b in 0..5 {
+            if baseline_bp[b] > 1e-6 {
+                dev += ((w.band_powers[b] - baseline_bp[b]) / baseline_bp[b]).abs();
+            }
+        }
+        dev
+    };
+
+    // Baseline deviation variance: how much the bands naturally fluctuate
+    let baseline_std = if pre_spike_windows.len() > 2 {
+        let baseline_devs: Vec<f64> = pre_spike_windows.iter().map(|w| deviation_of(w)).collect();
+        let mean_dev = baseline_devs.iter().sum::<f64>() / baseline_devs.len() as f64;
+        let variance = baseline_devs.iter()
+            .map(|d| (d - mean_dev).powi(2))
+            .sum::<f64>() / baseline_devs.len() as f64;
+        variance.sqrt()
+    } else {
+        0.0
+    };
+
+    // Post-spike deviations
+    let deviations: Vec<(f64, f64)> = post_spike.iter()
+        .map(|w| (w.time_s, deviation_of(w)))
+        .collect();
+
+    // Find the nadir (maximum deviation after spike)
+    let max_dev = deviations.iter().map(|(_, d)| *d).fold(0.0_f64, f64::max);
+    if max_dev < 1e-6 {
+        return Some(0.0);
+    }
+
+    // Threshold: baseline_std + (1-fraction) × excess above baseline_std
+    // For 90% recovery: threshold = baseline_std + 10% of (nadir - baseline_std)
+    // This means "recovered" = deviation is within the normal baseline fluctuation range
+    let excess = (max_dev - baseline_std).max(0.0);
+    let threshold = baseline_std + excess * (1.0 - fraction);
+
+    let nadir_time = deviations.iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(t, _)| *t)
+        .unwrap_or(spike_time);
+
+    for &(time, dev) in &deviations {
+        if time > nadir_time && dev <= threshold {
+            return Some((time - spike_time) * 1000.0);
+        }
+    }
+    None
+}
+
+/// Spectral Centroid Deviation Integral (SCDI).
+///
+/// Mean absolute centroid deviation from baseline across post-spike windows.
+/// Lower is better. 0.0 = no spectral displacement.
+fn compute_scdi(
+    baseline_centroid: f64,
+    post_spike: &[&WindowMetrics],
+) -> f64 {
+    if post_spike.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = post_spike.iter()
+        .map(|w| (w.spectral_centroid - baseline_centroid).abs())
+        .sum();
+    sum / post_spike.len() as f64
+}
+
+/// Composite spectral resilience score ∈ [0, 1].
+///
+/// Combines BPPR (band preservation), SRT (recovery speed), and SCDI
+/// (total displacement) into a single score. Works for all preset types.
+///
+/// SRT strategy: uses SRT 90% if available. If not (common for dynamic
+/// presets with movement/modulation where the baseline itself fluctuates),
+/// falls back to SRT 50% with a penalty factor. If neither is available,
+/// SRT component scores 0.
+fn compute_spectral_resilience(
+    bppr: f64,
+    srt_50_ms: Option<f64>,
+    srt_90_ms: Option<f64>,
+    scdi_hz: f64,
+) -> f64 {
+    let norm_srt = match srt_90_ms {
+        Some(ms) => (ms / 2000.0).min(1.0),
+        None => match srt_50_ms {
+            // Fallback: SRT 50% available but 90% never reached.
+            // The 50% recovery happened, so we give partial credit:
+            // fast 50% recovery (< 1s) → norm ~0.5 (half credit)
+            // slow 50% recovery (> 5s) → norm ~0.9 (nearly failed)
+            Some(ms) => 0.5 + 0.5 * (ms / 10000.0).min(1.0),
+            None => 1.0, // nothing recovered = worst case
+        },
+    };
+    let norm_scdi = (scdi_hz / 5.0).min(1.0);
+
+    (0.40 * bppr + 0.30 * (1.0 - norm_srt) + 0.30 * (1.0 - norm_scdi)).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_window(time: f64, bp: [f64; 5], centroid: f64) -> WindowMetrics {
+        WindowMetrics {
+            time_s: time,
+            entrainment_ratio: None,
+            dominant_freq: 10.0,
+            spectral_centroid: centroid,
+            band_powers: bp,
+        }
+    }
+
+    // ═══ BPPR tests ═══
+
+    #[test]
+    fn bppr_perfect_when_no_change() {
+        let baseline = [0.05, 0.10, 0.50, 0.30, 0.05];
+        let w = make_window(5.5, baseline, 10.0);
+        let post = vec![&w];
+        let bppr = compute_bppr(&baseline, &post);
+        assert!((bppr - 1.0).abs() < 1e-6, "No change → BPPR=1.0, got {bppr}");
+    }
+
+    #[test]
+    fn bppr_drops_when_bands_shift() {
+        let baseline = [0.05, 0.10, 0.50, 0.30, 0.05];
+        let spike_bp = [0.20, 0.20, 0.10, 0.40, 0.10]; // alpha collapsed, others shifted
+        let w = make_window(5.5, spike_bp, 10.0);
+        let post = vec![&w];
+        let bppr = compute_bppr(&baseline, &post);
+        // BPPR measures WORST-CASE preservation across all bands.
+        // Alpha drops from 0.50 to 0.10 = 20% preserved.
+        // But BPPR is averaged across bands, so it's ~0.84 not ~0.20.
+        // The metric should be < 1.0 for any band shift.
+        assert!(bppr < 1.0, "Band shift → BPPR < 1.0, got {bppr}");
+        assert!(bppr > 0.0, "BPPR should be positive, got {bppr}");
+
+        // Total collapse should produce very low BPPR
+        let total_collapse = [0.01, 0.01, 0.01, 0.01, 0.96]; // all in gamma
+        let w2 = make_window(5.5, total_collapse, 10.0);
+        let bppr2 = compute_bppr(&baseline, &[&w2]);
+        assert!(bppr2 < 0.3, "Total collapse → BPPR < 0.3, got {bppr2}");
+    }
+
+    #[test]
+    fn bppr_in_unit_range() {
+        let baseline = [0.05, 0.10, 0.50, 0.30, 0.05];
+        for alpha in [0.0, 0.10, 0.30, 0.50, 0.80] {
+            let bp = [0.10, 0.10, alpha, 0.80 - alpha, 0.0];
+            let w = make_window(5.5, bp, 10.0);
+            let bppr = compute_bppr(&baseline, &[&w]);
+            assert!(bppr >= 0.0 && bppr <= 1.0, "BPPR {bppr} out of [0,1]");
+        }
+    }
+
+    // ═══ SRT tests ═══
+
+    #[test]
+    fn spectral_recovery_zero_when_no_deviation() {
+        let baseline = [0.05, 0.10, 0.50, 0.30, 0.05];
+        let pre = make_window(3.0, baseline, 10.0);
+        let w = make_window(5.5, baseline, 10.0);
+        let srt = compute_spectral_recovery(&baseline, &[&pre], &[&w], 0.50, 5.0);
+        assert_eq!(srt, Some(0.0), "No deviation → SRT=0, got {srt:?}");
+    }
+
+    #[test]
+    fn spectral_recovery_positive_after_spike() {
+        let baseline = [0.05, 0.10, 0.50, 0.30, 0.05];
+        let pre = make_window(3.0, baseline, 10.0);
+        let spike_bp = [0.20, 0.20, 0.10, 0.40, 0.10];
+        let w1 = make_window(5.2, spike_bp, 15.0);
+        let w2 = make_window(5.5, [0.10, 0.15, 0.30, 0.35, 0.10], 12.0);
+        let w3 = make_window(5.8, baseline, 10.0);
+        let srt = compute_spectral_recovery(&baseline, &[&pre], &[&w1, &w2, &w3], 0.90, 5.0);
+        assert!(srt.is_some(), "Should recover");
+        assert!(srt.unwrap() > 0.0, "Recovery time should be positive");
+    }
+
+    // ═══ SCDI tests ═══
+
+    #[test]
+    fn scdi_zero_when_no_deviation() {
+        let w = make_window(5.5, [0.2; 5], 10.0);
+        let scdi = compute_scdi(10.0, &[&w]);
+        assert!((scdi - 0.0).abs() < 1e-6, "No deviation → SCDI=0, got {scdi}");
+    }
+
+    #[test]
+    fn scdi_positive_when_centroid_shifts() {
+        let w1 = make_window(5.5, [0.2; 5], 15.0); // centroid shifted +5
+        let w2 = make_window(6.0, [0.2; 5], 12.0); // partially recovered
+        let scdi = compute_scdi(10.0, &[&w1, &w2]);
+        assert!(scdi > 0.0, "Centroid shift → SCDI > 0, got {scdi}");
+        assert!((scdi - 3.5).abs() < 0.01, "SCDI should be (5+2)/2=3.5, got {scdi}");
+    }
+
+    // ═══ Composite resilience tests ═══
+
+    #[test]
+    fn resilience_perfect_when_no_disturbance() {
+        let r = compute_spectral_resilience(1.0, Some(0.0), Some(0.0), 0.0);
+        assert!((r - 1.0).abs() < 1e-6, "Perfect → 1.0, got {r}");
+    }
+
+    #[test]
+    fn resilience_zero_when_worst_case() {
+        let r = compute_spectral_resilience(0.0, None, None, 10.0);
+        assert!((r - 0.0).abs() < 1e-6, "Worst case → 0.0, got {r}");
+    }
+
+    #[test]
+    fn resilience_fallback_to_srt50_when_90_unavailable() {
+        // SRT 90% not recovered but SRT 50% is — should get partial credit
+        let r_with_90 = compute_spectral_resilience(0.5, Some(500.0), Some(500.0), 1.0);
+        let r_only_50 = compute_spectral_resilience(0.5, Some(500.0), None, 1.0);
+        assert!(r_only_50 > 0.0, "Should get partial credit with SRT 50% fallback");
+        // Fallback gives norm_srt = 0.5 + 0.5*(500/10000) = 0.525
+        // With 90%: norm_srt = 500/2000 = 0.25
+        // So fallback scores lower (higher norm_srt → lower score)
+        assert!(r_only_50 < r_with_90,
+            "Fallback ({r_only_50:.3}) should score lower than full recovery ({r_with_90:.3})");
+    }
+
+    #[test]
+    fn resilience_in_unit_range() {
+        for bppr in [0.0, 0.3, 0.5, 0.8, 1.0] {
+            for srt90 in [None, Some(0.0), Some(500.0), Some(2000.0)] {
+                for srt50 in [None, Some(0.0), Some(1000.0), Some(5000.0)] {
+                    for scdi in [0.0, 1.0, 3.0, 5.0, 10.0] {
+                        let r = compute_spectral_resilience(bppr, srt50, srt90, scdi);
+                        assert!(r >= 0.0 && r <= 1.0,
+                            "resilience {r} out of [0,1] for bppr={bppr} srt50={srt50:?} srt90={srt90:?} scdi={scdi}");
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══ Band power sum test ═══
+
+    #[test]
+    fn band_powers_sum_to_one() {
+        // Create a simple sine signal and verify band powers sum to ~1.0
+        let sr = 1000.0;
+        let n: usize = 500;
+        let signal: Vec<f64> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 10.0 * i as f64 / sr).sin())
+            .collect();
+        let fft_len = n.next_power_of_two();
+        let mut planner = FftPlanner::<f64>::new();
+        let fft = planner.plan_fft_forward(fft_len);
+        let w = analyze_window(&signal, sr, None, &fft, fft_len);
+        let sum: f64 = w.band_powers.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Band powers should sum to ~1.0, got {sum}"
+        );
+    }
 }

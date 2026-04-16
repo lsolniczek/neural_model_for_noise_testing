@@ -18,6 +18,7 @@ mod tests {
             bass_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
             satellite_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
             movement: MovementConfig::default(),
+            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
         };
 
         objects[1] = ObjectConfig {
@@ -26,6 +27,7 @@ mod tests {
             bass_mod: ModConfig { kind: 4, param_a: 30.0, param_b: 0.8, param_c: 0.0 },
             satellite_mod: ModConfig { kind: 4, param_a: 30.0, param_b: 0.8, param_c: 0.0 },
             movement: MovementConfig::default(),
+            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
         };
 
         // Object 4: second grey, mirrored at x:-1, depth 0.8
@@ -35,6 +37,7 @@ mod tests {
             bass_mod: ModConfig { kind: 4, param_a: 30.0, param_b: 0.8, param_c: 0.0 },
             satellite_mod: ModConfig { kind: 4, param_a: 30.0, param_b: 0.8, param_c: 0.0 },
             movement: MovementConfig::default(),
+            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
         };
 
         objects[2] = ObjectConfig {
@@ -46,6 +49,7 @@ mod tests {
                 kind: 5, radius: 2.0, speed: 0.4, phase: 0.0,
                 depth_min: 0.5, depth_max: 5.0, reverb_min: 0.0, reverb_max: 0.0,
             },
+            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
         };
 
         objects[3] = ObjectConfig {
@@ -54,6 +58,7 @@ mod tests {
             bass_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
             satellite_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
             movement: MovementConfig::default(),
+            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
         };
 
         let mut preset = Preset {
@@ -109,6 +114,7 @@ mod tests {
                 bass_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
                 satellite_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
                 movement: MovementConfig::default(),
+                tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
             };
             let grey_mod = ModConfig { kind: 4, param_a: 30.0, param_b: depth, param_c: 0.0 };
             objects[1] = ObjectConfig {
@@ -116,12 +122,14 @@ mod tests {
                 reverb_send: 0.0,
                 bass_mod: grey_mod.clone(), satellite_mod: grey_mod.clone(),
                 movement: MovementConfig::default(),
+                tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
             };
             objects[4] = ObjectConfig {
                 active: true, color: 4, x: -1.0, y: 0.0, z: 1.0, volume: 0.7,
                 reverb_send: 0.0,
                 bass_mod: grey_mod.clone(), satellite_mod: grey_mod.clone(),
                 movement: MovementConfig::default(),
+                tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
             };
             objects[2] = ObjectConfig {
                 active: true, color: 6, x: 0.0, y: 0.0, z: 1.0, volume: 1.0,
@@ -132,6 +140,7 @@ mod tests {
                     kind: 5, radius: 2.0, speed: 0.4, phase: 0.0,
                     depth_min: 0.5, depth_max: 5.0, reverb_min: 0.0, reverb_max: 0.0,
                 },
+                tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
             };
             objects[3] = ObjectConfig {
                 active: true, color: 1, x: 0.0, y: 0.0, z: 2.0, volume: 0.5,
@@ -139,6 +148,7 @@ mod tests {
                 bass_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
                 satellite_mod: ModConfig { kind: 0, param_a: 0.0, param_b: 0.0, param_c: 0.0 },
                 movement: MovementConfig::default(),
+                tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0,
             };
             let mut preset = Preset {
                 master_gain: 0.8, spatial_mode: 1, source_count: 4,
