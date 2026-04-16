@@ -715,7 +715,7 @@ pub fn test_bilateral_frequency_tracking() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
         );
 
         let lf = result.left_dominant_freq;
@@ -753,7 +753,7 @@ pub fn test_bilateral_frequency_tracking() {
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
         &fi,
-        neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
     );
 
     // Note: asymmetry won't be exactly 0 because L/R hemispheres have different
@@ -807,7 +807,7 @@ pub fn test_bilateral_bifurcation() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
         );
 
         let mean = result.combined.eeg.iter().sum::<f64>() / n as f64;
@@ -889,7 +889,7 @@ pub fn test_bilateral_impulse() {
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
         &fi,
-        neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
     );
 
     // Analyse response in 0.5s windows
@@ -1020,7 +1020,7 @@ pub fn test_bilateral_stochastic_resonance() {
                 neural.jansen_rit.input_scale,
                 SAMPLE_RATE,
                 &fi_inner,
-                neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
             );
 
             let bp_norm = result.combined.band_powers.normalized();
@@ -1106,7 +1106,7 @@ pub fn test_bilateral_spectral_discrimination() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
         );
 
         let result_b = simulate_bilateral(
@@ -1117,7 +1117,7 @@ pub fn test_bilateral_spectral_discrimination() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
         );
 
         let bpw = result_w.combined.band_powers.normalized();
@@ -1516,7 +1516,7 @@ pub fn test_wendling_adhd_sensitivity() {
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
         );
 
         let bp = result.combined.band_powers.normalized();

@@ -50,7 +50,7 @@ mod tests {
         let bi = simulate_bilateral(
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, sr, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
         );
 
         // Normalise EEG for FHN

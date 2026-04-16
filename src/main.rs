@@ -1180,12 +1180,19 @@ fn run_detailed_pipeline(
     // (Optional) Thalamic gate: per-band offset shifts (Steriade et al. 1993).
     // The physiological gate (Priority 9, Bazhenov 2002 / Paul 2016 TC cell)
     // takes precedence over the heuristic gate when both flags are set.
+    // Compute arousal for thalamic gate + GABA_B gain modulation
+    let arousal = if physiological_thalamic_gate_enabled {
+        crate::auditory::PhysiologicalThalamicGate::compute_arousal(preset, brightness)
+    } else if thalamic_gate_enabled {
+        crate::auditory::ThalamicGate::compute_arousal(preset, brightness)
+    } else {
+        0.5
+    };
+
     let band_shifts = if physiological_thalamic_gate_enabled {
-        let arousal = crate::auditory::PhysiologicalThalamicGate::compute_arousal(preset, brightness);
         let gate = crate::auditory::PhysiologicalThalamicGate::new(arousal);
         gate.band_offset_shifts()
     } else if thalamic_gate_enabled {
-        let arousal = crate::auditory::ThalamicGate::compute_arousal(preset, brightness);
         let gate = crate::auditory::ThalamicGate::new(arousal);
         gate.band_offset_shifts()
     } else {
@@ -1224,6 +1231,7 @@ fn run_detailed_pipeline(
         if cet_enabled { 10.0 } else { 0.0 },
         if cet_enabled { 5.0 } else { 0.0 },
         if cet_enabled { 30.0 } else { 0.0 },
+        arousal,
     );
 
     // FHN driven by combined bilateral EEG

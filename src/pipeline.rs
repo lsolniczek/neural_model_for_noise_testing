@@ -423,12 +423,23 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     //     Destexhe 1996). Sigmoidal shape derived from ion-channel dynamics.
     //
     // The physiological gate takes precedence when both flags are set.
+    // Compute arousal from preset properties. Used for both:
+    // 1. Thalamic gate band_offset shifts (existing)
+    // 2. GABA_B gain modulation scaling (new — Priority 18)
+    let arousal = if config.physiological_thalamic_gate_enabled || config.thalamic_gate_enabled {
+        if config.physiological_thalamic_gate_enabled {
+            PhysiologicalThalamicGate::compute_arousal(preset, brightness)
+        } else {
+            ThalamicGate::compute_arousal(preset, brightness)
+        }
+    } else {
+        0.5 // neutral arousal when gate is disabled
+    };
+
     let thalamic_band_shifts = if config.physiological_thalamic_gate_enabled {
-        let arousal = PhysiologicalThalamicGate::compute_arousal(preset, brightness);
         let gate = PhysiologicalThalamicGate::new(arousal);
         gate.band_offset_shifts()
     } else if config.thalamic_gate_enabled {
-        let arousal = ThalamicGate::compute_arousal(preset, brightness);
         let gate = ThalamicGate::new(arousal);
         gate.band_offset_shifts()
     } else {
@@ -488,6 +499,7 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         b_slow_gain,
         b_slow_rate,
         c_slow,
+        arousal,
     );
 
     let jr_result = &bi_result.combined;

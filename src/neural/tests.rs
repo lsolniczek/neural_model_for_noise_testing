@@ -64,6 +64,7 @@ mod tests {
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
             params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.5, // arousal (neutral)
         );
 
         let mono_norm = mono.band_powers.normalized();
@@ -114,6 +115,7 @@ mod tests {
             &left_energy, &right_energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
             params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.5, // arousal (neutral)
         );
 
         // Right hemisphere (gets 65% left ear = low freq) should be slower
@@ -146,6 +148,7 @@ mod tests {
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
             params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.5, // arousal (neutral)
         );
 
         // Alpha asymmetry should be in [-1, 1]
@@ -178,6 +181,7 @@ mod tests {
                 &bands, &bands, &energy, &energy,
                 &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
                 params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.5, // arousal (neutral)
             );
 
             dominant_freqs.push((bt, bi.combined.dominant_freq));
@@ -227,6 +231,7 @@ mod tests {
             &bands, &bands, &energy, &energy,
             &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
             params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.5, // arousal (neutral)
         );
 
         // Normalise EEG to [-1, 1]
@@ -258,6 +263,7 @@ mod tests {
             &bands, &bands, &energy, &energy,
             &bilateral_normal, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
             params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.5, // arousal (neutral)
         );
 
         // Run with zero delay
@@ -267,6 +273,7 @@ mod tests {
             &bands, &bands, &energy, &energy,
             &bilateral_zero, params.jansen_rit.c, params.jansen_rit.input_scale, SR, &fi,
             params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.5, // arousal (neutral)
         );
 
         // They should produce different EEG (delay changes phase relationship)
