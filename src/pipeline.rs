@@ -106,7 +106,7 @@ impl Default for SimulationConfig {
             thalamic_gate_enabled: true,
             habituation_enabled: true,
             stochastic_jr_enabled: true,
-            cet_enabled: false,
+            cet_enabled: true,
             physiological_thalamic_gate_enabled: false,
         }
     }

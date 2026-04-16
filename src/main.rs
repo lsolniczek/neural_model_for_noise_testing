@@ -79,8 +79,9 @@ enum Commands {
         #[arg(long)]
         init_preset: Option<PathBuf>,
 
-        /// Enable Cortical Envelope Tracking (Priority 13)
-        #[arg(long, default_value_t = false)]
+        /// Enable Cortical Envelope Tracking (Priority 13).
+        /// ON by default for physiologically correct GABA_B gain modulation.
+        #[arg(long, default_value_t = true)]
         cet: bool,
 
         /// Enable the physiological thalamic gate (Priority 9)
@@ -128,15 +129,18 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         assr: bool,
 
-        /// Enable thalamic gate (arousal-dependent filtering)
-        #[arg(long, default_value_t = false)]
+        /// Enable thalamic gate (arousal-dependent filtering).
+        /// ON by default — required for physiologically correct arousal sensitivity.
+        /// Use --no-thalamic-gate to disable.
+        #[arg(long, default_value_t = true)]
         thalamic_gate: bool,
 
         /// Enable Cortical Envelope Tracking (Priority 13).
         /// Splits each band into slow (≤10 Hz) and fast (>10 Hz) paths,
         /// bypasses ASSR on the slow path, and engages the slow GABA_B
-        /// inhibitory population in JR. Off by default for `evaluate`.
-        #[arg(long, default_value_t = false)]
+        /// gain modulation in JR. ON by default — required for theta-alpha
+        /// coexistence. Use --no-cet to disable.
+        #[arg(long, default_value_t = true)]
         cet: bool,
 
         /// Enable the physiological thalamic gate (Priority 9). Replaces

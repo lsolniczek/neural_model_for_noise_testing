@@ -1,6 +1,67 @@
 # Working with the Brain Model — Practical Guide
 
-A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 14 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR, Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, slow GABA_B in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search), and DSP integration of isochronic tones, RandomPulse, color tint, and tone generator (binaural beats).
+A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 15 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR (Ableidinger 2017 velocity noise), Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, GABA_B gain modulation in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search), DSP integration of isochronic tones, RandomPulse, color tint, and tone generator (binaural beats), and the Priority 18 GABA_B architecture fix (gain modulation replacing PSP subtraction).
+
+---
+
+## How to Evaluate Presets — Standard Flags
+
+**Always use these flags for correct, physiologically accurate evaluation:**
+
+```bash
+# Standard evaluation (all presets, all goals)
+cargo run --release -- evaluate <preset.json> --goal <goal> --brain-type <type> --duration <sec> \
+    --cet --thalamic-gate
+
+# Disturbance test
+cargo run --release -- disturb <preset.json>
+```
+
+### Required flags
+
+| Flag | What it does | Why it's required |
+|------|-------------|-------------------|
+| `--cet` | Enables Cortical Envelope Tracking: 10 Hz slow/fast crossover, GABA_B slow inhibitory gain modulation, envelope-phase PLV scoring | Without CET, the model has no slow inhibitory feedback — it locks into a single attractor (alpha or theta) and cannot produce mixed brain states. The GABA_B population models real presynaptic GABA_B receptors that modulate excitatory gain (glutamate release). This is basic cortical physiology, not an optional feature. |
+| `--thalamic-gate` | Enables arousal-dependent thalamic gating: preset properties (reverb, brightness, modulation) compute arousal → band_offset shifts toward theta/delta at low arousal | Without the gate, the model has no arousal sensitivity — a dark reverberant brown noise preset scores the same as a bright dry white noise preset. Real thalamocortical dynamics gate sensory input based on arousal state. |
+
+### Optional flags
+
+| Flag | When to use |
+|------|------------|
+| `--phys-gate` | Replaces heuristic thalamic gate with ion-channel TC cell (Bazhenov 2002). More physiologically realistic sigmoid transition but pushes hard toward delta. Use for sleep presets or when the heuristic gate under-differentiates. Takes precedence over `--thalamic-gate`. |
+| `--assr` | ASSR transfer function. Enabled by default in SimulationConfig. Rarely needs manual toggling. |
+
+### What happens without CET+thalamic-gate
+
+Without these flags, the Jansen-Rit model has a strong alpha attractor at ~10 Hz. The model will:
+- Lock into **alpha ~90%** for any brown/pink/grey input (relaxation presets score ~0.34)
+- Lock into **beta ~70%** for any white/green input with isochronic (activation presets work better but still limited)
+- Never produce a stable theta-alpha mixed state at durations >60s
+- Score relaxation/sleep/meditation goals poorly regardless of preset quality
+
+With CET+thalamic-gate, the GABA_B slow inhibitory population modulates excitatory gain on a slow timescale (~100ms), creating periodic windows where the dominant frequency shifts between alpha and theta. This produces physiologically realistic mixed states:
+- Deep Relaxation at 600s: theta 50% + alpha 43% (vs theta 4% + alpha 94% without CET)
+
+### Evaluation durations
+
+| Duration | Use for |
+|----------|---------|
+| 10s | Quick iteration during preset design |
+| 60s | Short stability check |
+| 300s | Standard evaluation — captures long-term attractor behavior |
+| 600s | Full stability test — use for final validation |
+
+Always test at **300s minimum** before considering a preset done. The 10s snapshot captures transient dynamics that may not persist.
+
+### Brain types
+
+| Type | Flag | Use for |
+|------|------|---------|
+| Normal | `--brain-type normal` (default) | Most presets |
+| ADHD | `--brain-type adhd` | Ignition/activation presets |
+| HighAlpha | `--brain-type high-alpha` | Meditation presets |
+| Anxious | `--brain-type anxious` | Calming presets |
+| Aging | `--brain-type aging` | Cognitive support presets |
 
 ---
 
