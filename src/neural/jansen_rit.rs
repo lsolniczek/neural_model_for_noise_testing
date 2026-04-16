@@ -568,13 +568,8 @@ impl JansenRitModel {
             let a_mod = if slow_enabled {
                 // GABA_B gain modulation with arousal-dependent scaling.
                 //
-                // k_base: calibrated so that at moderate arousal (0.5) the gain
-                // reduction is ~15% at steady state. y_slow_ss ≈ B*C*S_half/b.
-                // We want A_eff/A ≈ 0.85 at arousal=0.5, i.e.,
-                // 1/(1 + k_scale*k_base*y_ss) = 0.85 → k_base = 0.15/(0.85*k_scale*y_ss).
-                //
                 // k_scale: arousal-dependent multiplier on GABA_B strength.
-                // k_scale = 1.0 + 1.5 × (1.0 - arousal)
+                //   k_scale = 1.0 + 1.5 × (1.0 - arousal)
                 //   arousal=1.0 (focus)  → k_scale=1.0  (minimal GABA_B, high ACh)
                 //   arousal=0.5 (neutral) → k_scale=1.75 (moderate)
                 //   arousal=0.0 (sleep)   → k_scale=2.5  (maximal GABA_B, no ACh)
@@ -585,9 +580,14 @@ impl JansenRitModel {
                 //   ACh levels: wake=1.0, SWS=0.15 (Marrosu et al. 1995 microdialysis).
                 //   GABA_B conductance 2-3× higher in NREM vs wake (Steriade 1997).
                 //   NMM precedent: Bhatt et al. 2016 scale GABA_B 1.0→2.5 with arousal.
+                //
+                // k_base: calibrated so that at moderate arousal (0.5, k_scale=1.75),
+                //   A_eff/A ≈ 0.85 (15% gain reduction, modulatory not silencing).
+                //   Derived: 1/(1 + k*y_ss) = 0.85 → k = 0.15/(0.85*y_ss)
+                //   with k = k_scale * k_base.
                 let k_scale = 1.0 + 1.5 * (1.0 - self.arousal.clamp(0.0, 1.0));
                 let y_ss_est = (self.b_slow_gain * self.c_slow * 2.5 / self.b_slow_rate).max(1e-10);
-                let k_base = 0.15 / (0.85 * 1.75 * y_ss_est); // calibrated at arousal=0.5 (k_scale=1.75)
+                let k_base = 0.15 / (0.85 * 1.75 * y_ss_est); // calibrated at arousal=0.5
                 let k = k_scale * k_base;
                 1.0 / (1.0 + k * y_slow[0].max(0.0))
             } else {
@@ -714,13 +714,8 @@ impl JansenRitModel {
             let a_mod = if slow_enabled {
                 // GABA_B gain modulation with arousal-dependent scaling.
                 //
-                // k_base: calibrated so that at moderate arousal (0.5) the gain
-                // reduction is ~15% at steady state. y_slow_ss ≈ B*C*S_half/b.
-                // We want A_eff/A ≈ 0.85 at arousal=0.5, i.e.,
-                // 1/(1 + k_scale*k_base*y_ss) = 0.85 → k_base = 0.15/(0.85*k_scale*y_ss).
-                //
                 // k_scale: arousal-dependent multiplier on GABA_B strength.
-                // k_scale = 1.0 + 1.5 × (1.0 - arousal)
+                //   k_scale = 1.0 + 1.5 × (1.0 - arousal)
                 //   arousal=1.0 (focus)  → k_scale=1.0  (minimal GABA_B, high ACh)
                 //   arousal=0.5 (neutral) → k_scale=1.75 (moderate)
                 //   arousal=0.0 (sleep)   → k_scale=2.5  (maximal GABA_B, no ACh)
@@ -731,9 +726,14 @@ impl JansenRitModel {
                 //   ACh levels: wake=1.0, SWS=0.15 (Marrosu et al. 1995 microdialysis).
                 //   GABA_B conductance 2-3× higher in NREM vs wake (Steriade 1997).
                 //   NMM precedent: Bhatt et al. 2016 scale GABA_B 1.0→2.5 with arousal.
+                //
+                // k_base: calibrated so that at moderate arousal (0.5, k_scale=1.75),
+                //   A_eff/A ≈ 0.85 (15% gain reduction, modulatory not silencing).
+                //   Derived: 1/(1 + k*y_ss) = 0.85 → k = 0.15/(0.85*y_ss)
+                //   with k = k_scale * k_base.
                 let k_scale = 1.0 + 1.5 * (1.0 - self.arousal.clamp(0.0, 1.0));
                 let y_ss_est = (self.b_slow_gain * self.c_slow * 2.5 / self.b_slow_rate).max(1e-10);
-                let k_base = 0.15 / (0.85 * 1.75 * y_ss_est); // calibrated at arousal=0.5 (k_scale=1.75)
+                let k_base = 0.15 / (0.85 * 1.75 * y_ss_est); // calibrated at arousal=0.5
                 let k = k_scale * k_base;
                 1.0 / (1.0 + k * y_slow[0].max(0.0))
             } else {

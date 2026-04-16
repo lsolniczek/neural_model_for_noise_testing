@@ -130,31 +130,43 @@ impl ThalamicGate {
         let reverb_factor = 1.0 - avg_reverb; // high reverb → low factor → low arousal
 
         // 3. Modulation speed: fast modulation → high arousal
+        //    All active modulator types contribute to arousal.
+        //    Fast rhythmic input (isochronic, LFO, RandomPulse) signals
+        //    an alert, structured acoustic environment → higher arousal.
         let mut mod_speed_sum = 0.0;
         let mut mod_count = 0;
         for obj in &active_objects {
-            // NeuralLfo (kind 4): param_a is frequency
-            if obj.bass_mod.kind == 4 {
-                mod_speed_sum += (obj.bass_mod.param_a as f64).min(40.0) / 40.0;
-                mod_count += 1;
-            }
-            if obj.satellite_mod.kind == 4 {
-                mod_speed_sum += (obj.satellite_mod.param_a as f64).min(40.0) / 40.0;
-                mod_count += 1;
-            }
-            // Stochastic (kind 3): param_a is spike rate
-            if obj.bass_mod.kind == 3 {
-                mod_speed_sum += (obj.bass_mod.param_a as f64).min(10.0) / 10.0;
-                mod_count += 1;
-            }
-            if obj.satellite_mod.kind == 3 {
-                mod_speed_sum += (obj.satellite_mod.param_a as f64).min(10.0) / 10.0;
-                mod_count += 1;
-            }
-            // Breathing (kind 2) and SineLfo (kind 1): slow → low arousal
-            if obj.bass_mod.kind == 1 || obj.bass_mod.kind == 2 {
-                mod_speed_sum += 0.1; // very slow modulators
-                mod_count += 1;
+            for modulator in [&obj.bass_mod, &obj.satellite_mod] {
+                match modulator.kind {
+                    // NeuralLfo (kind 4): param_a is frequency in Hz
+                    4 => {
+                        mod_speed_sum += (modulator.param_a as f64).min(40.0) / 40.0;
+                        mod_count += 1;
+                    }
+                    // Isochronic (kind 5): param_a is frequency in Hz
+                    // Sharp ON/OFF transitions signal high alertness
+                    5 => {
+                        mod_speed_sum += (modulator.param_a as f64).min(40.0) / 40.0;
+                        mod_count += 1;
+                    }
+                    // RandomPulse (kind 6): param_a is rate in pulses/s
+                    // Unpredictable transients signal active environment
+                    6 => {
+                        mod_speed_sum += (modulator.param_a as f64).min(20.0) / 20.0;
+                        mod_count += 1;
+                    }
+                    // Stochastic (kind 3): param_a is spike rate
+                    3 => {
+                        mod_speed_sum += (modulator.param_a as f64).min(10.0) / 10.0;
+                        mod_count += 1;
+                    }
+                    // Breathing (kind 2) and SineLfo (kind 1): slow → low arousal
+                    1 | 2 => {
+                        mod_speed_sum += 0.1;
+                        mod_count += 1;
+                    }
+                    _ => {} // kind 0 (flat/none) — no contribution
+                }
             }
         }
         let mod_factor = if mod_count > 0 {
