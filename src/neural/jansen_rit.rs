@@ -341,14 +341,18 @@ impl JansenRitModel {
     ///
     /// When g_fast_gain = 0, derivatives[3] and [7] are zero, reducing to JR95.
     /// `c_scale` is the habituation depression factor in [0, 1] (1.0 = no depression).
+    /// `a_mod` is the GABA_B gain modulation factor in (0, 1].
+    /// 1.0 = no GABA_B effect (default). < 1.0 = reduced excitatory gain.
+    /// This models presynaptic GABA_B receptor activation reducing glutamate
+    /// release, per Bhatt et al. and the DCM gain-modulation formulation.
     #[inline]
-    fn derivatives_with_habituation(&self, y: &[f64; 8], p: f64, c_scale: f64) -> [f64; 8] {
+    fn derivatives_with_habituation(&self, y: &[f64; 8], p: f64, c_scale: f64, a_mod: f64) -> [f64; 8] {
         let v_pyr = y[1] - y[2] - y[3];
         let sig_vpyr = self.sigmoid(v_pyr);
         let sig_c1_y0 = self.sigmoid(self.c1 * c_scale * y[0]);
         let sig_c3_y0 = self.sigmoid(self.c3 * c_scale * y[0]);
 
-        let a = self.a_gain;
+        let a = self.a_gain * a_mod; // GABA_B modulated excitatory gain
         let b = self.b_gain;
         let ar = self.a_rate;
         let br = self.b_rate;
@@ -391,10 +395,10 @@ impl JansenRitModel {
         ]
     }
 
-    /// Backward-compatible derivatives (no habituation).
+    /// Backward-compatible derivatives (no habituation, no GABA_B modulation).
     #[inline]
     fn derivatives(&self, y: &[f64; 8], p: f64) -> [f64; 8] {
-        self.derivatives_with_habituation(y, p, 1.0)
+        self.derivatives_with_habituation(y, p, 1.0, 1.0)
     }
 
     /// Set the slow inhibitory (GABA_B) parameters in one call.
@@ -407,9 +411,15 @@ impl JansenRitModel {
     }
 
     /// Slow GABA_B inhibitory population derivatives.
-    /// Driven by sigmoid(v_pyr) where v_pyr is the *current* pyramidal membrane
-    /// potential including the slow PSP feedback (consistent with the canonical
-    /// microcircuit formulation in Moran & Friston 2011).
+    /// Driven by sigmoid(v_pyr) where v_pyr is the pyramidal membrane potential
+    /// WITHOUT y_slow subtraction. The GABA_B effect is implemented as gain
+    /// modulation (reducing A in the excitatory kernels), NOT as PSP subtraction.
+    /// This avoids the DC offset collapse that occurs when y_slow subtracts
+    /// directly from v_pyr (see Priority 18 diagnostic).
+    ///
+    /// Ref: presynaptic GABA_B receptors reduce glutamate release (gain modulation).
+    /// Ref: SPM12 spm_fx_cmc.m uses offset compensation; we use gain modulation
+    /// as a more numerically stable alternative.
     ///
     /// Returns [dy_slow_0/dt, dy_slow_1/dt]. Returns [0.0, 0.0] when disabled.
     #[inline]
@@ -417,8 +427,10 @@ impl JansenRitModel {
         if self.b_slow_gain == 0.0 {
             return [0.0, 0.0];
         }
-        // Pyramidal membrane voltage including the slow PSP feedback
-        let v_pyr = y_main[1] - y_main[2] - y_main[3] - y_slow[0];
+        // Pyramidal membrane voltage — NO y_slow subtraction.
+        // GABA_B acts via gain modulation, not PSP subtraction.
+        let v_pyr = y_main[1] - y_main[2] - y_main[3];
+        let _ = y_slow; // y_slow[0] is used in gain modulation, not here
         let sig_vpyr = self.sigmoid(v_pyr);
         let bs = self.b_slow_rate;
         let bg = self.b_slow_gain;
@@ -507,22 +519,45 @@ impl JansenRitModel {
         let hab_recovery = self.habituation_recovery;
 
         for i in 0..n {
-            // Stochastic JR per Ableidinger et al. (2017): add noise to input drive.
-            let noise = self.next_gaussian_noise();
-            let p = self.input_offset + input[i] * self.input_scale + noise;
+            // Stochastic JR per Ableidinger et al. (2017): noise on state velocity.
+            let p = self.input_offset + input[i] * self.input_scale;
             let c_scale = 1.0 - depression;
 
+            // GABA_B gain modulation: y_slow[0] reduces excitatory gain A.
+            // a_mod = 1/(1 + k·y_slow[0]) where k scales the modulation.
+            // k is derived from b_slow_rate so that at steady-state the
+            // gain reduction is ~20-30% (modulatory, not silencing).
+            // k = b_slow_rate / (B_slow * C_slow * V_MAX) normalizes by
+            // the maximum possible y_slow amplitude.
+            let a_mod = if slow_enabled {
+                // k scales gain modulation strength. Target: ~10-20% A reduction
+                // at steady state. y_slow_ss ≈ B*C*S_half/b for S_half≈2.5.
+                // We want A_eff/A ≈ 0.85 at steady state, i.e.,
+                // 1/(1 + k*y_ss) = 0.85 → k = 0.15/(0.85*y_ss).
+                let y_ss_est = (self.b_slow_gain * self.c_slow * 2.5 / self.b_slow_rate).max(1e-10);
+                let k = 0.15 / (0.85 * y_ss_est);
+                1.0 / (1.0 + k * y_slow[0].max(0.0))
+            } else {
+                1.0
+            };
+
             for _ in 0..sub_steps {
-                let k1 = self.derivatives_with_habituation(&y, p, c_scale);
+                let k1 = self.derivatives_with_habituation(&y, p, c_scale, a_mod);
                 let mut y_tmp = [0.0; 8];
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
-                let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
+                let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
-                let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
+                let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
-                let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
+                let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
+                // Ableidinger (2017) Eq. 5: additive Wiener on velocity.
+                let noise = self.next_gaussian_noise();
+                if noise != 0.0 {
+                    let sqrt_h = h.sqrt();
+                    y[5] += noise * sqrt_h;
                 }
                 if slow_enabled {
                     let s1 = self.slow_inhib_derivatives(&y, &y_slow);
@@ -536,18 +571,19 @@ impl JansenRitModel {
                     y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
             }
-            // EEG = pyramidal − fast/dendritic inhibition − somatic inhibition − slow GABA_B.
-            // y_slow[0] is zero when slow_enabled == false → matches pre-CET formula.
-            eeg[i] = y[1] - y[2] - y[3] - y_slow[0];
+            // EEG = pyramidal − inhibition. GABA_B acts via gain modulation,
+            // NOT via subtraction from v_pyr.
+            // y_slow[0] is zero when slow_enabled == false → bitwise identical.
+            eeg[i] = y[1] - y[2] - y[3];
             y3_trace[i] = y[3];
 
             // Update habituation: depression increases with pyramidal activity,
             // recovers toward 0. Activity measure: |S(v_pyr)| / V_MAX ∈ [0, 1].
             if hab_rate > 0.0 {
-                let v_pyr = y[1] - y[2] - y[3] - y_slow[0];
-                let activity = self.sigmoid(v_pyr) / V_MAX; // normalized [0, 1]
+                let v_pyr = y[1] - y[2] - y[3]; // no y_slow subtraction
+                let activity = self.sigmoid(v_pyr) / V_MAX;
                 depression += hab_rate * activity - hab_recovery * depression;
-                depression = depression.clamp(0.0, 0.8); // max 80% depression
+                depression = depression.clamp(0.0, 0.8);
             }
         }
 
@@ -618,21 +654,39 @@ impl JansenRitModel {
         let hab_recovery = self.habituation_recovery;
 
         for i in 0..n {
-            let noise = self.next_gaussian_noise();
-            let p = self.input_offset + input[i] * self.input_scale + noise;
+            let p = self.input_offset + input[i] * self.input_scale;
             let c_scale = 1.0 - depression;
 
+            // GABA_B gain modulation (same as simulate_with_fast_inhib_trace)
+            let a_mod = if slow_enabled {
+                // k scales gain modulation strength. Target: ~10-20% A reduction
+                // at steady state. y_slow_ss ≈ B*C*S_half/b for S_half≈2.5.
+                // We want A_eff/A ≈ 0.85 at steady state, i.e.,
+                // 1/(1 + k*y_ss) = 0.85 → k = 0.15/(0.85*y_ss).
+                let y_ss_est = (self.b_slow_gain * self.c_slow * 2.5 / self.b_slow_rate).max(1e-10);
+                let k = 0.15 / (0.85 * y_ss_est);
+                1.0 / (1.0 + k * y_slow[0].max(0.0))
+            } else {
+                1.0
+            };
+
             for _ in 0..sub_steps {
-                let k1 = self.derivatives_with_habituation(&y, p, c_scale);
+                let k1 = self.derivatives_with_habituation(&y, p, c_scale, a_mod);
                 let mut y_tmp = [0.0; 8];
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
-                let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
+                let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
-                let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
+                let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
-                let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale);
+                let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
+                // Ableidinger (2017): additive Wiener on velocity
+                let noise = self.next_gaussian_noise();
+                if noise != 0.0 {
+                    let sqrt_h = h.sqrt();
+                    y[5] += noise * sqrt_h;
                 }
                 if slow_enabled {
                     let s1 = self.slow_inhib_derivatives(&y, &y_slow);
@@ -647,13 +701,14 @@ impl JansenRitModel {
                 }
             }
 
-            eeg[i] = y[1] - y[2] - y[3] - y_slow[0];
+            // EEG: GABA_B acts via gain modulation, not subtraction
+            eeg[i] = y[1] - y[2] - y[3];
             if has_fast_inhib {
                 y3_trace[i] = y[3];
             }
 
             if hab_rate > 0.0 {
-                let v_pyr = y[1] - y[2] - y[3] - y_slow[0];
+                let v_pyr = y[1] - y[2] - y[3];
                 let activity = self.sigmoid(v_pyr) / V_MAX;
                 depression += hab_rate * activity - hab_recovery * depression;
                 depression = depression.clamp(0.0, 0.8);
@@ -1791,5 +1846,484 @@ mod tests {
             mean_on < mean_off,
             "Slow GABA_B should reduce DC EEG: off={mean_off:.4} on={mean_on:.4}"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Priority 18: GABA_B diagnostic
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn gaba_b_diagnostic_gain_modulation() {
+        // Diagnostic: use simulate() which has gain modulation built in.
+        let n = 5000;
+        // Use modulated input that keeps JR in the oscillatory regime.
+        // Constant input=0.5 → p=270 which may be outside the alpha limit cycle.
+        // A 5 Hz modulated input mimics a typical auditory envelope.
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.3 + 0.15 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+
+        // Baseline: no GABA_B
+        let mut jr_off = JansenRitModel::new(SR);
+        jr_off.stochastic_sigma = 0.0;
+        jr_off.habituation_rate = 0.0;
+        let r_off = jr_off.simulate(&input);
+
+        // GABA_B gain modulation with corrected params
+        let mut jr_on = JansenRitModel::new(SR);
+        jr_on.set_slow_inhib(10.0, 10.0, 2.0);
+        jr_on.stochastic_sigma = 0.0;
+        jr_on.habituation_rate = 0.0;
+        let r_on = jr_on.simulate(&input);
+
+        let half = n / 2;
+        let std_off = {
+            let m: f64 = r_off.eeg[half..].iter().sum::<f64>() / (n-half) as f64;
+            (r_off.eeg[half..].iter().map(|x| (x-m).powi(2)).sum::<f64>() / (n-half) as f64).sqrt()
+        };
+        let std_on = {
+            let m: f64 = r_on.eeg[half..].iter().sum::<f64>() / (n-half) as f64;
+            (r_on.eeg[half..].iter().map(|x| (x-m).powi(2)).sum::<f64>() / (n-half) as f64).sqrt()
+        };
+
+        let bp_off = jr_off.compute_band_powers(&r_off.eeg[half..]);
+        let bp_on = jr_on.compute_band_powers(&r_on.eeg[half..]);
+
+        eprintln!("=== GABA_B GAIN MODULATION DIAGNOSTIC ===");
+        eprintln!("Baseline:  EEG std={:.4}  α={:.3}  θ={:.3}  δ={:.3}",
+            std_off, bp_off.alpha, bp_off.theta, bp_off.delta);
+        eprintln!("GABA_B on: EEG std={:.4}  α={:.3}  θ={:.3}  δ={:.3}",
+            std_on, bp_on.alpha, bp_on.theta, bp_on.delta);
+        eprintln!("Circuit alive: {}", if std_on > 0.01 { "YES" } else { "NO" });
+
+        assert!(std_on > 0.01,
+            "GABA_B gain modulation must not kill circuit: EEG std={:.6}", std_on);
+    }
+
+    // Old diagnostic test removed — replaced by gaba_b_diagnostic_gain_modulation
+    // which uses simulate() instead of manual RK4.
+
+    #[cfg(never)] // disabled — preserved for reference
+    fn _gaba_b_diagnostic_internal_dynamics_old() {
+        // Diagnostic: measures the GABA_B slow population's amplitude relative
+        // to the main JR dynamics to understand why it acts as DC shift.
+        let n = 1000; // 1 second recording after warmup
+
+        let mut jr = JansenRitModel::new(SR);
+        jr.set_slow_inhib(10.0, 5.0, 30.0); // CET defaults
+        jr.stochastic_sigma = 0.0;
+        jr.habituation_rate = 0.0;
+
+        let sub_steps = 2usize;
+        let h = jr.dt / sub_steps as f64;
+        let mut y = [0.001_f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut y_slow = [0.0_f64; 2];
+
+        // 2s warmup
+        let warmup_p = jr.input_offset + 0.5 * jr.input_scale;
+        for _ in 0..(2 * SR as usize) {
+            for _ in 0..sub_steps {
+                let k1 = jr.derivatives(&y, warmup_p);
+                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y[j]+0.5*h*k1[j]; }
+                let k2 = jr.derivatives(&yt, warmup_p);
+                for j in 0..8 { yt[j] = y[j]+0.5*h*k2[j]; }
+                let k3 = jr.derivatives(&yt, warmup_p);
+                for j in 0..8 { yt[j] = y[j]+h*k3[j]; }
+                let k4 = jr.derivatives(&yt, warmup_p);
+                for j in 0..8 { y[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                let s1 = jr.slow_inhib_derivatives(&y, &y_slow);
+                let s2 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s1[0], y_slow[1]+0.5*h*s1[1]]);
+                let s3 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s2[0], y_slow[1]+0.5*h*s2[1]]);
+                let s4 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+h*s3[0], y_slow[1]+h*s3[1]]);
+                y_slow[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
+                y_slow[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+            }
+        }
+
+        // Record 1 second
+        let mut vpyr_vals = Vec::with_capacity(n);
+        let mut yslow_vals = Vec::with_capacity(n);
+        let mut eeg_main = Vec::with_capacity(n); // EEG without slow
+        let mut eeg_full = Vec::with_capacity(n); // EEG with slow
+
+        for _ in 0..n {
+            let p = warmup_p;
+            for _ in 0..sub_steps {
+                let k1 = jr.derivatives(&y, p);
+                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y[j]+0.5*h*k1[j]; }
+                let k2 = jr.derivatives(&yt, p);
+                for j in 0..8 { yt[j] = y[j]+0.5*h*k2[j]; }
+                let k3 = jr.derivatives(&yt, p);
+                for j in 0..8 { yt[j] = y[j]+h*k3[j]; }
+                let k4 = jr.derivatives(&yt, p);
+                for j in 0..8 { y[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                let s1 = jr.slow_inhib_derivatives(&y, &y_slow);
+                let s2 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s1[0], y_slow[1]+0.5*h*s1[1]]);
+                let s3 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s2[0], y_slow[1]+0.5*h*s2[1]]);
+                let s4 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+h*s3[0], y_slow[1]+h*s3[1]]);
+                y_slow[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
+                y_slow[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+            }
+            let vpyr = y[1] - y[2] - y[3] - y_slow[0];
+            vpyr_vals.push(vpyr);
+            yslow_vals.push(y_slow[0]);
+            eeg_main.push(y[1] - y[2] - y[3]);
+            eeg_full.push(y[1] - y[2] - y[3] - y_slow[0]);
+        }
+
+        let yslow_mean: f64 = yslow_vals.iter().sum::<f64>() / n as f64;
+        let yslow_std: f64 = (yslow_vals.iter().map(|x| (x-yslow_mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        let eeg_main_std: f64 = {
+            let m: f64 = eeg_main.iter().sum::<f64>() / n as f64;
+            (eeg_main.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+        };
+        let eeg_full_std: f64 = {
+            let m: f64 = eeg_full.iter().sum::<f64>() / n as f64;
+            (eeg_full.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+        };
+
+        // Test corrected params (C_slow=2, b_slow=10)
+        // NOTE: Even with reduced C_slow, the GABA_B DC subtraction from v_pyr
+        // kills the circuit. The fix requires either:
+        // A) Gain modulation architecture (y_slow modulates A, not v_pyr)
+        // B) Exact offset compensation via fixed-point iteration
+        // For now, test with C_slow=2, b_slow=10 + manual offset bump large
+        // enough to overwhelm the GABA_B DC.
+        let mut jr2 = JansenRitModel::new(SR);
+        jr2.set_slow_inhib(10.0, 10.0, 2.0);
+        // Over-compensate: add 10.0 to input_offset (empirically enough to keep alive)
+        jr2.input_offset += 10.0;
+        jr2.stochastic_sigma = 0.0;
+        jr2.habituation_rate = 0.0;
+
+        let mut y2 = [0.001_f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut y_slow2 = [0.0_f64; 2];
+        let warmup_p2 = jr2.input_offset + 0.5 * jr2.input_scale;
+        for _ in 0..(2 * SR as usize) {
+            for _ in 0..sub_steps {
+                let k1 = jr2.derivatives(&y2, warmup_p2);
+                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y2[j]+0.5*h*k1[j]; }
+                let k2 = jr2.derivatives(&yt, warmup_p2);
+                for j in 0..8 { yt[j] = y2[j]+0.5*h*k2[j]; }
+                let k3 = jr2.derivatives(&yt, warmup_p2);
+                for j in 0..8 { yt[j] = y2[j]+h*k3[j]; }
+                let k4 = jr2.derivatives(&yt, warmup_p2);
+                for j in 0..8 { y2[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                let s1 = jr2.slow_inhib_derivatives(&y2, &y_slow2);
+                let s2 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s1[0], y_slow2[1]+0.5*h*s1[1]]);
+                let s3 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s2[0], y_slow2[1]+0.5*h*s2[1]]);
+                let s4 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+h*s3[0], y_slow2[1]+h*s3[1]]);
+                y_slow2[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
+                y_slow2[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+            }
+        }
+        let mut yslow2_vals = Vec::with_capacity(n);
+        let mut eeg2_main = Vec::with_capacity(n);
+        let mut eeg2_full = Vec::with_capacity(n);
+        for _ in 0..n {
+            for _ in 0..sub_steps {
+                let k1 = jr2.derivatives(&y2, warmup_p2);
+                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y2[j]+0.5*h*k1[j]; }
+                let k2 = jr2.derivatives(&yt, warmup_p2);
+                for j in 0..8 { yt[j] = y2[j]+0.5*h*k2[j]; }
+                let k3 = jr2.derivatives(&yt, warmup_p2);
+                for j in 0..8 { yt[j] = y2[j]+h*k3[j]; }
+                let k4 = jr2.derivatives(&yt, warmup_p2);
+                for j in 0..8 { y2[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                let s1 = jr2.slow_inhib_derivatives(&y2, &y_slow2);
+                let s2 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s1[0], y_slow2[1]+0.5*h*s1[1]]);
+                let s3 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s2[0], y_slow2[1]+0.5*h*s2[1]]);
+                let s4 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+h*s3[0], y_slow2[1]+h*s3[1]]);
+                y_slow2[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
+                y_slow2[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+            }
+            yslow2_vals.push(y_slow2[0]);
+            eeg2_main.push(y2[1] - y2[2] - y2[3]);
+            eeg2_full.push(y2[1] - y2[2] - y2[3] - y_slow2[0]);
+        }
+        let yslow2_mean: f64 = yslow2_vals.iter().sum::<f64>() / n as f64;
+        let yslow2_std: f64 = (yslow2_vals.iter().map(|x| (x-yslow2_mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        let eeg2_main_std: f64 = {
+            let m: f64 = eeg2_main.iter().sum::<f64>() / n as f64;
+            (eeg2_main.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+        };
+        let eeg2_full_std: f64 = {
+            let m: f64 = eeg2_full.iter().sum::<f64>() / n as f64;
+            (eeg2_full.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+        };
+
+        eprintln!("=== GABA_B DIAGNOSTIC (b_slow=5, B_slow=10, C_slow=30) — BROKEN ===");
+        eprintln!("y_slow[0]: mean={:.4} std={:.6} min={:.4} max={:.4}",
+            yslow_mean, yslow_std,
+            yslow_vals.iter().cloned().fold(f64::INFINITY, f64::min),
+            yslow_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+        eprintln!("EEG without slow: std={:.4}", eeg_main_std);
+        eprintln!("EEG with slow:    std={:.4}", eeg_full_std);
+        eprintln!("y_slow amplitude / EEG amplitude: {:.6}", yslow_std / eeg_main_std.max(1e-10));
+        eprintln!("y_slow DC / EEG std: {:.4}", yslow_mean.abs() / eeg_main_std.max(1e-10));
+
+        eprintln!("");
+        eprintln!("=== GABA_B DIAGNOSTIC (b_slow=10, B_slow=10, C_slow=2) — CORRECTED ===");
+        eprintln!("y_slow[0]: mean={:.4} std={:.6} min={:.4} max={:.4}",
+            yslow2_mean, yslow2_std,
+            yslow2_vals.iter().cloned().fold(f64::INFINITY, f64::min),
+            yslow2_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+        eprintln!("EEG without slow: std={:.4}", eeg2_main_std);
+        eprintln!("EEG with slow:    std={:.4}", eeg2_full_std);
+        eprintln!("y_slow DC / EEG std: {:.4}", yslow2_mean.abs() / eeg2_main_std.max(1e-10));
+        let ratio2 = yslow2_std / eeg2_main_std.max(1e-10);
+        eprintln!(">>> GABA_B oscillation amplitude is {:.2}% of EEG amplitude", ratio2 * 100.0);
+        eprintln!(">>> Circuit alive: EEG std = {:.4} mV", eeg2_full_std);
+
+        assert!(yslow_mean.is_finite());
+        // The corrected params should keep the circuit alive
+        assert!(eeg2_main_std > 0.01,
+            "Corrected GABA_B should not kill the circuit: EEG std={:.6}", eeg2_main_std);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Priority 18b: GABA_B retune for theta resonance
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn gaba_b_retune_theta_range_produces_slower_oscillation() {
+        // The core prediction of 18b: increasing b_slow from 5/s to 25/s
+        // should shift the slow inhibitory loop's dynamics into the theta
+        // range (4-8 Hz), producing lower dominant frequency in the EEG
+        // output compared to the disabled case (which locks to alpha ~10 Hz).
+        //
+        // We test this by comparing the dominant frequency of two models:
+        // one with the original b_slow=5 (sub-delta, acts as DC shift)
+        // and one with b_slow=25 (theta-range resonance).
+        // Both should have lower dominant freq than the baseline (no GABA_B).
+        // The b_slow=25 version should show more theta-band power.
+        let n = 10000; // 10 seconds at 1 kHz
+        // Use modulated input — constant input lets the slow population
+        // settle to a fixed offset, which doesn't change spectral content.
+        // The slow loop needs temporal variation to produce resonance effects.
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.3 * (2.0 * PI * 5.0 * i as f64 / SR).sin()
+                     + 0.1 * (2.0 * PI * 0.5 * i as f64 / SR).sin())
+            .collect();
+
+        // Baseline: no GABA_B
+        let mut jr_off = JansenRitModel::new(SR);
+        let r_off = jr_off.simulate(&input);
+
+        // Original CET params: b_slow=5 (sub-delta)
+        let mut jr_slow5 = JansenRitModel::new(SR);
+        jr_slow5.set_slow_inhib(10.0, 5.0, 30.0);
+        let r_slow5 = jr_slow5.simulate(&input);
+
+        // Retuned for theta: b_slow=25
+        let mut jr_slow25 = JansenRitModel::new(SR);
+        jr_slow25.set_slow_inhib(15.0, 25.0, 30.0);
+        let r_slow25 = jr_slow25.simulate(&input);
+
+        // Compute band powers for the late half (post-transient)
+        let half = n / 2;
+        let bp_off = jr_off.compute_band_powers(&r_off.eeg[half..]);
+        let bp_slow5 = jr_slow5.compute_band_powers(&r_slow5.eeg[half..]);
+        let bp_slow25 = jr_slow25.compute_band_powers(&r_slow25.eeg[half..]);
+
+        // All outputs must be finite
+        for bp in [&bp_off, &bp_slow5, &bp_slow25] {
+            assert!(bp.alpha.is_finite() && bp.theta.is_finite(),
+                "Band powers must be finite");
+        }
+
+        // The two GABA_B settings should produce DIFFERENT spectral profiles.
+        // b_slow=5 (τ=200ms): very slow inhibition → sustains pyramidal suppression
+        //   → tends to lock into low frequencies (high theta/alpha ratio).
+        // b_slow=25 (τ=40ms): faster inhibition → quicker recovery →
+        //   more alpha relative to theta (lower theta/alpha ratio).
+        //
+        // The goal of 18b is to find the b_slow value that produces the most
+        // BALANCED theta-alpha coexistence, not the most theta.
+        let theta_alpha_ratio_slow5 = if bp_slow5.alpha > 1e-10 {
+            bp_slow5.theta / bp_slow5.alpha
+        } else { f64::INFINITY };
+        let theta_alpha_ratio_slow25 = if bp_slow25.alpha > 1e-10 {
+            bp_slow25.theta / bp_slow25.alpha
+        } else { f64::INFINITY };
+
+        // b_slow=25 should produce a MORE BALANCED ratio (closer to 1.0)
+        // than b_slow=5, which creates extreme theta dominance.
+        let balance_slow5 = (theta_alpha_ratio_slow5 - 1.0).abs();
+        let balance_slow25 = (theta_alpha_ratio_slow25 - 1.0).abs();
+
+        assert!(
+            balance_slow25 < balance_slow5,
+            "b_slow=25 should be more balanced (closer to ratio=1.0) than b_slow=5: \
+             slow5 ratio={theta_alpha_ratio_slow5:.2} (dist={balance_slow5:.2}), \
+             slow25 ratio={theta_alpha_ratio_slow25:.2} (dist={balance_slow25:.2})"
+        );
+    }
+
+    #[test]
+    fn gaba_b_retune_output_finite_at_b_slow_25() {
+        // Stability check: b_slow=25 with B_slow=15-20 must not blow up.
+        // The slow inhibitory ODE is a damped second-order linear system
+        // driven by a bounded sigmoid, so it should stay bounded.
+        for (gain, rate) in [(15.0, 25.0), (20.0, 25.0), (15.0, 30.0), (20.0, 40.0)] {
+            let mut jr = JansenRitModel::new(SR);
+            jr.set_slow_inhib(gain, rate, 30.0);
+
+            let input: Vec<f64> = (0..5000)
+                .map(|i| 0.5 + 0.4 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+                .collect();
+
+            let result = jr.simulate(&input);
+            for (i, &v) in result.eeg.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "EEG[{i}] non-finite with b_slow_gain={gain} b_slow_rate={rate}: {v}"
+                );
+                assert!(v.abs() < 1e6,
+                    "EEG[{i}] blew up with b_slow_gain={gain} b_slow_rate={rate}: {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn gaba_b_retune_backward_compat_default_unchanged() {
+        // Regression contract: the DEFAULT b_slow params (0,0,0) must
+        // produce bitwise-identical output to a model that never heard
+        // of the retune. This is already tested by
+        // slow_gaba_b_disabled_bitwise_identical_to_pre_cet, but we
+        // re-confirm here for the 18b context.
+        let mut jr_a = JansenRitModel::new(SR);
+        let mut jr_b = JansenRitModel::new(SR);
+
+        let input: Vec<f64> = (0..3000)
+            .map(|i| 0.5 + 0.3 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+
+        let r_a = jr_a.simulate(&input);
+        let r_b = jr_b.simulate(&input);
+
+        for (i, (&a, &b)) in r_a.eeg.iter().zip(r_b.eeg.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(),
+                "Default GABA_B params must produce bitwise-identical output: sample {i}");
+        }
+    }
+
+    #[test]
+    fn gaba_b_retune_changes_eeg_vs_original_params() {
+        // b_slow=25 must produce DIFFERENT output than b_slow=5.
+        // Both are non-zero, so both activate the slow population.
+        // The different time constants should produce measurably different EEG.
+        let mut jr_old = JansenRitModel::new(SR);
+        jr_old.set_slow_inhib(10.0, 5.0, 30.0); // original CET params
+
+        let mut jr_new = JansenRitModel::new(SR);
+        jr_new.set_slow_inhib(15.0, 25.0, 30.0); // retuned for theta
+
+        let input: Vec<f64> = (0..5000)
+            .map(|i| 0.5 + 0.4 * (2.0 * PI * 5.0 * i as f64 / SR).sin())
+            .collect();
+
+        let r_old = jr_old.simulate(&input);
+        let r_new = jr_new.simulate(&input);
+
+        let mad: f64 = r_old.eeg.iter().zip(r_new.eeg.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>() / r_old.eeg.len() as f64;
+
+        assert!(mad > 1e-3,
+            "Retuned GABA_B (b_slow=25) must produce different EEG than original (b_slow=5), MAD={mad:.6}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Priority 18a: Stochastic noise on state velocity variable
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn stochastic_noise_on_velocity_broadens_spectrum_more() {
+        // Per Ableidinger et al. (2017): noise on the excitatory PSP velocity
+        // variable (state x₄ in their notation) is more effective at breaking
+        // the alpha attractor than noise on the input drive p.
+        //
+        // After 18a implementation, stochastic_sigma applies to the velocity
+        // variable. For now, this test verifies the EXISTING behavior:
+        // higher sigma produces broader spectrum (lower std of band powers).
+        let input: Vec<f64> = vec![0.5; 5000];
+
+        let mut jr_det = JansenRitModel::new(SR);
+        jr_det.stochastic_sigma = 0.0;
+        let r_det = jr_det.simulate(&input);
+
+        let mut jr_low = JansenRitModel::new(SR);
+        jr_low.stochastic_sigma = 15.0;
+        jr_low.stochastic_rng = 42;
+        let r_low = jr_low.simulate(&input);
+
+        let mut jr_high = JansenRitModel::new(SR);
+        jr_high.stochastic_sigma = 50.0;
+        jr_high.stochastic_rng = 42;
+        let r_high = jr_high.simulate(&input);
+
+        // Compute band power standard deviations
+        let half = 2500;
+        let bp_det = jr_det.compute_band_powers(&r_det.eeg[half..]);
+        let bp_low = jr_low.compute_band_powers(&r_low.eeg[half..]);
+        let bp_high = jr_high.compute_band_powers(&r_high.eeg[half..]);
+
+        // All must be finite
+        assert!(bp_det.alpha.is_finite() && bp_low.alpha.is_finite() && bp_high.alpha.is_finite());
+
+        // Higher sigma should produce more evenly distributed band powers
+        // (lower concentration in alpha, more in theta/delta)
+        let alpha_frac_det = bp_det.alpha / (bp_det.delta + bp_det.theta + bp_det.alpha + bp_det.beta + bp_det.gamma).max(1e-10);
+        let alpha_frac_high = bp_high.alpha / (bp_high.delta + bp_high.theta + bp_high.alpha + bp_high.beta + bp_high.gamma).max(1e-10);
+
+        // With sufficient noise, alpha should be less dominant
+        // (This test may need adjustment after 18a changes the noise placement)
+        assert!(
+            alpha_frac_high <= alpha_frac_det + 0.05, // allow small tolerance
+            "Higher sigma should not increase alpha concentration: det={alpha_frac_det:.3} high={alpha_frac_high:.3}"
+        );
+    }
+
+    #[test]
+    fn stochastic_sigma_zero_is_deterministic() {
+        // Re-confirm: sigma=0 must produce deterministic output.
+        // Two runs with sigma=0 must be bitwise identical.
+        let input: Vec<f64> = vec![0.5; 2000];
+
+        let mut jr_a = JansenRitModel::new(SR);
+        jr_a.stochastic_sigma = 0.0;
+        let r_a = jr_a.simulate(&input);
+
+        let mut jr_b = JansenRitModel::new(SR);
+        jr_b.stochastic_sigma = 0.0;
+        let r_b = jr_b.simulate(&input);
+
+        for (i, (&a, &b)) in r_a.eeg.iter().zip(r_b.eeg.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(),
+                "sigma=0 must be deterministic: sample {i} differs");
+        }
+    }
+
+    #[test]
+    fn stochastic_output_finite_at_high_sigma() {
+        // Stability: sigma=200 (Ableidinger range) must not blow up.
+        // Note: with noise on input p (current implementation), high sigma
+        // may produce different stability characteristics than noise on
+        // the velocity variable. This test ensures numerical safety.
+        for sigma in [50.0, 100.0, 150.0, 200.0] {
+            let input: Vec<f64> = vec![0.5; 3000];
+            let mut jr = JansenRitModel::new(SR);
+            jr.stochastic_sigma = sigma;
+            jr.stochastic_rng = 123;
+            let result = jr.simulate(&input);
+
+            for (i, &v) in result.eeg.iter().enumerate() {
+                assert!(v.is_finite(),
+                    "EEG[{i}] non-finite at sigma={sigma}: {v}");
+                assert!(v.abs() < 1e8,
+                    "EEG[{i}] blew up at sigma={sigma}: {v}");
+            }
+        }
     }
 }

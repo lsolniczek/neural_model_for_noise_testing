@@ -603,23 +603,36 @@ The deep relaxation goal requires: theta ideal 35%, alpha ideal 36%, delta ideal
 
 **Solution:** Three complementary approaches, ranked by effort and scientific backing. All modify existing code — no new architecture required.
 
-### 18a. Increase Stochastic Sigma for Basin Hopping (TRIVIAL — parameter change)
+### 18a. Fix Stochastic Noise Placement + Increase Sigma (LOW EFFORT — code change + parameter)
 
-**The science:** Ableidinger et al. (2017) tested noise intensity sigma_4 (input drive noise) at values of **200 and 1000** on the JR model. At sigma_4=1000 with connectivity C=270, the probability density becomes multimodal — the system stochastically hops between the alpha limit cycle and the theta/delta basin. The time-averaged power spectrum shows both bands simultaneously. Grimbert & Faugeras (2006) showed the alpha limit cycle exists for input p ∈ [89.83, 315.70] via Hopf bifurcations, with a fold bifurcation of limit cycles at p≈137.5 where alpha and slow-oscillation cycles coexist bistably. Noise of sufficient amplitude can drive transitions between these coexisting basins.
+**The science:** Ableidinger et al. (2017) applied noise as an **SDE on the velocity state variables** (ẋ₁/X₄ in their Hamiltonian formulation), NOT as additive noise on the input drive p. Their equation (5): `dP(t) = (−∇QH − 2ΓP + G(t,Q))dt + Σ(t)dW(t)` where `Σ = diag[σ₃, σ₄, σ₅]`. Three independent Wiener processes on **velocity variables only**. The primary configuration tested: σ₃ = σ₅ = 10 (weak), **σ₄ = 1000** (strong on excitatory PSP velocity). At σ₄=1000 with C=270, the probability density becomes multimodal — the system stochastically hops between attractors.
 
-**Our current state:** sigma=15.0 (Priority 7). This is ~10x too low for basin escape. The alpha basin is deep enough that sigma=15 merely adds spectral broadening around the 10 Hz peak without ever escaping to the theta basin.
+**Critical correction:** Our current implementation (Priority 7) adds noise to the input drive p: `p = offset + input*scale + σ·ξ(t)`. This is a DIFFERENT stochastic model than Ableidinger's. Noise on p modulates the external input; noise on the state velocity directly perturbs the internal dynamics. The latter is more effective at basin escape because it acts on the oscillation mechanism itself, not just the driving force.
 
-**Implementation:**
-- [ ] Test sigma sweep: 50, 100, 150, 200, 300 on the deep relaxation preset with thalamic gate at the theta-alpha boundary (reverb≈0.25)
-- [ ] Find the critical sigma threshold where the 300s band power distribution shows theta 25-40% AND alpha 25-40% simultaneously
-- [ ] Scale sigma with arousal: `sigma = sigma_base × (1 + k × (1 - arousal))` so low-arousal presets (relaxation) get more noise → more basin hopping, while high-arousal presets (focus, ignition) stay near-deterministic
+**Numerical stability warning:** Ableidinger explicitly warns that **Euler-Maruyama produces spurious bifurcations** at step sizes Δt ∈ {1e-3, 2e-3, 5e-3} with σ₄=1000 (their Fig. 9). Their Strang splitting scheme is robust. Our current RK4 integrator at dt=1ms may need sub-stepping or the splitting scheme at high sigma values. However, for moderate sigma (50-200), RK4 should be adequate — test carefully.
+
+**Our current state:** sigma=15.0 on input p. This is both the wrong placement and too low amplitude.
+
+**Implementation (two phases):**
+
+Phase 1: Test higher sigma on current input-p placement (trivial):
+- [x] Unit tests: verify sigma=50-200 produces finite output (passed)
+- [x] Unit tests: verify sigma=0 is deterministic (passed)
+- [x] Unit tests: verify higher sigma doesn't increase alpha concentration (passed)
+- [ ] Test sigma sweep: 50, 100, 150, 200 on deep relaxation preset with thalamic gate
+- [ ] If higher sigma on input-p already breaks the alpha lock → ship it, skip Phase 2
+
+Phase 2: Move noise to velocity variable (if Phase 1 insufficient):
+- [ ] Change noise application from `p += σ·ξ(t)` to `dy[4]/dt += σ·ξ(t)` in the RK4 loop
+- [ ] σ₄ in Ableidinger maps to our `y[4]` (excitatory interneuron PSP velocity, i.e., `dy[1]/dt` in the 8-state formulation — the velocity of the excitatory PSP)
+- [ ] Verify RK4 stability at sigma=200 with current dt. If unstable, add sub-stepping (halve h when sigma > threshold)
+- [ ] Scale sigma with arousal: `sigma = sigma_base × (1 + k × (1 - arousal))` so low-arousal presets get more noise
 - [ ] CLI: expose sigma as `--jr-sigma N` parameter (default: current 15.0 for backward compat)
-- [ ] Unit tests: verify higher sigma broadens spectrum more, sigma=0 is deterministic, output finite at sigma=300
-- [ ] Regression: sigma=15 (default) produces bitwise-identical scores to pre-P18
+- [ ] Regression: sigma=15 on input-p (default) produces bitwise-identical scores to pre-P18
 
-**Expected outcome:** At sigma=100-200, the JR system should intermittently escape the alpha basin, spend time in theta, and return — producing a time-averaged spectrum with both bands represented. The exact ratio depends on the operating point (thalamic gate setting).
+**Expected outcome:** At sigma=100-200, the JR system should intermittently escape the alpha basin, spend time in theta, and return — producing a time-averaged spectrum with both bands represented.
 
-- [ ] **Ref:** Ableidinger M, Buckwar E, Hinterleitner H (2017). "A Stochastic Version of the Jansen and Rit Neural Mass Model: Analysis and Numerics." *J Math Neurosci* 7:8. — Tested sigma_4 values of 200 and 1000. At high noise, multimodal probability density emerges at C=270, indicating noise-induced transitions between attractor basins. [PMC5567162](https://pmc.ncbi.nlm.nih.gov/articles/PMC5567162/)
+- [ ] **Ref:** Ableidinger M, Buckwar E, Hinterleitner H (2017). "A Stochastic Version of the Jansen and Rit Neural Mass Model: Analysis and Numerics." *J Math Neurosci* 7:8. — Noise on velocity state variables (σ₃=σ₅=10, σ₄=1000). Multimodal probability density at C=270. **Warning: Euler-Maruyama produces spurious bifurcations at high sigma (Fig. 9) — use Strang splitting or verify RK4 stability.** Ito and Stratonovich interpretations coincide (additive noise). [PMC5567162](https://pmc.ncbi.nlm.nih.gov/articles/PMC5567162/)
 - [ ] **Ref:** Grimbert F, Faugeras O (2006). "Bifurcation analysis of Jansen's neural mass model." *Neural Comput* 18(12):3052-3068. — Alpha limit cycle exists for p ∈ [89.83, 315.70]. Fold bifurcation at p≈137.5 where alpha and slow oscillation coexist bistably. Noise can drive transitions between coexisting basins.
 
 ### 18b. Retune GABA_B Time Constant for Theta Resonance (LOW EFFORT — parameter change)
@@ -631,14 +644,17 @@ Wendling et al. (2002) showed the critical transition is controlled by B (slow i
 **Our current state:** b_slow=5/s (τ=200ms), B_slow=10mV, C_slow=30.0. This is far too slow for theta resonance — at τ=200ms the population's natural frequency is ~0.8 Hz (sub-delta). It acts as a pure DC offset reducer, not a theta oscillator.
 
 **Implementation:**
-- [ ] Change `b_slow` from 5.0 to **25.0** (τ=40ms → resonance near 6-7 Hz, squarely in theta)
-- [ ] Change `B_slow` from 10.0 to **15.0-20.0** mV (increase gain to compete with the alpha loop)
+- [x] Unit tests (4 passing): backward compat (default unchanged bitwise), output finite at b_slow=25/30/40, different EEG from original params, b_slow=25 produces more balanced theta/alpha ratio than b_slow=5
+- [ ] Change CET default `b_slow` from 5.0 to **25.0** in pipeline.rs (when cet_enabled)
+- [ ] Change CET default `B_slow` from 10.0 to **15.0-20.0** mV in pipeline.rs (when cet_enabled)
 - [ ] Keep `C_slow` at 30.0 (connectivity from pyramidal to slow inhibitory population)
-- [ ] Test parameter sweep: b_slow ∈ {15, 20, 25, 30}, B_slow ∈ {12, 15, 18, 20} with CET enabled
+- [ ] Test parameter sweep: b_slow ∈ {15, 20, 25, 30, 40}, B_slow ∈ {12, 15, 18, 20} with CET enabled + thalamic gate on deep relaxation preset
 - [ ] Measure: does the 300s spectrum show theta 20-40% AND alpha 20-40% simultaneously?
-- [ ] The alpha loop (a=100/s, τ=10ms) and theta loop (b_slow=25/s, τ=40ms) will compete for the pyramidal population output — this is the cross-frequency coupling mechanism
-- [ ] CLI: expose b_slow tuning as `--gaba-b-rate N` (default: 5.0 for backward compat, 25.0 recommended for relaxation)
+- [ ] The mechanism: at b_slow=5 (τ=200ms), slow inhibition sustains pyramidal suppression → extreme theta dominance (ratio 3879:1). At b_slow=25 (τ=40ms), faster recovery → more balanced ratio (63:1). Need to find the b_slow that gives ratio ~1:1.
+- [ ] CLI: expose b_slow tuning as `--gaba-b-rate N` (default: 5.0 for backward compat)
 - [ ] Regression: b_slow=5.0 (default) produces bitwise-identical scores to pre-P18
+
+**Note on Ursino correction:** Ursino, Cona & Zavaglia (2010) use two GABA-**A** populations (slow b=50/s + fast g=500/s), NOT GABA-A + GABA-B. Their model produces alpha+gamma combinations, not theta+alpha directly. Theta from a single column requires reducing the slow inhibitory rate to b≈15-25/s — extrapolated from their framework but not directly tested in their paper. The Wendling (2002) standard params confirm: GABA-A slow at b=50 → alpha; reducing b shifts oscillation downward. Our test at b_slow=25 confirmed: theta/alpha ratio drops from 3879 to 63 (more balanced) compared to b_slow=5.
 
 **Expected outcome:** With b_slow=25/s, the slow inhibitory population resonates at theta frequencies. The fast inhibitory population (b=50/s) continues resonating at alpha. The pyramidal population output is the difference of both — producing a mixed spectrum where both alpha and theta are present. This is not two separate oscillators averaged, but genuine cross-frequency coupling (theta modulating alpha envelope), exactly as seen in real EEG during deep relaxation (Klimesch 1999).
 

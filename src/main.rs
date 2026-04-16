@@ -1215,7 +1215,7 @@ fn run_detailed_pipeline(
         neural_params.jansen_rit.v0,
         0.0, // habituation: disabled in detailed pipeline (short evaluation)
         0.0,
-        0.0, // stochastic: disabled
+        15.0, // stochastic: enabled (Ableidinger 2017 velocity noise)
         // CET 13b slow GABA_B — engaged when --cet flag is set.
         if cet_enabled { 10.0 } else { 0.0 },
         if cet_enabled { 5.0 } else { 0.0 },
