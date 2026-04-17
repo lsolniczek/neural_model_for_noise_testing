@@ -4,7 +4,7 @@
   "source_count": 5,
   "anchor_color": 2,
   "anchor_volume": 0.0,
-  "environment": 4,
+  "environment": 0,
   "objects": [
     {
       "active": true,
@@ -15,26 +15,26 @@
       "volume": 0.40,
       "reverb_send": 0.55,
       "bass_mod": {
-        "kind": 4,
-        "param_a": 0.05,
-        "param_b": 0.20,
+        "kind": 0,
+        "param_a": 0,
+        "param_b": 0,
         "param_c": 0
       },
       "satellite_mod": {
-        "kind": 4,
-        "param_a": 0.05,
-        "param_b": 0.20,
+        "kind": 0,
+        "param_a": 0,
+        "param_b": 0,
         "param_c": 0
       },
       "movement": {
-        "kind": 0,
-        "radius": 0,
-        "speed": 0,
+        "kind": 1,
+        "radius": 1.5,
+        "speed": 0.08,
         "phase": 0,
         "depth_min": 1,
-        "depth_max": 1,
-        "reverb_min": 0,
-        "reverb_max": 0
+        "depth_max": 2,
+        "reverb_min": 0.40,
+        "reverb_max": 0.60
       },
       "tint_freq": 250,
       "tint_db": -3.0,
@@ -51,26 +51,26 @@
       "volume": 0.40,
       "reverb_send": 0.55,
       "bass_mod": {
-        "kind": 4,
-        "param_a": 0.05,
-        "param_b": 0.20,
+        "kind": 0,
+        "param_a": 0,
+        "param_b": 0,
         "param_c": 0
       },
       "satellite_mod": {
-        "kind": 4,
-        "param_a": 0.05,
-        "param_b": 0.20,
+        "kind": 0,
+        "param_a": 0,
+        "param_b": 0,
         "param_c": 0
       },
       "movement": {
-        "kind": 0,
-        "radius": 0,
-        "speed": 0,
-        "phase": 0,
+        "kind": 1,
+        "radius": 1.5,
+        "speed": 0.08,
+        "phase": 180,
         "depth_min": 1,
-        "depth_max": 1,
-        "reverb_min": 0,
-        "reverb_max": 0
+        "depth_max": 2,
+        "reverb_min": 0.40,
+        "reverb_max": 0.60
       },
       "tint_freq": 250,
       "tint_db": -3.0,
@@ -87,16 +87,16 @@
       "volume": 0.20,
       "reverb_send": 0.45,
       "bass_mod": {
-        "kind": 4,
-        "param_a": 0.05,
-        "param_b": 0.35,
-        "param_c": 0
+        "kind": 5,
+        "param_a": 6.0,
+        "param_b": 0.08,
+        "param_c": 0.6
       },
       "satellite_mod": {
-        "kind": 4,
-        "param_a": 0.05,
-        "param_b": 0.35,
-        "param_c": 0
+        "kind": 5,
+        "param_a": 6.0,
+        "param_b": 0.08,
+        "param_c": 0.6
       },
       "movement": {
         "kind": 0,
