@@ -4,7 +4,7 @@
   "source_count": 2,
   "anchor_color": 2,
   "anchor_volume": 0.0,
-  "environment": 4,
+  "environment": 0,
   "objects": [
     {
       "active": true,
@@ -99,7 +99,7 @@
         "param_c": 0
       },
       "movement": {
-        "kind": 0,
+        "kind": 1,
         "radius": 0,
         "speed": 0,
         "phase": 0,
@@ -135,7 +135,7 @@
         "param_c": 0
       },
       "movement": {
-        "kind": 0,
+        "kind": 1,
         "radius": 0,
         "speed": 0,
         "phase": 0,
