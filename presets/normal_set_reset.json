@@ -27,14 +27,14 @@
         "param_c": 0
       },
       "movement": {
-        "kind": 1,
-        "radius": 1.5,
-        "speed": 0.08,
+        "kind": 0,
+        "radius": 0,
+        "speed": 0,
         "phase": 0,
         "depth_min": 1,
-        "depth_max": 2,
-        "reverb_min": 0.40,
-        "reverb_max": 0.60
+        "depth_max": 1,
+        "reverb_min": 0,
+        "reverb_max": 0
       },
       "tint_freq": 250,
       "tint_db": -3.0,
@@ -63,14 +63,14 @@
         "param_c": 0
       },
       "movement": {
-        "kind": 1,
-        "radius": 1.5,
-        "speed": 0.08,
-        "phase": 180,
+        "kind": 0,
+        "radius": 0,
+        "speed": 0,
+        "phase": 0,
         "depth_min": 1,
-        "depth_max": 2,
-        "reverb_min": 0.40,
-        "reverb_max": 0.60
+        "depth_max": 1,
+        "reverb_min": 0,
+        "reverb_max": 0
       },
       "tint_freq": 250,
       "tint_db": -3.0,
@@ -99,14 +99,14 @@
         "param_c": 0.6
       },
       "movement": {
-        "kind": 0,
-        "radius": 0,
-        "speed": 0,
+        "kind": 1,
+        "radius": 1.5,
+        "speed": 0.08,
         "phase": 0,
         "depth_min": 1,
-        "depth_max": 1,
-        "reverb_min": 0,
-        "reverb_max": 0
+        "depth_max": 2,
+        "reverb_min": 0.30,
+        "reverb_max": 0.50
       },
       "tint_freq": 300,
       "tint_db": 3.0,
