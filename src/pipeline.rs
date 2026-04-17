@@ -3,7 +3,7 @@
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 
-use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, PhysiologicalThalamicGate, ButterworthCrossover};
+use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, PhysiologicalThalamicGate, ButterworthCrossover, EnvironmentParams, generate_rir, apply_rir};
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
 use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
@@ -236,7 +236,24 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     };
 
     // 3. Deinterleave to L/R
-    let (left, right) = deinterleave(&audio);
+    let (left_dry, right_dry) = deinterleave(&audio);
+
+    // 3b. Apply room impulse response (Priority 19).
+    //     Reverberation physically modifies the waveform at the ear before
+    //     it reaches the cochlea. The gammatone filterbank must see the
+    //     reverberant signal, not the dry signal.
+    //     Per Devore et al. (2009): auditory nerve encodes reverberant signal.
+    //     Per Fujihira & Shiraishi (2015): ASSR reduced under reverberation.
+    //     Environment 0 (AnechoicChamber) = passthrough (no computation).
+    let env_params = EnvironmentParams::from_index(preset.environment);
+    let (left, right) = if env_params.is_anechoic() {
+        (left_dry, right_dry)
+    } else {
+        let rir = generate_rir(&env_params, SAMPLE_RATE);
+        let left_wet = apply_rir(&left_dry, &rir, env_params.wet_mix);
+        let right_wet = apply_rir(&right_dry, &rir, env_params.wet_mix);
+        (left_wet, right_wet)
+    };
 
     // 4. Cochlear model: tonotopic band-grouped processing
     //    Groups 32 gammatone channels into 4 frequency bands, preserving
