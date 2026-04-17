@@ -1,5 +1,5 @@
 {
-  "master_gain": 0.85,
+  "master_gain": 0.87,
   "spatial_mode": 1,
   "source_count": 4,
   "anchor_color": 1,
@@ -86,11 +86,33 @@
       "z": 0.0,
       "volume": 0.12,
       "reverb_send": 0.05,
-      "bass_mod": { "kind": 4, "param_a": 0.2, "param_b": 0.50, "param_c": 0 },
-      "satellite_mod": { "kind": 4, "param_a": 0.2, "param_b": 0.50, "param_c": 0 },
-      "movement": { "kind": 1, "radius": 2.0, "speed": 0.35, "phase": 0, "depth_min": 1, "depth_max": 2, "reverb_min": 0.03, "reverb_max": 0.08 },
-      "tint_freq": 8000, "tint_db": 3.0,
-      "source_kind": 0, "tone_freq": 200, "tone_amplitude": 0
+      "bass_mod": {
+        "kind": 4,
+        "param_a": 0.2,
+        "param_b": 0.50,
+        "param_c": 0
+      },
+      "satellite_mod": {
+        "kind": 4,
+        "param_a": 0.2,
+        "param_b": 0.50,
+        "param_c": 0
+      },
+      "movement": {
+        "kind": 1,
+        "radius": 2.0,
+        "speed": 0.35,
+        "phase": 0,
+        "depth_min": 1,
+        "depth_max": 2,
+        "reverb_min": 0.03,
+        "reverb_max": 0.08
+      },
+      "tint_freq": 8000,
+      "tint_db": 3.0,
+      "source_kind": 0,
+      "tone_freq": 200,
+      "tone_amplitude": 0
     },
     {
       "active": true,
@@ -100,11 +122,33 @@
       "z": 1.5,
       "volume": 0.08,
       "reverb_send": 0.03,
-      "bass_mod": { "kind": 3, "param_a": 2.0, "param_b": 0.40, "param_c": 0 },
-      "satellite_mod": { "kind": 3, "param_a": 2.0, "param_b": 0.40, "param_c": 0 },
-      "movement": { "kind": 2, "radius": 2.0, "speed": 0.15, "phase": 0, "depth_min": 1, "depth_max": 2, "reverb_min": 0.02, "reverb_max": 0.05 },
-      "tint_freq": 8000, "tint_db": 0.0,
-      "source_kind": 0, "tone_freq": 200, "tone_amplitude": 0
+      "bass_mod": {
+        "kind": 3,
+        "param_a": 2.0,
+        "param_b": 0.40,
+        "param_c": 0
+      },
+      "satellite_mod": {
+        "kind": 3,
+        "param_a": 2.0,
+        "param_b": 0.40,
+        "param_c": 0
+      },
+      "movement": {
+        "kind": 2,
+        "radius": 2.0,
+        "speed": 0.15,
+        "phase": 0,
+        "depth_min": 1,
+        "depth_max": 2,
+        "reverb_min": 0.02,
+        "reverb_max": 0.05
+      },
+      "tint_freq": 8000,
+      "tint_db": 0.0,
+      "source_kind": 0,
+      "tone_freq": 200,
+      "tone_amplitude": 0
     },
     {
       "active": false,
@@ -150,10 +194,33 @@
       "z": -2.0,
       "volume": 0.0,
       "reverb_send": 0.05,
-      "bass_mod": { "kind": 0, "param_a": 0, "param_b": 0, "param_c": 0 },
-      "satellite_mod": { "kind": 0, "param_a": 0, "param_b": 0, "param_c": 0 },
-      "movement": { "kind": 0, "radius": 0, "speed": 0, "phase": 0, "depth_min": 1, "depth_max": 1, "reverb_min": 0, "reverb_max": 0 },
-      "tint_freq": 0, "tint_db": 0, "source_kind": 0, "tone_freq": 200, "tone_amplitude": 0
+      "bass_mod": {
+        "kind": 0,
+        "param_a": 0,
+        "param_b": 0,
+        "param_c": 0
+      },
+      "satellite_mod": {
+        "kind": 0,
+        "param_a": 0,
+        "param_b": 0,
+        "param_c": 0
+      },
+      "movement": {
+        "kind": 0,
+        "radius": 0,
+        "speed": 0,
+        "phase": 0,
+        "depth_min": 1,
+        "depth_max": 1,
+        "reverb_min": 0,
+        "reverb_max": 0
+      },
+      "tint_freq": 0,
+      "tint_db": 0,
+      "source_kind": 0,
+      "tone_freq": 200,
+      "tone_amplitude": 0
     },
     {
       "active": false,
