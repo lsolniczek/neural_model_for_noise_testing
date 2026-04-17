@@ -16,13 +16,13 @@
       "reverb_send": 0.55,
       "bass_mod": {
         "kind": 4,
-        "param_a": 0.1,
+        "param_a": 0.05,
         "param_b": 0.20,
         "param_c": 0
       },
       "satellite_mod": {
         "kind": 4,
-        "param_a": 0.1,
+        "param_a": 0.05,
         "param_b": 0.20,
         "param_c": 0
       },
@@ -52,13 +52,13 @@
       "reverb_send": 0.55,
       "bass_mod": {
         "kind": 4,
-        "param_a": 0.1,
+        "param_a": 0.05,
         "param_b": 0.20,
         "param_c": 0
       },
       "satellite_mod": {
         "kind": 4,
-        "param_a": 0.1,
+        "param_a": 0.05,
         "param_b": 0.20,
         "param_c": 0
       },
@@ -88,13 +88,13 @@
       "reverb_send": 0.45,
       "bass_mod": {
         "kind": 4,
-        "param_a": 0.1,
+        "param_a": 0.05,
         "param_b": 0.35,
         "param_c": 0
       },
       "satellite_mod": {
         "kind": 4,
-        "param_a": 0.1,
+        "param_a": 0.05,
         "param_b": 0.35,
         "param_c": 0
       },
