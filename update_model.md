@@ -505,6 +505,64 @@ This is a homeostatic mechanism — it pulls both hemispheres toward a common ac
 - [ ] **Future:** Per-band dFIC — adapt k separately for each tonotopic band pair, allowing frequency-specific bilateral balancing. Per-band would let low bands (theta/alpha) converge bilaterally while high bands (beta) remain differentiated.
 - [ ] **Future:** Activity-dependent E_target — instead of a fixed target, compute E_target from the running mean of both hemispheres combined, so the system seeks bilateral balance rather than a preset target level.
 
+## Priority 19: Pre-Neural Environment Processing (HIGH IMPACT, MEDIUM EFFORT)
+
+**Problem:** The acoustic environment (reverb, early reflections, room modes) is applied AFTER the neural model evaluates the audio. The NMM processes the dry signal — the listener never hears this signal. A preset in `AnechoicChamber` vs `DeepSanctuary` scores identically, which is physically incorrect. Reverberation modifies the acoustic waveform at the ear before it reaches the cochlea.
+
+**Scientific evidence (the ordering is unambiguous):**
+
+1. **Reverberation degrades the signal before the cochlea.** Devore et al. (2009, J Neurosci) showed auditory nerve fibers encode the reverberant signal faithfully, including the smeared temporal envelope. The cochlea has no "de-reverberation" stage. The neural model must see post-reverb signals.
+
+2. **ASSR is reduced by reverberation.** Fujihira & Shiraishi (2015, Ear and Hearing): 40 Hz ASSRs are reduced in amplitude under reverberation because reverb fills inter-stimulus gaps, reducing modulation depth. For a 10 Hz isochronic tone in a reverberant room, the cortical 10 Hz tracking is physically weaker — the modulation is degraded before reaching the auditory nerve.
+
+3. **Brainstem responses are degraded by reverb.** Bidelman & Krishnan (2010, JASA): brainstem frequency-following responses (FFR) are smeared by reverberation — temporal fine structure encoding is degraded at the subcortical level.
+
+4. **EEG cortical responses change with reverb.** Fuglsang et al. (2020, NeuroImage): EEG temporal response functions show reduced amplitude and delayed latency in auditory cortex components (N1/P2) under reverberation, scaling with RT60.
+
+5. **Spectral effects on noise.** Kuttruff (2009, "Room Acoustics" 5th ed.): rooms boost low frequencies (longer RT60 below 500 Hz) and attenuate highs (air absorption above 2 kHz). Brown noise through a room becomes even more low-heavy; white noise shifts toward pink. Reverb partially converges noise spectra toward the room's modal response.
+
+6. **RT60 and arousal (task-dependent).** Sato & Bradley (2008, JASA): reverb on noise/music reduces temporal sharpness (relaxing), while reverb on speech increases listening effort (alerting). Pätynen et al. (2014, JASA): reverberant spaces with non-speech signals promote subjective calm.
+
+7. **Computational precedent.** Carney et al. (2015, JARO) and Zilany et al. (2014, JASA) model the full chain: stimulus → room → auditory periphery → midbrain. The ordering is always room processing before cochlear models.
+
+**Current architecture (incorrect):**
+```
+audio render → gammatone filterbank → JR model → score
+                                                    ↑ dry signal
+environment reverb applied only in DSP engine (listener hears this, model doesn't)
+```
+
+**Correct architecture:**
+```
+audio render → environment reverb → gammatone filterbank → JR model → score
+                    ↑ wet signal — what the listener actually hears
+```
+
+**Implementation:**
+- [ ] In `pipeline.rs`, apply environment room impulse response (RIR) to the rendered audio BEFORE the gammatone filterbank step
+- [ ] The RIR should be parameterized by the preset's `environment` field (0-4: AnechoicChamber, FocusRoom, OpenLounge, VastSpace, DeepSanctuary)
+- [ ] Each environment needs an RT60 and frequency-dependent decay profile:
+  - AnechoicChamber: RT60 ≈ 0 (passthrough, no change)
+  - FocusRoom: RT60 ≈ 0.3s (small treated room)
+  - OpenLounge: RT60 ≈ 0.8s (open plan office)
+  - VastSpace: RT60 ≈ 2.0s (large hall)
+  - DeepSanctuary: RT60 ≈ 4.0s (cathedral-like)
+- [ ] The RIR convolution should be applied per-ear (the reverberant field is different at each ear position)
+- [ ] Impact: presets with high reverb_send + reverberant environment will score differently than the same preset in anechoic. This is correct — the listener experiences a different spectral balance.
+- [ ] Regression: environment=0 (AnechoicChamber) with reverb_send=0 on all objects must produce bitwise-identical scores to the current pipeline
+- [ ] The arousal computation already uses per-object reverb_send — this priority adds the ROOM's contribution on top of that. Consider adjusting arousal to include environment RT60 as a factor.
+- [ ] Unit tests: verify RIR convolution preserves signal energy, verify anechoic passthrough, verify longer RT60 produces more spectral blur (lower modulation depth)
+- [ ] **Ref:** Devore S, Ihlefeld A, Hancock K, Shinn-Cunningham B, Bhatt P (2009). "Accurate sound localization in reverberant environments is mediated by robust encoding of spatial cues in the auditory midbrain." *Neuron* 62(1):123-134.
+- [ ] **Ref:** Fujihira H, Shiraishi K (2015). "Effect of reverberation on 80-Hz auditory steady-state response." *Ear and Hearing* 36(5):e282-e289.
+- [ ] **Ref:** Bidelman GM, Krishnan A (2010). "Effects of reverberation on brainstem representation of speech in musicians and non-musicians." *Brain Res* 1355:112-125.
+- [ ] **Ref:** Fuglsang SA, Märcher-Rørsted J, Dau T, Hjortkjær J (2020). "Effects of sensorineural hearing loss on cortical synchronization to competing speech during selective attention." *J Neurosci* 40(12):2562-2572.
+- [ ] **Ref:** Kuttruff H (2009). *Room Acoustics.* 5th ed. CRC Press.
+- [ ] **Ref:** Sato H, Bradley JS (2008). "Evaluation of acoustical conditions for speech communication in working elementary school classrooms." *JASA* 123(4):2064-2077.
+- [ ] **Ref:** Carney LH, Li T, McDonough JM (2015). "Speech coding in the brain: Representation of vowel formants by midbrain neurons tuned to sound fluctuations." *eNeuro* 2(4).
+- [ ] **Ref:** Zilany MS, Bruce IC, Bhatt P (2014). "Updated parameters and expanded simulation options for a model of the auditory periphery." *JASA* 135(1):283-286.
+
+---
+
 ## Priority 15: Spectral Disturbance Resilience Metrics (HIGH IMPACT, MEDIUM EFFORT — IMPLEMENTED)
 
 **Problem:** The current disturbance test (`src/disturb.rs`) measures resilience via entrainment ratio recovery — how fast the EEG phase-locks back to a driving LFO frequency after an acoustic spike. This fails completely when:
