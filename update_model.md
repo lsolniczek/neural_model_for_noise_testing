@@ -20,7 +20,7 @@
 - [x] Unit tests (12 tests passing)
 - [x] Pipeline integration with CLI flag (`--thalamic-gate`)
 - [x] Verified: Ground (sleep) jumped from 0.28 → 0.73 with gate enabled
-- [x] **Critical bug found and fixed:** display pipeline (`run_detailed_pipeline`) was separate from evaluation pipeline and didn't use config flags. Both now wired correctly.
+- [x] **Canonicalized later in Priority 20:** `evaluate` now consumes the same `pipeline.rs` result used by the rest of the scoring stack; the old duplicated detailed path in `main.rs` is gone.
 
 ### Pipeline Integration
 - [x] Both features disabled by default — zero regression on all existing tests
@@ -349,46 +349,56 @@ Net result: presets that rely on slow envelope fluctuations (Ground, Drift, rela
 - [x] Added `GenerateData` subcommand to the CLI in `src/main.rs`:
   1. Samples N random presets uniformly from genome bounds (`Preset::bounds()`) via xorshift64 RNG
   2. Evaluates each against specified goals × brain_types using `evaluate_preset()` — the EXACT same function the optimizer calls
-  3. Writes CSV: `g0..g189, goal_id, brain_type_id, assr, thalamic_gate, cet, phys_gate, score`
+  3. Writes CSV: `g0..g229, goal_id, brain_type_id, assr, thalamic_gate, cet, phys_gate, score`
   4. Supports `--count N` (default 1000), `--goals all` (or comma-separated), `--brain-type all` (or specific), `--duration`, `--threads`, `--seed`
   5. Parallelizes via `std::thread::scope` (no extra dependencies)
 - [x] Smoke tested: 5 presets × 1 goal × 1 brain type, 2 threads, correct CSV output verified.
 - [x] Data format: flat CSV, genome as f64 with 6 decimals, score as f64 with 6 decimals, goal/brain_type as integer IDs.
-- [ ] **Future:** Generate the full baseline dataset (20k presets × all goals × Normal brain) and measure actual R² after training.
+- [x] Contract cleanup later in Priority 22: CSV header now comes from the shared surrogate contract helper, and rows serialize the REAL feature flags from `SimulationConfig` instead of hard-coded values.
+- [x] Priority 22 follow-up: added `--phys-gate` to `generate-data` so the surrogate can be retrained on real physiological-gate rows instead of a heuristic-only dataset.
+- [x] Generated fresh 230-gene training data with the corrected schema:
+  - baseline slice: 400 presets × all 9 goals × all 5 brain types = 18,000 rows
+  - phys-gate slice: 300 presets × 3 relaxation goals × all 5 brain types = 4,500 rows
+  - checked-in `training_data.csv` / `training_combined.csv`: 22,500 rows total, 237 columns total
 
 ### 14b. Surrogate model training (Python, offline, separate from Rust)
 
 - [x] Created `tools/train_surrogate.py` — standalone PyTorch training script:
-  1. Loads CSV from 14a, builds 208-dim input (genome[190] normalized to [0,1] + goal one-hot[9] + brain_type one-hot[5] + config flags[4])
-  2. Architecture: `Linear(208,256) → ReLU → Linear(256,256) → ReLU → Linear(256,128) → ReLU → Linear(128,1) → Sigmoid`
+  1. Loads CSV from 14a, infers genome width from the `g0..gN` header, and builds the current input contract (genome + goal one-hot[9] + brain_type one-hot[5] + config flags[4])
+  2. Architecture: `Linear(input_dim,256) → ReLU → Linear(256,256) → ReLU → Linear(256,128) → ReLU → Linear(128,1) → Sigmoid`
   3. Loss: MSE on score ∈ [0, 1]. Optimizer: AdamW (lr=1e-3, weight_decay=1e-4)
   4. Train/val split 80/20, early stopping (patience 20), max 200 epochs
   5. Exports weights as flat f32 little-endian binary with u32 header: `[n_layers, dim0, dim1, ..., dimN]`
   6. Prints per-epoch train/val loss + R² metric
 - [x] Script is self-contained: `python tools/train_surrogate.py data.csv weights.bin`
 - [x] The Python dependency is OFFLINE only. Rust never calls Python. The weights file is the only artifact.
+- [x] Priority 22 retrain pass on the fresh 22,500-row dataset:
+  - `surrogate_weights.bin` (`256,256,128`): val_loss `0.003182`, `R² = 0.8499`
+  - `surrogate_weights_med.bin` (`128,64`): val_loss `0.003837`, `R² = 0.8191`
+  - `surrogate_weights_small.bin` (`64,32`): val_loss `0.004000`, `R² = 0.8113`
 
 ### 14c. Rust inference engine (hand-coded MLP, zero dependencies)
 
 - [x] Added `src/surrogate.rs` containing `SurrogateModel`:
   - `DenseLayer` struct with row-major weights + biases, `forward()` method
-  - `SurrogateModel::load(path)` — reads binary weights file, validates header, constructs layer stack
+  - `SurrogateModel::load(path)` — reads binary weights file, validates header, rejects stale input dimensions, constructs layer stack
   - `SurrogateModel::build_input(genome, goal, brain_type, assr, thalamic_gate, cet, phys_gate)` — normalizes genome to [0,1] using `Preset::bounds()`, one-hot encodes goal/brain_type, adds config flags
   - `SurrogateModel::predict(input) -> f32` — forward pass (matmul + ReLU per hidden layer, Sigmoid on output)
   - `SurrogateModel::predict_batch(inputs)` — batch prediction
-- [x] Forward pass: plain `for` loops over weight matrices. ~150k multiply-adds for 208→256→256→128→1 = **~5–20 µs on Apple Silicon**. No BLAS, no SIMD, no external crates.
-- [x] Unit tests (12 total): round-trip serialize→load→predict (bitwise identical), missing file returns error, truncated file returns error, output always in [0,1], output finite for all-ones and all-zeros input, batch matches individual predictions bitwise, different inputs produce different outputs, input builder correct length/one-hot sum/genome normalization/config flags, production architecture shape (208→256→256→128→1) works end-to-end.
+- [x] Forward pass: plain `for` loops over weight matrices. ~170k multiply-adds for 248→256→256→128→1 = **~5–20 µs on Apple Silicon**. No BLAS, no SIMD, no external crates.
+- [x] Unit tests (13 total): round-trip serialize→load→predict (bitwise identical), missing file returns error, truncated file returns error, stale-dimension weights return a retrain error, output always in [0,1], output finite for all-ones and all-zeros input, batch matches individual predictions bitwise, different inputs produce different outputs, input builder correct length/one-hot sum/genome normalization/config flags, production architecture shape (248→256→256→128→1) works end-to-end.
 - [x] Gate: `--surrogate` flag on `optimize` command (default false). Missing weights file prints warning and falls back to full pipeline.
 
 ### 14d. Surrogate-assisted DE loop
 
 - [x] Modified the DE trial loop in `run_optimize()` with a conditional branch:
-  - When `--surrogate` active: scores ALL candidates with surrogate, ranks by surrogate score, validates top-K + 1 random exploration candidate with real pipeline, reports REAL scores for validated trials and SURROGATE scores for unvalidated trials to DE
+  - When `--surrogate` active: scores ALL candidates with the surrogate, ranks by surrogate score, validates top-K + 1 exploration candidate with the real pipeline, and reports ONLY validated REAL scores back into DE
   - When `--surrogate` off: identical to pre-P14 code path (zero regression)
 - [x] CLI flags: `--surrogate` (enable), `--surrogate-weights path` (default `surrogate_weights.bin`), `--surrogate-k N` (default 5)
 - [x] Surrogate model loaded at optimizer start with graceful fallback on load failure
 - [x] Also added `--cet` and `--phys-gate` flags to `optimize` command (were previously only on `evaluate`)
 - [x] **Speedup estimate:** 50 surr + 5 real = 0.25 ms + 500 ms ≈ 500 ms/gen vs 50 × 100 ms = 5 s/gen without. **~10x speedup.**
+- [x] Priority 23 semantics cleanup: unvalidated surrogate-ranked trials no longer steer DE population state. The MLP is now a strict ranking/filter layer, not an approximate fitness source.
 - [ ] **Future:** Print surrogate statistics per generation (surr_best, real_best, surr_rank_of_real_best)
 
 ### 14e. Incremental retraining (optional, v2)
@@ -774,6 +784,269 @@ The following results motivated this priority. All use the same base preset (2 s
 The Chimera Split showed genuine hemispheric decoupling at 600s (LH: theta 56% / alpha 38%), proving the JR model CAN sustain a mixed state in one hemisphere when the input spectrum is sufficiently different. The missing piece is a mechanism to sustain this at the single-column level.
 
 ---
+
+## Priority 20: Canonical Evaluate Pipeline and CLI Consistency (CRITICAL IMPACT, LOW-MEDIUM EFFORT)
+
+**Problem:** `evaluate` still has two pipelines. `run_evaluate()` calls `evaluate_preset()` in `src/pipeline.rs`, but then re-runs a separate `run_detailed_pipeline()` in `src/main.rs` and prints diagnostics from that second path. The two paths are not equivalent:
+
+- `pipeline.rs` decimates 48 kHz band envelopes to `NEURAL_SR`, trims warmup, applies CET split/recombine at 1 kHz, optionally applies ASSR only to the fast CET path, uses the configured habituation/stochastic flags, and computes diagnostics with `PerformanceVector::compute_with_envelope()`.
+- `run_detailed_pipeline()` keeps the band envelopes at 48 kHz, applies a different ASSR/CET flow, hard-codes stochastic JR on, hard-codes habituation off, and uses the legacy `PerformanceVector::compute()` path without envelope PLV.
+
+Net effect: single-preset `evaluate` can disagree with matrix mode, `optimize`, and `generate-data` even when the preset, goal, brain type, and CLI flags are identical. That makes the human-facing diagnosis unreliable and makes documentation drift harder to notice.
+
+**Goal:** make `src/pipeline.rs` the only source of truth for simulation and scoring. `src/main.rs` should format results, not recompute them.
+
+### 20a. Return detailed diagnostics from the canonical pipeline
+
+- [x] Add a `DetailedSimulationResult` in `src/pipeline.rs`, or extend `SimulationResult`, so the canonical path can return:
+  - final `score`
+  - `FhnResult`
+  - `BilateralResult`
+  - `PerformanceVector`
+  - `brightness`
+  - `band_energy_fractions`
+- [x] Keep `evaluate_preset()` as a thin compatibility wrapper over the new detailed entry point so existing optimizer and matrix callers keep their current API.
+- [x] Reuse the exact existing `pipeline.rs` order of operations: audio render -> room/environment processing -> gammatone -> global normalization -> decimation -> CET split/recombine -> ASSR on fast path only -> thalamic gate -> bilateral JR -> FHN -> `compute_with_envelope()` -> `Goal::evaluate_full()`.
+
+### 20b. Remove duplicated neural computation from `main.rs`
+
+- [x] Change `run_evaluate()` so the printed score comes directly from the canonical pipeline result.
+- [x] Delete `run_detailed_pipeline()` entirely, or reduce it to a formatting helper that consumes `DetailedSimulationResult` without re-running the model.
+- [x] Feed `goal.diagnose()` from the canonical pipeline outputs instead of a second simulation pass.
+- [x] Remove comments in `main.rs` that justify behavioral differences in the display path. The display path should contain no independent physiological logic.
+
+### 20c. Fix `evaluate` CLI semantics
+
+- [x] Replace the current misleading bool flags with explicit semantics that match the help text:
+  - `--assr` / `--no-assr`
+  - `--thalamic-gate` / `--no-thalamic-gate`
+  - `--cet` / `--no-cet`
+  - `--phys-gate`
+- [ ] Align one source of truth for defaults across `SimulationConfig`, `src/main.rs`, `API_DOCUMENTATION.md`, and `BRAIN_MODEL_GUIDE.md`. The user-facing docs are now aligned with `src/main.rs`; the remaining nuance is that `SimulationConfig::default()` is an internal pipeline default, while `evaluate` deliberately overrides ASSR to off unless requested.
+- [x] Print the active feature set in `evaluate` output (`assr`, `thalamic_gate`, `cet`, `phys_gate`) so screenshots and manual evaluations are reproducible.
+
+### 20d. Add consistency and regression tests
+
+- [x] Add a regression test proving: for the same preset/goal/brain/config, single-preset `evaluate` reports the same numeric score as `evaluate_preset()`.
+- [x] Add a regression test proving: matrix mode and single mode produce the same score for the same single cell.
+- [x] Add a regression test proving: the canonical detailed result reproduces the same diagnosis score the pipeline already computed. This remains the score/diagnosis guard alongside the new matrix/single-cell parity test.
+- [x] Add a helper-level regression test proving the documented disable flags (`--no-cet`, `--no-thalamic-gate`) resolve to the intended `SimulationConfig`. A full CLI smoke test remains optional.
+- [x] Keep the existing thalamic-gate unit failures as a separate Priority 2 consistency issue; do not weaken `evaluate` tests to hide that mismatch. This is now historical only because Priority 21 returned those tests to green without touching the `evaluate` consistency guards.
+
+### 20e. Documentation cleanup after the code path is canonical
+
+- [x] Update `API_DOCUMENTATION.md` examples so `evaluate` usage and defaults match the real CLI.
+- [x] Update `BRAIN_MODEL_GUIDE.md` sections that currently describe stale `evaluate` defaults or stale flag behavior.
+- [x] Add one short architecture note stating that all scoring paths (`evaluate`, matrix, `optimize`, `generate-data`) share the same simulation core in `pipeline.rs`.
+
+### 20f. Scope and references
+
+- [ ] No new neuroscience literature is required for this priority. This is an implementation-integrity fix, not a new physiological model.
+- [ ] Internal code references for this work:
+  - `src/main.rs::run_evaluate`
+  - `src/main.rs::run_detailed_pipeline`
+  - `src/pipeline.rs::evaluate_preset`
+  - `PerformanceVector::compute_with_envelope`
+  - `SimulationConfig`
+
+**Expected outcome:** `evaluate`, matrix mode, `optimize`, and `generate-data` all report the same score and diagnostics for the same preset and flags. Once that is true, future model work only needs to land in one place, and human-facing diagnosis becomes trustworthy again.
+
+## Priority 21: Thalamic Gate Spec Reconciliation (CRITICAL IMPACT, LOW EFFORT)
+
+**Problem:** The heuristic thalamic gate was internally inconsistent. The code in `src/auditory/thalamic_gate.rs` had drifted away from its own tests and the user-facing docs:
+
+- Tests still assert the original Steriade-inspired per-band proportions `[100%, 70%, 20%, 0%]`.
+- `BRAIN_MODEL_GUIDE.md`, `API_DOCUMENTATION.md`, and `update_model.md` described that same fixed profile.
+- The implementation now applies a deeper low-arousal redistribution, so band 1 can behave like 100%, band 2 can exceed the documented 20%, and band 3 is no longer guaranteed to stay at 0%.
+
+This is the only current red test area in the suite. More importantly, it means the project's "arousal gate" story is ambiguous at exactly the point where users rely on it most: slow-state access via reverb/arousal.
+
+**Decision:** keep the original fixed Steriade-inspired proportions and make the whole repo agree:
+
+1. **Heuristic gate** uses fixed per-band offset reductions `[100%, 70%, 20%, 0%] × max_shift`
+   - simplest
+   - matches the existing literature summary and user mental model
+   - keeps band 3 unchanged by design
+2. **Physiological gate** remains the nonlinear path
+   - stronger low-arousal push belongs in `--phys-gate`
+   - biophysical justification stays with the TC-cell model, not the heuristic shortcut
+
+### 21a. Code/doc/test alignment
+
+- [x] Decide that the heuristic gate is "fixed Steriade proportions", not "deep-factor nonlinear redistribution".
+- [x] Simplify `band_offset_shifts()` to `[100%, 70%, 20%, 0%] × max_shift`.
+- [x] Remove the deep-factor drift from the heuristic implementation and keep nonlinear burst-mode behavior in `--phys-gate`.
+- [x] Update the unit tests so they assert the intended fixed-profile behavior explicitly, including a mid-arousal proportion check.
+- [x] Update `API_DOCUMENTATION.md` and `update_model.md` so they match the fixed-profile heuristic gate.
+- [x] Update `BRAIN_MODEL_GUIDE.md` so the remaining user-facing narrative matches the code.
+
+### 21b. Regression and acceptance
+
+- [x] `cargo test auditory::thalamic_gate::tests` returns to green.
+- [x] Keep the explicit regression coverage for band 3 behavior so it cannot drift silently again.
+- [x] Add regression coverage for the fixed proportions at both low arousal and mid arousal.
+- [x] Re-evaluate at least one sleep/relaxation preset with heuristic gate vs physiological gate to confirm the intended separation of responsibility:
+  - heuristic gate = simple arousal steering
+  - physiological gate = stronger nonlinear burst-mode push
+
+**Verification completed:**
+- `cargo test auditory::thalamic_gate::tests`
+- `cargo test regression_tests::tests::enabled_features_are_consistent -- --nocapture`
+- `cargo test regression_tests::tests::thalamic_gate_disabled_changes_scores -- --nocapture`
+- `cargo test regression_tests::tests::both_features_enabled_produces_valid_scores -- --nocapture`
+- `cargo test regression_tests::tests::detailed_pipeline_summary_matches_scalar_evaluate -- --nocapture`
+- `cargo test regression_tests::tests::canonical_detailed_result_reproduces_diagnosis_score -- --nocapture`
+- `cargo test --no-run`
+
+**Expected outcome:** there is exactly one documented heuristic gate behavior, the tests encode it, and users can understand the difference between `--thalamic-gate` and `--phys-gate` without reverse-engineering the source.
+
+## Priority 22: Surrogate Artifact and Data Integrity (CRITICAL IMPACT, MEDIUM EFFORT)
+
+**Problem:** The surrogate stack is dimensionally and procedurally stale:
+
+- Rust now uses the 230-gene genome and a larger total surrogate input dimension.
+- `tools/train_surrogate.py` still describes the old input layout.
+- Existing exported weights still reflect the old input dimension.
+- `generate-data` writes config-flag columns that do not match the actual `SimulationConfig` used to score the rows.
+
+This is worse than "just stale docs". It can make the surrogate silently ignore part of the input, and it can poison retraining data with mislabeled feature flags.
+
+### 22a. Freeze the input contract
+
+- [x] Define one canonical surrogate input contract in one place:
+  - genome length
+  - goal one-hot width
+  - brain-type one-hot width
+  - config-flag width
+- [x] Make Rust and Python derive their dimensions from that shared contract, not from hand-maintained comments.
+- [x] Update `update_model.md` and `API_DOCUMENTATION.md` examples from `g0..g189` to the current genome width.
+
+### 22b. Validate artifacts at load time
+
+- [x] In `src/surrogate.rs`, reject weights whose declared input dimension does not match the compiled `INPUT_DIM`.
+- [x] Surface a clear runtime error that says the weights are stale and must be retrained.
+- [x] Do not allow silent partial-input inference in release builds.
+
+### 22c. Fix training-data correctness
+
+- [x] Make `generate-data` write the REAL feature flags used during evaluation, not hard-coded values.
+- [x] Specifically verify the `cet` column matches the `SimulationConfig` that produced the score.
+- [x] Add a regression test that inspects a generated row and proves the serialized flags equal the actual config.
+
+### 22d. Retraining and docs
+
+- [x] Retrain the surrogate after the input contract and CSV labeling are corrected.
+- [x] Regenerate `surrogate_weights.bin` (and any small/medium variants) with the new dimensions.
+- [x] Add a regression test that loads the bundled weight artifacts and runs inference through the current 248-input contract.
+- [x] Extend `generate-data` with `--phys-gate` so retraining can include physiological-gate rows instead of only heuristic-gate rows.
+- [x] Update `API_DOCUMENTATION.md` and `update_model.md` to describe the real input size, CSV schema, bundled artifacts, and retraining workflow.
+- [x] Update `BRAIN_MODEL_GUIDE.md` to describe the real input size, CSV schema, and retraining workflow.
+
+**Current status:** checked-in surrogate artifacts (`surrogate_weights.bin`, `surrogate_weights_small.bin`, `surrogate_weights_med.bin`) now use the current 248-input header and load successfully under the stricter validator. The checked-in CSV datasets (`training_data.csv`, `training_combined.csv`) also use the corrected 237-column schema and include both default rows (`1,1,1,0`) and phys-gate rows (`1,1,1,1`).
+
+**Expected outcome:** the surrogate either runs on a verified current artifact or fails loudly; training data rows become trustworthy; and future scoring changes cannot silently desynchronize the Rust/Python pipeline.
+
+## Priority 23: Surrogate Search Semantics and Optimizer Truthfulness (HIGH IMPACT, LOW-MEDIUM EFFORT)
+
+**Problem:** The optimizer/docs contract was inconsistent: surrogate mode claimed to be only a filter, but unvalidated surrogate scores were still entering DE population state.
+
+**Decision taken:** strict real-score population.
+
+- only real-pipeline scores enter DE state
+- unvalidated candidates are ignored for parent replacement
+- the surrogate remains a ranking/filter layer only
+- final preset reporting/export stays fully real-pipeline
+
+### 23a. Align semantics
+
+- [x] Decide whether surrogate scores are allowed to enter DE population state.
+- [x] Refactor `run_optimize()` so only validated trials are reported into DE.
+- [x] Update surrogate code comments so they describe the strict real-score contract.
+
+### 23b. Add explicit optimizer tests
+
+- [x] Add a regression test that encodes the chosen behavior.
+- [x] Add a dedicated test that final exported presets are always re-evaluated with the real pipeline.
+- [x] Add one generation-level test or debug statistic proving whether unvalidated candidates influence parent replacement.
+
+Completed checks:
+
+- `surrogate_validation_mask_*` tests in `src/main.rs` lock the top-K + exploration selection policy
+- `optimizer::differential_evolution::tests::skipped_trial_report_keeps_parent_unchanged` proves unreported trials do not replace parents
+- `tests::export_best_genome_uses_re_evaluated_real_score` proves the export path rebuilds the best preset from genome, re-runs the real pipeline, and writes that score/analysis to JSON rather than trusting any cached optimizer fitness
+- surrogate optimizer smoke run succeeds with current bundled weights after the semantics change
+
+### 23c. User-facing clarity
+
+- [x] Update the optimizer help text and `API_DOCUMENTATION.md` so users know what `--surrogate` really guarantees.
+- [x] Update `BRAIN_MODEL_GUIDE.md` so the long-form narrative matches the strict real-score contract.
+
+**Expected outcome:** users can trust the written description of surrogate mode, and engineers can no longer accidentally change the surrogate/DE contract without tripping a test.
+
+## Priority 24: Documentation Closure and Test-Harness Stability (MEDIUM IMPACT, LOW-MEDIUM EFFORT)
+
+**Problem:** After the Priority 20 refactor, the canonical scoring path is cleaner, but there are still two repo-level stability problems:
+
+1. **Docs are stale in multiple places.**
+   - feature defaults
+   - `evaluate` examples
+   - surrogate dimensions / CSV column counts
+   - the heuristic-vs-physiological gate descriptions
+2. **The default test suite was pulling in exploratory sweeps and a few oversized validity checks.**
+   - the previous `thalamic_gate` red tests are fixed
+   - the main confusion was not a model failure signal; it was that `cargo test` still included table-printing preset-analysis sweeps (`analyze_preset::tests::*`) plus several validity-only regression tests that were still using full 12 s simulations
+
+The first problem hurts user trust; the second hurts engineering throughput because it makes full-regression runs feel ambiguous even when the real failure signal is already known.
+
+### 24a. Documentation sweep
+
+- [x] Audit `API_DOCUMENTATION.md` for:
+  - `evaluate` defaults
+  - `--no-*` flags
+  - surrogate CSV schema
+  - surrogate usage guarantees
+- [x] Audit `API_DOCUMENTATION.md` for the `evaluate` contract specifically: defaults, `--no-*` flags, optimize-parity example, and the shared `pipeline.rs` scoring-core note are now aligned with `src/main.rs`.
+- [x] Audit `BRAIN_MODEL_GUIDE.md` for:
+  - feature defaults
+  - heuristic gate behavior
+  - surrogate dimensions and workflow
+  - any stale examples that still assume the deleted duplicate evaluate path
+- [x] Add one short note that `pipeline.rs` is now the single scoring core for `evaluate`, matrix mode, `optimize`, and `generate-data`.
+
+### 24b. Full-test stability
+
+- [x] Identify the first major long-tail source: `src/analyze_preset.rs` contains four exploratory sweep tests that print tables and run many full `evaluate_preset()` calls, but do not assert regression properties.
+- [x] Reclassify those four tests behind `#[ignore]` with an explicit manual invocation string (`cargo test analyze_preset::tests -- --ignored --nocapture`).
+- [x] Shorten the heaviest validity-only regression loops in `src/regression_tests.rs` by using a reduced 4.0 s test config instead of the default 12.0 s config where the assertions only require "finite/in-range/different", not long-horizon stability.
+- [x] Re-run the default `cargo test` suite and confirm that the remaining long-running regression tests now end with a clean harness summary rather than an ambiguous tail (`412 passed; 0 failed; 4 ignored`).
+- [x] Refactor the last oversized normalization validity test to representative coverage (3 colors × 4 goals) so it still guards pipeline boundedness without dominating the suite runtime.
+
+### 24c. Short-duration safety guard
+
+**Problem:** CLI commands accepted durations shorter than the 2.0-second neural warm-up discard. That could produce an empty post-warmup signal and eventually panic inside `JansenRitModel::simulate()` on `input[0]`. The surrogate smoke test with `optimize --duration 1` exposed it, but the bug affected any neural-analysis entry point using an undersized duration.
+
+- [x] Add a shared `validate_analysis_window(duration_secs, warmup_discard_secs)` helper in `pipeline.rs`.
+- [x] Enforce that guard in `optimize`, `evaluate`, `generate-data`, and `disturb`.
+- [x] Keep a pipeline-side assertion so direct non-CLI callers fail with a precise configuration error instead of a deep JR panic.
+- [x] Add unit tests for valid and invalid duration windows.
+- [x] Smoke-check that `optimize --duration 1` now exits cleanly with a validation error.
+
+**Expected outcome:** unsupported short durations fail immediately and clearly, and no neural-analysis command can reach the old empty-input panic path through normal CLI usage.
+
+### 24d. Acceptance
+
+- [x] A clean `cargo test` run should have one of two outcomes:
+  - green, or
+  - a clearly identified non-thalamic failure with a clean process exit
+- [x] No silent teardown stall after the last reported test.
+
+**Expected outcome:** the docs describe the repo that actually exists, exploratory analysis is no longer mixed into the default regression suite, and a full regression run becomes operationally trustworthy again.
+
+**Verification run:**
+- `cargo test analyze_preset::tests`
+- `cargo test regression_tests::tests::normalization_change_preserves_valid_scores`
+- `cargo test --no-run`
+- `cargo test`
 
 ## Obsolete / Superseded
 

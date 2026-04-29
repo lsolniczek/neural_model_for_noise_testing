@@ -2404,4 +2404,92 @@ mod tests {
             }
         }
     }
+
+    // ── Priority 18 motivation proof ──────────────────────────────────────
+    //
+    // Falsifiable test: the current JR model cannot sustain a mixed
+    // theta/alpha state at any operating point that real presets drive
+    // it into. Sweeps input_offset across the physiological operating
+    // range and runs four "coexistence candidate" configurations.
+    // Records the best-case balance and asserts none reach genuine
+    // coexistence.
+    //
+    // Guard rails:
+    //   - Offset range is restricted to [160, 260] — the post-gate
+    //     range real presets actually hit. Offsets near the upper fold
+    //     (≥280) produce broadband noise that looks "mixed" but is
+    //     the alpha limit cycle collapsing, not physiological coexistence.
+    //   - Requires a minimum theta+alpha power floor so we only judge
+    //     operating points that are actually oscillating.
+    //
+    // If this assertion ever fires with both guards passing, the
+    // single-attractor limitation has been lifted and Priority 18 is
+    // no longer needed.
+
+    #[test]
+    fn current_jr_cannot_sustain_theta_alpha_coexistence() {
+        let n_samples: usize = 30_000; // 30 s at 1 kHz
+        let input: Vec<f64> = vec![0.0; n_samples];
+
+        // Physiological operating range — where real presets land post-gate.
+        // Excludes the fold-collapse regime (offset ≥ 280) where "mixed"
+        // spectra reflect noise-dominated marginal oscillation, not
+        // genuine coexistence.
+        let offsets: [f64; 6] = [160.0, 180.0, 200.0, 220.0, 240.0, 260.0];
+
+        struct Cfg { name: &'static str, sigma: f64, b_slow_gain: f64, b_slow_rate: f64, c_slow: f64 }
+        let configs = [
+            Cfg { name: "deterministic",       sigma:  0.0, b_slow_gain:  0.0, b_slow_rate: 0.0, c_slow:  0.0 },
+            Cfg { name: "stochastic-sigma-15", sigma: 15.0, b_slow_gain:  0.0, b_slow_rate: 0.0, c_slow:  0.0 },
+            Cfg { name: "cet-default",         sigma:  0.0, b_slow_gain: 10.0, b_slow_rate: 5.0, c_slow: 30.0 },
+            Cfg { name: "stochastic+cet",      sigma: 15.0, b_slow_gain: 10.0, b_slow_rate: 5.0, c_slow: 30.0 },
+        ];
+
+        // Coexistence threshold: balance = min(θ, α) / (θ + α)  ≥ 0.40
+        //   → weaker band is ≥ 40% of the pair sum
+        //   → bands are within a ~1.5:1 ratio
+        const COEXISTENCE_THRESHOLD: f64 = 0.40;
+        // Minimum osc power required to judge a point — filters out
+        // fold-collapse noise-floor regimes.
+        const MIN_OSC_POWER: f64 = 0.5;
+
+        let mut best_balance = 0.0_f64;
+        let mut best_cfg = "";
+        let mut best_offset = 0.0_f64;
+        let mut best_total = 0.0_f64;
+
+        for cfg in &configs {
+            for &offset in &offsets {
+                let mut jr = JansenRitModel::new(SR);
+                jr.input_offset = offset;
+                jr.input_scale = 0.0;
+                jr.stochastic_sigma = cfg.sigma;
+                jr.stochastic_rng = 42;
+                jr.set_slow_inhib(cfg.b_slow_gain, cfg.b_slow_rate, cfg.c_slow);
+
+                let r = jr.simulate(&input);
+                let sum = r.band_powers.theta + r.band_powers.alpha;
+                if sum < MIN_OSC_POWER { continue; }
+
+                let balance = (r.band_powers.theta / sum).min(r.band_powers.alpha / sum);
+
+                if balance > best_balance {
+                    best_balance = balance;
+                    best_cfg = cfg.name;
+                    best_offset = offset;
+                    best_total = sum;
+                }
+            }
+        }
+
+        assert!(
+            best_balance < COEXISTENCE_THRESHOLD,
+            "SINGLE-ATTRACTOR CLAIM REFUTED: best theta/alpha balance \
+             {:.3} (threshold {:.2}) at cfg='{}', offset={:.0}, \
+             total_osc_power={:.3e}. The current JR model CAN sustain \
+             mixed theta/alpha within the physiological operating range \
+             — Priority 18 is unnecessary.",
+            best_balance, COEXISTENCE_THRESHOLD, best_cfg, best_offset, best_total
+        );
+    }
 }

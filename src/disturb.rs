@@ -10,8 +10,9 @@ use crate::brain_type::BrainType;
 use crate::movement::MovementController;
 use crate::neural::{FastInhibParams, simulate_bilateral, BilateralResult};
 use crate::pipeline::{
-    SAMPLE_RATE, DECIMATION_FACTOR, NEURAL_SR,
-    decimate, deinterleave, spectral_brightness, SimulationConfig,
+    SAMPLE_RATE, DECIMATION_FACTOR, NEURAL_SR, DEFAULT_WARMUP_DISCARD_SECS,
+    decimate, deinterleave, spectral_brightness,
+    validate_analysis_window,
 };
 use crate::preset::Preset;
 use noise_generator_core::NoiseEngine;
@@ -111,7 +112,7 @@ impl Default for DisturbConfig {
             spike_gain: 0.5,
             brain_type: BrainType::Normal,
             duration_secs: 15.0,
-            warmup_discard_secs: 2.0,
+            warmup_discard_secs: DEFAULT_WARMUP_DISCARD_SECS,
             window_s: 0.5,
             hop_s: 0.05,
         }
@@ -131,6 +132,9 @@ struct AuditoryOutput {
 
 /// Run steps 1-5 of the pipeline: Engine → Audio → Gammatone → Normalize → Decimate.
 fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOutput {
+    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
+        .unwrap_or_else(|message| panic!("invalid DisturbConfig: {message}"));
+
     let num_frames = (SAMPLE_RATE as f32 * config.duration_secs) as u32;
     let sr = SAMPLE_RATE as f64;
 

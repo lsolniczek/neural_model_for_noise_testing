@@ -65,11 +65,11 @@ cargo run --release -- optimize [OPTIONS]
 | `--convergence` | float | `0.001` | Stop if fitness std drops below this |
 | `--brain-type` | string | `normal` | Neurological profile for the simulation |
 | `--init-preset` | path | none | Seed population from an existing preset JSON |
-| `--cet` | flag | `false` | Enable Cortical Envelope Tracking (Priority 13) |
+| `--cet` | flag | `true` | Enable Cortical Envelope Tracking (Priority 13). On by default in the optimize pipeline |
 | `--phys-gate` | flag | `false` | Enable physiological thalamic gate (Priority 9) |
-| `--surrogate` | flag | `false` | Enable surrogate-assisted pre-screening (Priority 14). Uses a trained MLP to filter DE candidates before expensive real-pipeline evaluation. ~10x speedup |
-| `--surrogate-weights` | path | `surrogate_weights.bin` | Path to the trained surrogate weights file |
-| `--surrogate-k` | int | `5` | Number of top surrogate candidates to validate per generation with the real pipeline |
+| `--surrogate` | flag | `false` | Enable surrogate-assisted pre-screening (Priority 14). Uses a trained MLP to rank DE trials before selective real-pipeline validation. Only validated real scores can replace population members. ~10x speedup |
+| `--surrogate-weights` | path | `surrogate_weights.bin` | Path to the trained surrogate weights file. The loader validates the input dimension against the compiled surrogate contract and rejects stale weight files with a retrain error |
+| `--surrogate-k` | int | `5` | Number of top-ranked surrogate candidates to validate per generation with the real pipeline (plus 1 deterministic exploration candidate) |
 
 #### Examples
 
@@ -100,6 +100,17 @@ cargo run --release -- optimize --goal sleep --phys-gate --cet --surrogate \
   --surrogate-weights surrogate_weights.bin --surrogate-k 5 \
   --generations 200 --population 50 --duration 12
 ```
+
+Neural-analysis commands require `--duration > 2.0`, because the first 2.0 seconds are discarded as warm-up before scoring.
+
+Surrogate mode semantics are strict:
+
+- every generation scores all trial vectors with the MLP
+- the optimizer validates the top-`K` ranked trials plus one exploration trial with the real pipeline
+- only those validated real scores are allowed to replace DE parents
+- the final reported/exported preset is re-evaluated with the real pipeline
+
+This export guarantee is regression-tested: the optimizer export path rebuilds the preset from the final genome, re-runs `evaluate_preset()`, and writes that real score into the JSON metadata.
 
 #### Output
 
@@ -151,9 +162,12 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 | `--brain-type` | string | `normal` | Brain type profile. Use `all` to test all 5 types |
 | `--duration` | float | `10.0` | Audio duration per evaluation (seconds) |
 | `--assr` | flag | `false` | Enable ASSR transfer function (auditory pathway filtering). Off by default for `evaluate`; always on in the `optimize` pipeline |
-| `--thalamic-gate` | flag | `false` | Enable arousal-dependent thalamic gating. Off by default for `evaluate`; always on in the `optimize` pipeline |
-| `--cet` | flag | `false` | Enable Cortical Envelope Tracking (Priority 13). Splits each band into a slow (≤10 Hz) path that bypasses ASSR and a fast (>10 Hz) path that gets ASSR, engages the slow GABA_B inhibitory population in JR, and adds envelope-phase PLV to scoring. Off by default for `evaluate`; off in `optimize` until validated. Refs: Doelling et al. 2014, Ding & Simon 2014, Moran & Friston 2011 |
-| `--phys-gate` | flag | `false` | Enable the physiological thalamic gate (Priority 9). Replaces the linear heuristic gate with a Hodgkin-Huxley TC cell where K⁺ leak conductance is the arousal knob. Ion-channel dynamics (T-type Ca²⁺, Bazhenov 2002 / Destexhe 1996) produce a sigmoidal burst↔tonic mode switch rather than a linear ramp. Dramatically improves sleep/relaxation scores (+0.12 to +0.28); takes precedence over `--thalamic-gate` when both set. Off by default for `evaluate` |
+| `--no-assr` | flag | `false` | Explicitly disable ASSR. Mainly useful for symmetry with other `--no-*` flags or scripted matrix comparisons |
+| `--thalamic-gate` | flag | `true` | Enable the heuristic arousal-dependent thalamic gate. As arousal drops, the JR `band_offsets` shift by a fixed Steriade-inspired profile `[100%, 70%, 20%, 0%] × max_shift` across bands 0..3, so low bands move most and band 3 stays unchanged. On by default for `evaluate`; use `--no-thalamic-gate` to disable. Refs: Steriade et al. 1993, Hughes & Crunelli 2005 |
+| `--no-thalamic-gate` | flag | `false` | Disable the heuristic thalamic gate while keeping the rest of the canonical evaluation path unchanged |
+| `--cet` | flag | `true` | Enable Cortical Envelope Tracking (Priority 13). Splits each band into a slow (≤10 Hz) path that bypasses ASSR and a fast (>10 Hz) path that gets ASSR, engages the slow GABA_B inhibitory population in JR, and adds envelope-phase PLV to scoring. On by default for `evaluate`; use `--no-cet` to disable. Refs: Doelling et al. 2014, Ding & Simon 2014, Moran & Friston 2011 |
+| `--no-cet` | flag | `false` | Disable CET while keeping the rest of the canonical evaluation path unchanged |
+| `--phys-gate` | flag | `false` | Enable the physiological thalamic gate (Priority 9). This replaces the fixed heuristic profile with a Hodgkin-Huxley TC cell where K⁺ leak conductance is the arousal knob. Ion-channel dynamics (T-type Ca²⁺, Bazhenov 2002 / Destexhe 1996) produce a sigmoidal burst↔tonic mode switch rather than a fixed ramp. Dramatically improves sleep/relaxation scores (+0.12 to +0.28); takes precedence over `--thalamic-gate` when both set. Off by default for `evaluate` |
 
 #### Examples
 
@@ -170,8 +184,12 @@ cargo run --release -- evaluate presets/my_preset.json --goal focus --brain-type
 # Full matrix: all goals x all brain types
 cargo run --release -- evaluate presets/my_preset.json --goal all --brain-type all
 
-# Match the optimize pipeline (ASSR + thalamic gate enabled)
-cargo run --release -- evaluate presets/my_preset.json --goal focus --assr --thalamic-gate
+# Match the optimize pipeline defaults (ASSR on top of the default
+# thalamic-gate + CET evaluate config)
+cargo run --release -- evaluate presets/my_preset.json --goal focus --assr
+
+# Disable the default heuristic gate and CET explicitly
+cargo run --release -- evaluate presets/my_preset.json --goal focus --no-thalamic-gate --no-cet
 
 # Enable Cortical Envelope Tracking — relaxation/sleep/meditation goals
 # get a new envelope-phase PLV reward channel; presets with slow NeuralLfo
@@ -179,12 +197,16 @@ cargo run --release -- evaluate presets/my_preset.json --goal focus --assr --tha
 cargo run --release -- evaluate presets/my_preset.json --goal sleep --cet
 
 # Enable the physiological thalamic gate — ion-channel-derived sigmoid
-# replaces the linear heuristic. Sleep/relaxation presets gain +0.12 to +0.28.
+# replaces the fixed heuristic profile. Sleep/relaxation presets gain +0.12 to +0.28.
 cargo run --release -- evaluate presets/my_preset.json --goal sleep --phys-gate
 
 # Longer evaluation for more stable results
 cargo run --release -- evaluate presets/my_preset.json --goal meditation --duration 20
 ```
+
+Neural-analysis commands require `--duration > 2.0`, because the first 2.0 seconds are discarded as warm-up before scoring.
+
+`evaluate`, matrix mode, `optimize`, and `generate-data` all share the same simulation and scoring core in `src/pipeline.rs`. The CLI layer only resolves flags, selects goals/brain types, and formats output.
 
 #### Output
 
@@ -257,6 +279,8 @@ cargo run --release -- disturb presets/adhd_dopaminergic_v8.json --brain-type ad
 # Longer observation window
 cargo run --release -- disturb presets/my_preset.json --duration 20 --spike-time 5.0
 ```
+
+Neural-analysis commands require `--duration > 2.0`, because the first 2.0 seconds are discarded as warm-up before analysis.
 
 #### Output
 
@@ -351,6 +375,7 @@ cargo run --release -- generate-data [OPTIONS]
 | `--duration` | float | `3.0` | Audio duration per evaluation (seconds). Shorter = faster but noisier |
 | `--threads` | int | `4` | Number of parallel evaluation threads |
 | `--seed` | int | `42` | RNG seed for preset generation |
+| `--phys-gate` | flag | `false` | Evaluate rows with the physiological thalamic gate enabled instead of the heuristic gate-only path |
 
 #### Examples
 
@@ -363,23 +388,35 @@ cargo run --release -- generate-data --count 20000 --goals all --duration 3 --th
 
 # All brain types (20000 × 9 goals × 5 brains = 900k evals — long run)
 cargo run --release -- generate-data --count 20000 --goals all --brain-type all --threads 8
+
+# Phys-gate slice for sleep / relaxation surrogate coverage
+cargo run --release -- generate-data --count 20000 --goals sleep,deep_relaxation,meditation \
+  --brain-type all --phys-gate --threads 8
 ```
+
+Neural-analysis commands require `--duration > 2.0`, because the first 2.0 seconds are discarded as warm-up before scoring.
 
 #### Output Format
 
-CSV with columns: `g0, g1, ..., g189, goal_id, brain_type_id, assr, thalamic_gate, cet, phys_gate, score`
+CSV with columns: `g0, g1, ..., g229, goal_id, brain_type_id, assr, thalamic_gate, cet, phys_gate, score`
 
-- `g0..g189`: genome values (raw, not normalized — the surrogate normalizes on input)
+- `g0..g229`: genome values (raw, not normalized — the surrogate normalizes on input)
 - `goal_id`: integer index into `GoalKind::all()` (0=Focus, 1=DeepWork, 2=Sleep, ...)
 - `brain_type_id`: integer index into `BrainType::all()` (0=Normal, 1=HighAlpha, ...)
-- `assr`, `thalamic_gate`, `cet`, `phys_gate`: config flags (0 or 1)
+- `assr`, `thalamic_gate`, `cet`, `phys_gate`: the REAL feature flags used by the evaluation that produced the row (0 or 1). Default `generate-data` rows are `1,1,1,0`; `--phys-gate` produces `1,1,1,1`
 - `score`: real-pipeline score in [0, 1]
+
+`tools/train_surrogate.py` now infers the genome width from the CSV header (`g0..gN`) instead of relying on a stale hard-coded dimension, but the exported weights are still only valid for the exact input width in the training CSV.
 
 #### Surrogate Training Workflow
 
 ```bash
 # 1. Generate training data
 cargo run --release -- generate-data --count 20000 --goals all --threads 8
+
+# 1b. Optional: generate a phys-gate slice for sleep / relaxation goals
+cargo run --release -- generate-data --count 20000 --goals sleep,deep_relaxation,meditation \
+  --brain-type all --phys-gate --threads 8
 
 # 2. Train the surrogate MLP (requires Python + PyTorch)
 python tools/train_surrogate.py training_data.csv surrogate_weights.bin
@@ -388,6 +425,15 @@ python tools/train_surrogate.py training_data.csv surrogate_weights.bin
 cargo run --release -- optimize --goal sleep --surrogate --surrogate-weights surrogate_weights.bin
 ```
 
+The checked-in surrogate artifacts (`surrogate_weights.bin`, `surrogate_weights_med.bin`, `surrogate_weights_small.bin`) were regenerated against the current 248-input contract. Older 208-input artifacts from the pre-230-gene contract are stale; the Rust loader rejects them and asks for retraining from a fresh `generate-data` CSV.
+
+The current bundled training CSVs (`training_data.csv`, `training_combined.csv`) use the 237-column schema:
+
+- 230 genome columns: `g0..g229`
+- 2 metadata IDs: `goal_id`, `brain_type_id`
+- 4 config flags: `assr`, `thalamic_gate`, `cet`, `phys_gate`
+- 1 target: `score`
+
 ---
 
 ## Running Tests
@@ -395,7 +441,7 @@ cargo run --release -- optimize --goal sleep --surrogate --surrogate-weights sur
 ### Full Test Suite
 
 ```bash
-# Run the full suite (~300+ tests)
+# Run the default regression suite
 cargo test
 
 # Run in release mode (faster for pipeline tests)
@@ -407,6 +453,8 @@ cargo test -- --nocapture
 # Run a specific test by name
 cargo test sigmoid_at_v0_equals_half_max
 ```
+
+`cargo test` intentionally skips the four `analyze_preset::tests::*` sweep functions. Those are exploratory preset-analysis runs that print large tables and can take multiple minutes; they are kept available behind `#[ignore]` so the default suite stays operationally useful.
 
 ### Module-Specific Tests
 
@@ -471,8 +519,8 @@ cargo test optimizer::differential_evolution::tests
 # Regression tests — scoring snapshots, genome round-trip, pipeline integration
 cargo test regression_tests::tests
 
-# Preset analysis tests — parameter sweep sensitivity
-cargo test analyze_preset::tests
+# Preset analysis sweeps — ignored by default, run manually when exploring presets
+cargo test analyze_preset::tests -- --ignored --nocapture
 ```
 
 ### Test Categories
@@ -497,8 +545,8 @@ Full pipeline tests that render audio and run bilateral neural models:
 # Pipeline integration (renders 12s audio at 48 kHz per test)
 cargo test regression_tests::tests::pipeline
 
-# Preset analysis sweeps (multiple evaluations)
-cargo test analyze_preset::tests
+# Preset analysis sweeps (ignored by default; exploratory, table-printing runs)
+cargo test analyze_preset::tests -- --ignored --nocapture
 
 # Neural integration tests (bilateral simulation at 48 kHz)
 cargo test neural::tests::tests

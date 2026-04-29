@@ -6,7 +6,7 @@
 use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, PhysiologicalThalamicGate, ButterworthCrossover, EnvironmentParams, generate_rir, apply_rir};
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
-use crate::neural::{FhnModel, FastInhibParams, PerformanceVector, simulate_bilateral};
+use crate::neural::{BilateralResult, FhnModel, FhnResult, FastInhibParams, PerformanceVector, simulate_bilateral};
 use crate::preset::Preset;
 use crate::scoring::Goal;
 use noise_generator_core::NoiseEngine;
@@ -18,6 +18,35 @@ pub(crate) const SAMPLE_RATE: u32 = 48_000;
 pub(crate) const DECIMATION_FACTOR: usize = 48;
 /// Neural model sample rate after decimation.
 pub(crate) const NEURAL_SR: f64 = SAMPLE_RATE as f64 / DECIMATION_FACTOR as f64;
+/// Default neural-analysis warm-up discard window (seconds).
+pub(crate) const DEFAULT_WARMUP_DISCARD_SECS: f32 = 2.0;
+
+/// Validate that the rendered duration leaves a non-empty analysis window
+/// after the neural warm-up discard.
+pub(crate) fn validate_analysis_window(
+    duration_secs: f32,
+    warmup_discard_secs: f32,
+) -> Result<f32, String> {
+    if !duration_secs.is_finite() || duration_secs <= 0.0 {
+        return Err(format!(
+            "duration must be a positive finite value; got {duration_secs:.3}s"
+        ));
+    }
+    if !warmup_discard_secs.is_finite() || warmup_discard_secs < 0.0 {
+        return Err(format!(
+            "warm-up discard must be a non-negative finite value; got {warmup_discard_secs:.3}s"
+        ));
+    }
+
+    let analysis_secs = duration_secs - warmup_discard_secs;
+    if analysis_secs <= 0.0 {
+        return Err(format!(
+            "duration {duration_secs:.3}s must exceed warm-up discard {warmup_discard_secs:.3}s"
+        ));
+    }
+
+    Ok(analysis_secs)
+}
 
 /// Decimate a signal by averaging blocks of `factor` samples (boxcar anti-alias + downsample).
 ///
@@ -100,7 +129,7 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         SimulationConfig {
             duration_secs: 12.0,
-            warmup_discard_secs: 2.0,
+            warmup_discard_secs: DEFAULT_WARMUP_DISCARD_SECS,
             brain_type: BrainType::Normal,
             assr_enabled: true,
             thalamic_gate_enabled: true,
@@ -134,6 +163,15 @@ pub struct SimulationResult {
     pub alpha_asymmetry: f64,
     /// Performance vector: entrainment, E/I stability, spectral centroid.
     pub performance: PerformanceVector,
+}
+
+pub struct DetailedSimulationResult {
+    /// Canonical scalar summary used by optimizer, matrix mode, export, etc.
+    pub summary: SimulationResult,
+    /// Full FHN output used by single-preset diagnostics.
+    pub fhn: FhnResult,
+    /// Full bilateral cortical result used by single-preset diagnostics.
+    pub bilateral: BilateralResult,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -191,6 +229,21 @@ pub(crate) fn spectral_brightness(audio: &[f32], sample_rate: f64) -> f64 {
 ///
 /// This is the core function the optimizer calls for each candidate.
 pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) -> SimulationResult {
+    evaluate_preset_detailed(preset, goal, config).summary
+}
+
+/// Canonical detailed evaluation path used by the human-facing `evaluate`
+/// command. Returns the same scalar summary as `evaluate_preset()` plus the
+/// full neural results needed for diagnosis, without re-running a second
+/// shadow pipeline from `main.rs`.
+pub fn evaluate_preset_detailed(
+    preset: &Preset,
+    goal: &Goal,
+    config: &SimulationConfig,
+) -> DetailedSimulationResult {
+    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
+        .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
+
     let num_frames = (SAMPLE_RATE as f32 * config.duration_secs) as u32;
     let sr = SAMPLE_RATE as f64;
 
@@ -591,7 +644,7 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
     );
     let norm_bands = jr_result.band_powers.normalized();
 
-    SimulationResult {
+    let summary = SimulationResult {
         score,
         fhn_firing_rate: fhn_result.firing_rate,
         fhn_isi_cv: fhn_result.isi_cv,
@@ -607,6 +660,12 @@ pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) 
         right_dominant_freq: bi_result.right_dominant_freq,
         alpha_asymmetry: bi_result.alpha_asymmetry,
         performance,
+    };
+
+    DetailedSimulationResult {
+        summary,
+        fhn: fhn_result,
+        bilateral: bi_result,
     }
 }
 
@@ -797,7 +856,7 @@ mod tests {
     fn default_config_values() {
         let config = SimulationConfig::default();
         assert_eq!(config.duration_secs, 12.0);
-        assert_eq!(config.warmup_discard_secs, 2.0);
+        assert_eq!(config.warmup_discard_secs, DEFAULT_WARMUP_DISCARD_SECS);
         assert_eq!(config.brain_type, BrainType::Normal);
     }
 
@@ -806,6 +865,18 @@ mod tests {
         let config = SimulationConfig::default();
         let discard = (config.warmup_discard_secs as f64 * NEURAL_SR) as usize;
         assert_eq!(discard, 2000); // 2s × 1000 Hz
+    }
+
+    #[test]
+    fn validate_analysis_window_returns_effective_duration() {
+        let analysis = validate_analysis_window(3.0, DEFAULT_WARMUP_DISCARD_SECS).unwrap();
+        assert!((analysis - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn validate_analysis_window_rejects_duration_not_exceeding_warmup() {
+        let err = validate_analysis_window(2.0, DEFAULT_WARMUP_DISCARD_SECS).unwrap_err();
+        assert!(err.contains("must exceed warm-up discard"));
     }
 
     // ---------------------------------------------------------------

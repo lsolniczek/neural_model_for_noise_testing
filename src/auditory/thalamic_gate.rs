@@ -71,8 +71,8 @@ impl ThalamicGate {
     ///
     /// The relationship is linear:
     ///   arousal = 1.0 → shift = 0.0 (no change, alert state)
-    ///   arousal = 0.5 → shift = -17.5 (moderate relaxation)
-    ///   arousal = 0.0 → shift = -35.0 (deep relaxation, near bifurcation)
+    ///   arousal = 0.5 → shift = -32.5 (moderate relaxation)
+    ///   arousal = 0.0 → shift = -65.0 (deep relaxation, near bifurcation)
     pub fn offset_shift(&self) -> f64 {
         if !self.enabled {
             return 0.0;
@@ -91,23 +91,21 @@ impl ThalamicGate {
     ///   - Band 1 (low-mid, 200-800 Hz → theta/alpha): 70% shift
     ///   - Band 2 (mid-high, 800-3kHz → alpha/beta): 20% shift
     ///   - Band 3 (high, 3-8kHz → beta/gamma): no shift (stays tonic)
+    ///
+    /// The heuristic gate intentionally keeps these proportions FIXED across
+    /// arousal. More aggressive nonlinear redistribution belongs in the
+    /// physiological gate (`--phys-gate`), not in this lightweight heuristic.
     pub fn band_offset_shifts(&self) -> [f64; 4] {
         if !self.enabled {
             return [0.0; 4];
         }
         let base = -MAX_OFFSET_REDUCTION * (1.0 - self.arousal);
 
-        // At moderate arousal (>0.3): only low bands shift (Steriade 1993).
-        // At very low arousal (<0.15): ALL bands shift — full burst mode,
-        // the entire thalamocortical system enters slow-wave state.
-        // Interpolate proportions between the two regimes.
-        let deep_factor = ((0.3 - self.arousal) / 0.3).clamp(0.0, 1.0); // 0 at arousal≥0.3, 1 at arousal=0
-
         [
-            base * 1.0,                                // Band 0: always full
-            base * (0.7 + 0.3 * deep_factor),          // Band 1: 70% → 100% at deep relaxation
-            base * (0.2 + 0.6 * deep_factor),          // Band 2: 20% → 80% at deep relaxation
-            base * (0.0 + 0.4 * deep_factor),          // Band 3: 0% → 40% at deep relaxation
+            base * 1.0,
+            base * 0.7,
+            base * 0.2,
+            0.0,
         ]
     }
 
@@ -443,5 +441,18 @@ mod tests {
         // Band 2 = 20% of band 0
         assert!((shifts[2] / band0 - 0.2).abs() < 0.01,
             "Band 2 should be 20% of band 0: {} / {} = {}", shifts[2], band0, shifts[2] / band0);
+    }
+
+    #[test]
+    fn band_shifts_mid_arousal_keep_same_proportions() {
+        let gate = ThalamicGate::new(0.4);
+        let shifts = gate.band_offset_shifts();
+        let band0 = shifts[0];
+        assert!((shifts[1] / band0 - 0.7).abs() < 0.01,
+            "Band 1 should stay at 70% of band 0 at mid arousal");
+        assert!((shifts[2] / band0 - 0.2).abs() < 0.01,
+            "Band 2 should stay at 20% of band 0 at mid arousal");
+        assert!(shifts[3].abs() < 1e-10,
+            "Band 3 should stay at 0 shift at mid arousal");
     }
 }

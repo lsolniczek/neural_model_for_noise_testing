@@ -424,6 +424,20 @@ mod tests {
         assert_eq!(de.population[0].fitness, 0.5);
     }
 
+    #[test]
+    fn skipped_trial_report_keeps_parent_unchanged() {
+        let mut de = DifferentialEvolution::new(simple_bounds(2), 6, 0.8, 0.9, 42);
+        for i in 0..6 {
+            de.report_fitness(i, 0.4 + i as f64 * 0.01);
+        }
+
+        let before = de.population[0].clone();
+        let _trials = de.generate_trials();
+
+        assert_eq!(de.population[0].genome, before.genome);
+        assert_eq!(de.population[0].fitness, before.fitness);
+    }
+
     // ---------------------------------------------------------------
     // Convergence on a simple 1D function
     // ---------------------------------------------------------------

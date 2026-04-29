@@ -6,8 +6,8 @@
 ///
 /// # Architecture
 ///
-/// Input (208 dims): genome[190] + goal one-hot[9] + brain_type one-hot[5] + config flags[4]
-/// Hidden: Linear(208,256) → ReLU → Linear(256,256) → ReLU → Linear(256,128) → ReLU
+/// Input (248 dims): genome[230] + goal one-hot[9] + brain_type one-hot[5] + config flags[4]
+/// Hidden: Linear(248,256) → ReLU → Linear(256,256) → ReLU → Linear(256,128) → ReLU
 /// Output: Linear(128,1) → Sigmoid → predicted score ∈ [0, 1]
 ///
 /// # Inference
@@ -24,10 +24,12 @@
 ///
 /// # Safety
 ///
-/// The surrogate is NEVER used for final scoring. It only pre-screens
-/// candidates inside the DE loop (Priority 14d). Final scores always
-/// come from the real pipeline via `evaluate_preset()`. When the
-/// `--surrogate` flag is off (default), this module is never called.
+/// The surrogate is NEVER used for final scoring. It only ranks
+/// candidates inside the DE loop (Priority 14d). Only validated real
+/// pipeline scores are allowed to replace DE parents, and the final
+/// exported preset is always re-evaluated with `evaluate_preset()`.
+/// When the `--surrogate` flag is off (default), this module is never
+/// called.
 ///
 /// # Refs
 ///
@@ -38,19 +40,31 @@
 
 use crate::brain_type::BrainType;
 use crate::scoring::GoalKind;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 /// Number of genome dimensions (from `preset::GENOME_LEN`).
-const GENOME_DIM: usize = 230;
+pub const GENOME_DIM: usize = crate::preset::GENOME_LEN;
 /// Number of goal kinds (from `GoalKind::all().len()`).
-const GOAL_DIM: usize = 9;
+pub const GOAL_DIM: usize = 9;
 /// Number of brain types (from `BrainType::all().len()`).
-const BRAIN_TYPE_DIM: usize = 5;
+pub const BRAIN_TYPE_DIM: usize = 5;
 /// Config flags: assr, thalamic_gate, cet, phys_gate.
-const CONFIG_DIM: usize = 4;
+pub const CONFIG_DIM: usize = 4;
 /// Total input dimension.
 pub const INPUT_DIM: usize = GENOME_DIM + GOAL_DIM + BRAIN_TYPE_DIM + CONFIG_DIM;
+/// Output dimension of the surrogate MLP.
+pub const OUTPUT_DIM: usize = 1;
+/// Trailing CSV columns after the genome values.
+pub const CSV_METADATA_COLUMNS: [&str; 7] = [
+    "goal_id",
+    "brain_type_id",
+    "assr",
+    "thalamic_gate",
+    "cet",
+    "phys_gate",
+    "score",
+];
 
 /// A dense (fully connected) layer: y = Wx + b.
 #[derive(Debug, Clone)]
@@ -87,8 +101,8 @@ impl SurrogateModel {
     ///
     /// File format (little-endian):
     ///   Header: n_layers (u32), then (n_layers + 1) dimension values (u32).
-    ///   For a 3-hidden-layer network with dims [208, 256, 256, 128, 1],
-    ///   the header is: [4, 208, 256, 256, 128, 1].
+    ///   For a 3-hidden-layer network with dims [248, 256, 256, 128, 1],
+    ///   the header is: [4, 248, 256, 256, 128, 1].
     ///
     ///   Body: for each layer i:
     ///     weights: dims[i+1] × dims[i] f32 values (row-major)
@@ -126,6 +140,27 @@ impl SurrogateModel {
             dims.push(read_u32(&mut cursor)? as usize);
         }
 
+        if dims[0] != INPUT_DIM {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "stale surrogate weights: input dim {} does not match compiled INPUT_DIM {}. retrain the surrogate with a current generate-data CSV",
+                    dims[0], INPUT_DIM
+                ),
+            ));
+        }
+
+        if *dims.last().unwrap_or(&0) != OUTPUT_DIM {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid surrogate weights: output dim {} does not match expected {}",
+                    dims.last().copied().unwrap_or(0),
+                    OUTPUT_DIM
+                ),
+            ));
+        }
+
         let mut layers = Vec::with_capacity(n_layers);
         for i in 0..n_layers {
             let in_dim = dims[i];
@@ -142,10 +177,20 @@ impl SurrogateModel {
             layers.push(DenseLayer { weights, biases, in_dim, out_dim });
         }
 
+        if cursor != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid surrogate weights: {} trailing bytes after layer data",
+                    data.len() - cursor
+                ),
+            ));
+        }
+
         Ok(SurrogateModel { layers })
     }
 
-    /// Build the 208-dim input vector from structured inputs.
+    /// Build the surrogate input vector from structured inputs.
     pub fn build_input(
         genome: &[f64],
         goal: GoalKind,
@@ -155,9 +200,17 @@ impl SurrogateModel {
         cet: bool,
         phys_gate: bool,
     ) -> Vec<f32> {
+        assert_eq!(
+            genome.len(),
+            GENOME_DIM,
+            "surrogate genome length mismatch: got {}, expected {}",
+            genome.len(),
+            GENOME_DIM
+        );
+
         let mut input = Vec::with_capacity(INPUT_DIM);
 
-        // Genome (190 floats, normalized to [0,1] using bounds)
+        // Genome (normalized to [0,1] using bounds)
         let bounds = crate::preset::Preset::bounds();
         for (i, &val) in genome.iter().enumerate() {
             let (lo, hi) = bounds[i];
@@ -325,6 +378,47 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    #[test]
+    fn load_rejects_stale_input_dimension() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(1_u32).to_le_bytes());
+        bytes.extend_from_slice(&(208_u32).to_le_bytes());
+        bytes.extend_from_slice(&(1_u32).to_le_bytes());
+        bytes.extend_from_slice(&(0.25_f32).to_le_bytes());
+        bytes.extend_from_slice(&(0.75_f32).to_le_bytes());
+
+        let tmp = std::env::temp_dir().join("test_surrogate_stale_dim.bin");
+        std::fs::write(&tmp, &bytes).unwrap();
+
+        let result = match SurrogateModel::load(&tmp) {
+            Ok(_) => panic!("stale surrogate weights should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(result.kind(), io::ErrorKind::InvalidData);
+        let msg = result.to_string();
+        assert!(msg.contains("stale surrogate weights"));
+        assert!(msg.contains("retrain"));
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn bundled_surrogate_artifacts_load() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for rel in [
+            "surrogate_weights.bin",
+            "surrogate_weights_small.bin",
+            "surrogate_weights_med.bin",
+        ] {
+            let path = root.join(rel);
+            let model = SurrogateModel::load(&path)
+                .unwrap_or_else(|e| panic!("failed to load bundled artifact {}: {e}", path.display()));
+            let input = vec![0.5_f32; INPUT_DIM];
+            let score = model.predict(&input);
+            assert!((0.0..=1.0).contains(&score), "bundled artifact {} produced invalid score {}", path.display(), score);
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Forward pass properties
     // ═══════════════════════════════════════════════════════════════
@@ -456,7 +550,7 @@ mod tests {
 
     #[test]
     fn production_architecture_shape() {
-        // Verify the 208→256→256→128→1 architecture works end-to-end.
+        // Verify the 248→256→256→128→1 architecture works end-to-end.
         let model = SurrogateModel::synthetic(&[INPUT_DIM, 256, 256, 128, 1], 42);
         assert_eq!(model.layers.len(), 4);
         assert_eq!(model.layers[0].in_dim, INPUT_DIM);

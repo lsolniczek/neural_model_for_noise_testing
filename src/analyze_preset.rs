@@ -72,6 +72,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exploratory preset sweep; run manually with cargo test analyze_preset::tests -- --ignored --nocapture"]
     fn sweep_ssn_lfo_freq_and_depth() {
         let config = SimulationConfig::default();
         let goal = Goal::new(GoalKind::Isolation);
@@ -94,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exploratory preset sweep; run manually with cargo test analyze_preset::tests -- --ignored --nocapture"]
     fn sweep_grey_lfo_depth() {
         let config = SimulationConfig::default();
         let goal = Goal::new(GoalKind::Isolation);
@@ -164,6 +166,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exploratory preset sweep; run manually with cargo test analyze_preset::tests -- --ignored --nocapture"]
     fn analyze_sleep_sanctuary_all_goals() {
         let preset = build_preset(14.0, 0.2); // current best
         let config = SimulationConfig::default();
@@ -183,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exploratory preset sweep; run manually with cargo test analyze_preset::tests -- --ignored --nocapture"]
     fn analyze_sleep_sanctuary_sleep_detail() {
         let preset = build_preset(14.0, 0.2);
         for bt in BrainType::all() {

@@ -19,7 +19,13 @@ use std::time::Instant;
 
 use brain_type::BrainType;
 use optimizer::DifferentialEvolution;
-use pipeline::{evaluate_preset, SimulationConfig};
+use pipeline::{
+    evaluate_preset,
+    evaluate_preset_detailed,
+    validate_analysis_window,
+    DetailedSimulationResult,
+    SimulationConfig,
+};
 use preset::Preset;
 use scoring::{Goal, GoalKind, MetricStatus};
 
@@ -29,6 +35,14 @@ use scoring::{Goal, GoalKind, MetricStatus};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvaluateFeatureFlags {
+    assr: bool,
+    thalamic_gate: bool,
+    cet: bool,
+    phys_gate: bool,
 }
 
 #[derive(Subcommand)]
@@ -89,7 +103,8 @@ enum Commands {
         phys_gate: bool,
 
         /// Enable surrogate-assisted pre-screening (Priority 14).
-        /// Uses a trained MLP to pre-filter candidates before real evaluation.
+        /// Uses a trained MLP to rank candidates before selective real evaluation.
+        /// Only validated real-pipeline scores are allowed to replace DE parents.
         #[arg(long, default_value_t = false)]
         surrogate: bool,
 
@@ -103,7 +118,7 @@ enum Commands {
         #[arg(long)]
         log_evaluations: Option<PathBuf>,
 
-        /// Number of top surrogate candidates to validate with real pipeline
+        /// Number of top surrogate candidates to validate with the real pipeline
         #[arg(long, default_value_t = 5)]
         surrogate_k: usize,
     },
@@ -129,11 +144,19 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         assr: bool,
 
+        /// Disable ASSR transfer function (auditory pathway filtering)
+        #[arg(long = "no-assr", conflicts_with = "assr", default_value_t = false)]
+        no_assr: bool,
+
         /// Enable thalamic gate (arousal-dependent filtering).
         /// ON by default — required for physiologically correct arousal sensitivity.
         /// Use --no-thalamic-gate to disable.
         #[arg(long, default_value_t = true)]
         thalamic_gate: bool,
+
+        /// Disable thalamic gate (arousal-dependent filtering)
+        #[arg(long = "no-thalamic-gate", conflicts_with = "thalamic_gate", default_value_t = false)]
+        no_thalamic_gate: bool,
 
         /// Enable Cortical Envelope Tracking (Priority 13).
         /// Splits each band into slow (≤10 Hz) and fast (>10 Hz) paths,
@@ -142,6 +165,10 @@ enum Commands {
         /// coexistence. Use --no-cet to disable.
         #[arg(long, default_value_t = true)]
         cet: bool,
+
+        /// Disable Cortical Envelope Tracking
+        #[arg(long = "no-cet", conflicts_with = "cet", default_value_t = false)]
+        no_cet: bool,
 
         /// Enable the physiological thalamic gate (Priority 9). Replaces
         /// the linear heuristic gate with an ion-channel-based TC cell
@@ -208,6 +235,11 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         threads: usize,
 
+        /// Enable the physiological thalamic gate for generated rows.
+        /// This lets surrogate datasets cover the `optimize --phys-gate` mode.
+        #[arg(long = "phys-gate", default_value_t = false)]
+        phys_gate: bool,
+
         /// Random seed
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -226,6 +258,173 @@ fn status_icon(status: &MetricStatus) -> &'static str {
         MetricStatus::Warn => "~",
         MetricStatus::Fail => "\u{2717}",
     }
+}
+
+fn resolve_evaluate_feature_flags(
+    assr: bool,
+    no_assr: bool,
+    thalamic_gate: bool,
+    no_thalamic_gate: bool,
+    cet: bool,
+    no_cet: bool,
+    phys_gate: bool,
+) -> EvaluateFeatureFlags {
+    EvaluateFeatureFlags {
+        assr: assr && !no_assr,
+        thalamic_gate: thalamic_gate && !no_thalamic_gate,
+        cet: cet && !no_cet,
+        phys_gate,
+    }
+}
+
+fn build_eval_config(duration: f32, brain_type: BrainType, flags: EvaluateFeatureFlags) -> SimulationConfig {
+    SimulationConfig {
+        duration_secs: duration,
+        brain_type,
+        assr_enabled: flags.assr,
+        thalamic_gate_enabled: flags.thalamic_gate,
+        cet_enabled: flags.cet,
+        physiological_thalamic_gate_enabled: flags.phys_gate,
+        ..SimulationConfig::default()
+    }
+}
+
+fn build_generate_data_config(duration: f32, brain_type: BrainType, phys_gate: bool) -> SimulationConfig {
+    SimulationConfig {
+        duration_secs: duration,
+        brain_type,
+        physiological_thalamic_gate_enabled: phys_gate,
+        ..SimulationConfig::default()
+    }
+}
+
+fn ensure_analysis_window_or_exit(command_name: &str, duration: f32, warmup_discard_secs: f32) {
+    if let Err(message) = validate_analysis_window(duration, warmup_discard_secs) {
+        eprintln!(
+            "Invalid --duration for {command_name}: {message}. Increase --duration above {:.1}s.",
+            warmup_discard_secs
+        );
+        std::process::exit(2);
+    }
+}
+
+fn surrogate_validation_mask(candidate_count: usize, surrogate_k: usize, generation: usize) -> Vec<bool> {
+    let mut validate = vec![false; candidate_count];
+    let k = surrogate_k.min(candidate_count);
+
+    for flag in validate.iter_mut().take(k) {
+        *flag = true;
+    }
+
+    if candidate_count > k {
+        let exploration_rank = k + (generation * 7 + 13) % (candidate_count - k);
+        validate[exploration_rank] = true;
+    }
+
+    validate
+}
+
+fn surrogate_csv_header() -> String {
+    let genome_cols: Vec<String> = (0..surrogate::GENOME_DIM).map(|i| format!("g{i}")).collect();
+    format!(
+        "{},{}",
+        genome_cols.join(","),
+        surrogate::CSV_METADATA_COLUMNS.join(",")
+    )
+}
+
+fn surrogate_csv_row(
+    genome: &[f64],
+    goal_kind: GoalKind,
+    brain_type: BrainType,
+    config: &SimulationConfig,
+    score: f64,
+) -> String {
+    assert_eq!(
+        genome.len(),
+        surrogate::GENOME_DIM,
+        "surrogate CSV genome length mismatch: got {}, expected {}",
+        genome.len(),
+        surrogate::GENOME_DIM
+    );
+
+    let genome_str: Vec<String> = genome.iter().map(|v| format!("{v:.6}")).collect();
+    let goal_id = GoalKind::all().iter().position(|&g| g == goal_kind).unwrap_or(0);
+    let bt_id = BrainType::all().iter().position(|&b| b == brain_type).unwrap_or(0);
+
+    format!(
+        "{},{goal_id},{bt_id},{},{},{},{},{score:.6}",
+        genome_str.join(","),
+        if config.assr_enabled { 1 } else { 0 },
+        if config.thalamic_gate_enabled { 1 } else { 0 },
+        if config.cet_enabled { 1 } else { 0 },
+        if config.physiological_thalamic_gate_enabled { 1 } else { 0 },
+    )
+}
+
+fn reevaluate_best_preset(
+    best_genome: &[f64],
+    goal: &Goal,
+    sim_config: &SimulationConfig,
+) -> (Preset, pipeline::SimulationResult) {
+    let best_preset = Preset::from_genome(best_genome);
+    let best_result = evaluate_preset(&best_preset, goal, sim_config);
+    (best_preset, best_result)
+}
+
+fn export_best_genome(
+    output_path: &Path,
+    best_genome: &[f64],
+    goal: &Goal,
+    goal_kind: GoalKind,
+    generations: usize,
+    duration_secs: f32,
+    sim_config: &SimulationConfig,
+) -> std::io::Result<(Preset, pipeline::SimulationResult)> {
+    let (best_preset, best_result) = reevaluate_best_preset(best_genome, goal, sim_config);
+    export::export_preset(
+        &best_preset,
+        &best_result,
+        goal_kind,
+        generations,
+        duration_secs,
+        output_path,
+    )?;
+    Ok((best_preset, best_result))
+}
+
+fn diagnose_detailed_result(goal: &Goal, result: &DetailedSimulationResult) -> scoring::Diagnosis {
+    goal.diagnose(
+        &result.fhn,
+        &result.bilateral.combined,
+        result.summary.brightness,
+        result.summary.alpha_asymmetry,
+        result.summary.performance.plv,
+        result.summary.performance.envelope_plv,
+        Some(result.summary.performance),
+    )
+}
+
+fn evaluate_score_matrix(
+    preset: &Preset,
+    goals: &[GoalKind],
+    brain_types: &[BrainType],
+    duration: f32,
+    flags: EvaluateFeatureFlags,
+) -> Vec<Vec<f64>> {
+    brain_types
+        .iter()
+        .map(|bt| {
+            goals
+                .iter()
+                .map(|goal_kind| {
+                    let goal = Goal::new(*goal_kind);
+                    let sim_config = build_eval_config(duration, *bt, flags);
+                    evaluate_preset(preset, &goal, &sim_config).score
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn main() {
@@ -277,11 +476,23 @@ fn main() {
             brain_type,
             duration,
             assr,
+            no_assr,
             thalamic_gate,
+            no_thalamic_gate,
             cet,
+            no_cet,
             phys_gate,
         } => {
-            run_evaluate(&preset, &goal, &brain_type, duration, assr, thalamic_gate, cet, phys_gate);
+            let flags = resolve_evaluate_feature_flags(
+                assr,
+                no_assr,
+                thalamic_gate,
+                no_thalamic_gate,
+                cet,
+                no_cet,
+                phys_gate,
+            );
+            run_evaluate(&preset, &goal, &brain_type, duration, flags);
         }
         Commands::Disturb {
             preset,
@@ -303,9 +514,10 @@ fn main() {
             brain_type,
             duration,
             threads,
+            phys_gate,
             seed,
         } => {
-            run_generate_data(&output, count, &goals, &brain_type, duration, threads, seed);
+            run_generate_data(&output, count, &goals, &brain_type, duration, threads, phys_gate, seed);
         }
     }
 }
@@ -331,6 +543,8 @@ fn run_optimize(
     surrogate_k: usize,
     log_evaluations_path: Option<&Path>,
 ) {
+    ensure_analysis_window_or_exit("optimize", duration, SimulationConfig::default().warmup_discard_secs);
+
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
             "Unknown goal: '{}'. Valid: deep_relaxation, focus, sleep, isolation, meditation, deep_work",
@@ -387,9 +601,7 @@ fn run_optimize(
         if !file_exists {
             // Write CSV header
             let mut f = file;
-            let genome_cols: Vec<String> = (0..preset::GENOME_LEN).map(|i| format!("g{i}")).collect();
-            writeln!(f, "{},goal_id,brain_type_id,assr,thalamic_gate,cet,phys_gate,score",
-                genome_cols.join(",")).unwrap();
+            writeln!(f, "{}", surrogate_csv_header()).unwrap();
             println!("  Log evals:      {} (new file)", path.display());
             Arc::new(Mutex::new(f))
         } else {
@@ -401,16 +613,7 @@ fn run_optimize(
     let log_eval = |genome: &[f64], score: f64| {
         if let Some(ref logger) = eval_logger {
             let mut f = logger.lock().unwrap();
-            let genome_str: Vec<String> = genome.iter().map(|v| format!("{v:.6}")).collect();
-            let goal_id = GoalKind::all().iter().position(|&g| g == goal_kind).unwrap_or(0);
-            let bt_id = BrainType::all().iter().position(|&b| b == bt).unwrap_or(0);
-            let _ = writeln!(f, "{},{goal_id},{bt_id},{},{},{},{},{score:.6}",
-                genome_str.join(","),
-                if sim_config.assr_enabled { 1 } else { 0 },
-                if sim_config.thalamic_gate_enabled { 1 } else { 0 },
-                if sim_config.cet_enabled { 1 } else { 0 },
-                if sim_config.physiological_thalamic_gate_enabled { 1 } else { 0 },
-            );
+            let _ = writeln!(f, "{}", surrogate_csv_row(genome, goal_kind, bt, &sim_config, score));
         }
     };
 
@@ -484,7 +687,7 @@ fn run_optimize(
             // 2. Rank by surrogate score, take top-K
             // 3. Also include 1 random candidate for exploration
             // 4. Validate only those K+1 with the real pipeline
-            // 5. For unvalidated trials, use surrogate score (approximate)
+            // 5. Only validated real scores are allowed to replace DE parents
             let mut scored: Vec<(usize, Vec<f64>, f32)> = trials
                 .iter()
                 .map(|(idx, genome)| {
@@ -504,26 +707,17 @@ fn run_optimize(
             scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
             // Top-K + 1 random exploration candidate
-            let k = surrogate_k.min(scored.len());
-            let mut validate_indices: Vec<usize> = (0..k).collect();
-            // Add one random index outside top-K for exploration
-            if scored.len() > k {
-                let rand_idx = k + (gen * 7 + 13) % (scored.len() - k);
-                if !validate_indices.contains(&rand_idx) {
-                    validate_indices.push(rand_idx);
-                }
-            }
+            let validate_mask = surrogate_validation_mask(scored.len(), surrogate_k, gen);
 
             for (rank, &(target_idx, ref trial_genome, surr_score)) in scored.iter().enumerate() {
-                if validate_indices.contains(&rank) {
+                if validate_mask[rank] {
                     // Validate with real pipeline
                     let preset = Preset::from_genome(trial_genome);
                     let result = evaluate_preset(&preset, &goal, &sim_config);
                     log_eval(trial_genome, result.score);
                     de.report_trial_result(target_idx, trial_genome.clone(), result.score);
                 } else {
-                    // Use surrogate score (approximate) for non-validated trials
-                    de.report_trial_result(target_idx, trial_genome.clone(), surr_score as f64);
+                    let _ = surr_score;
                 }
             }
         } else {
@@ -584,8 +778,7 @@ fn run_optimize(
 
     // ── Final evaluation of best preset ─────────────────────────────────────
     let best_genome = de.best().genome.clone();
-    let best_preset = Preset::from_genome(&best_genome);
-    let best_result = evaluate_preset(&best_preset, &goal, &sim_config);
+    let (best_preset, best_result) = reevaluate_best_preset(&best_genome, &goal, &sim_config);
 
     println!();
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
@@ -658,15 +851,16 @@ fn run_optimize(
         PathBuf::from(format!("preset_{}_{}.json", goal_kind, ts))
     });
 
-    match export::export_preset(
-        &best_preset,
-        &best_result,
+    match export_best_genome(
+        &output_path,
+        &best_genome,
+        &goal,
         goal_kind,
         de.generation(),
         duration,
-        &output_path,
+        &sim_config,
     ) {
-        Ok(()) => {
+        Ok(_) => {
             println!();
             println!("  Exported: {}", output_path.display());
         }
@@ -680,7 +874,15 @@ fn run_optimize(
 
 // ── Evaluate ─────────────────────────────────────────────────────────────────
 
-fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, duration: f32, assr: bool, thalamic_gate: bool, cet: bool, phys_gate: bool) {
+fn run_evaluate(
+    preset_path: &PathBuf,
+    goal_str: &str,
+    brain_type_str: &str,
+    duration: f32,
+    flags: EvaluateFeatureFlags,
+) {
+    ensure_analysis_window_or_exit("evaluate", duration, SimulationConfig::default().warmup_discard_secs);
+
     // Load preset from JSON
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
         eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
@@ -738,38 +940,28 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
     println!("  Preset: {}", preset_path.display());
     println!("  Audio:  {:.1}s per evaluation", duration);
+    println!(
+        "  Features: assr={}  thalamic_gate={}  cet={}  phys_gate={}",
+        flags.assr, flags.thalamic_gate, flags.cet, flags.phys_gate
+    );
     println!();
 
     if is_matrix {
         // ── Matrix mode ─────────────────────────────────────────────────────
-        print_comparison_matrix(&preset, &goals, &brain_types, duration, assr, thalamic_gate, cet, phys_gate);
+        print_comparison_matrix(&preset, &goals, &brain_types, duration, flags);
     } else {
         // ── Single evaluation with full diagnosis ───────────────────────────
         let bt = brain_types[0];
         let goal_kind = goals[0];
         let goal = Goal::new(goal_kind);
-
-        let sim_config = SimulationConfig {
-            duration_secs: duration,
-            brain_type: bt,
-            assr_enabled: assr,
-            thalamic_gate_enabled: thalamic_gate,
-            cet_enabled: cet,
-            physiological_thalamic_gate_enabled: phys_gate,
-            ..SimulationConfig::default()
-        };
-        let result = evaluate_preset(&preset, &goal, &sim_config);
-
-        // Re-run pipeline for detailed diagnosis (need FHN/JR results)
-        let detailed = run_detailed_pipeline(&preset, bt, duration, assr, thalamic_gate, cet, phys_gate);
-        let brightness = detailed.brightness;
-        let energy_fractions = detailed.energy_fractions;
-
-        let diagnosis = goal.diagnose(&detailed.fhn, &detailed.bilateral.combined, brightness, detailed.bilateral.alpha_asymmetry, detailed.performance.plv, detailed.performance.envelope_plv, Some(detailed.performance));
+        let sim_config = build_eval_config(duration, bt, flags);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &sim_config);
+        let result = &detailed.summary;
+        let diagnosis = diagnose_detailed_result(&goal, &detailed);
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
-        println!("  Score:      {:.4}", diagnosis.score);
+        println!("  Score:      {:.4}", result.score);
         println!();
 
         // Tonotopic Band Energies
@@ -777,8 +969,8 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         println!("    {:<22} {:<10} {}", "Band", "Energy", "");
         println!("    {}", "\u{2500}".repeat(40));
         for (b, label) in auditory::BAND_LABELS.iter().enumerate() {
-            let pct = energy_fractions[b] * 100.0;
-            let bar_str = bar(energy_fractions[b], 15);
+            let pct = result.band_energy_fractions[b] * 100.0;
+            let bar_str = bar(result.band_energy_fractions[b], 15);
             println!("    {:<22} {} {:.1}%", label, bar_str, pct);
         }
         println!();
@@ -931,31 +1123,31 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
         println!();
 
         println!("  Performance Vector:");
-        println!("    Spectral centroid:  {:.1} Hz", detailed.performance.spectral_centroid);
-        if let Some(er) = detailed.performance.entrainment_ratio {
+        println!("    Spectral centroid:  {:.1} Hz", result.performance.spectral_centroid);
+        if let Some(er) = result.performance.entrainment_ratio {
             println!("    Entrainment ratio:  {:.3}", er);
         } else {
             println!("    Entrainment ratio:  N/A (no NeuralLFO)");
         }
-        if let Some(ei) = detailed.performance.ei_stability {
+        if let Some(ei) = result.performance.ei_stability {
             println!("    E/I stability (CV): {:.3}", ei);
         } else {
             println!("    E/I stability:      N/A (G=0)");
         }
         println!();
 
-        let brightness_label = if brightness > 0.7 {
+        let brightness_label = if result.brightness > 0.7 {
             "bright (white-like)"
-        } else if brightness > 0.4 {
+        } else if result.brightness > 0.4 {
             "moderate (pink-like)"
-        } else if brightness > 0.15 {
+        } else if result.brightness > 0.15 {
             "dark (brown-like)"
         } else {
             "very dark"
         };
         println!(
             "  Spectral brightness: {:.2} ({})",
-            brightness, brightness_label
+            result.brightness, brightness_label
         );
         println!();
 
@@ -975,327 +1167,15 @@ fn run_evaluate(preset_path: &PathBuf, goal_str: &str, brain_type_str: &str, dur
     println!();
 }
 
-/// Run the full tonotopic pipeline for detailed diagnosis.
-///
-/// Returns (FhnResult, JansenRitResult, brightness, energy_fractions).
-struct DetailedResult {
-    fhn: neural::FhnResult,
-    bilateral: neural::BilateralResult,
-    brightness: f64,
-    energy_fractions: [f64; 4],
-    performance: neural::PerformanceVector,
-}
-
-fn run_detailed_pipeline(
-    preset: &Preset,
-    brain_type: BrainType,
-    duration: f32,
-    assr_enabled: bool,
-    thalamic_gate_enabled: bool,
-    cet_enabled: bool,
-    physiological_thalamic_gate_enabled: bool,
-) -> DetailedResult {
-    use crate::auditory::GammatoneFilterbank;
-    use noise_generator_core::NoiseEngine;
-    use rustfft::{num_complex::Complex, FftPlanner};
-
-    let sample_rate = 48_000_u32;
-    let sr = sample_rate as f64;
-    let num_frames = (sample_rate as f32 * duration) as u32;
-
-    let engine = NoiseEngine::new(sample_rate, 0.8);
-    preset.apply_to_engine(&engine);
-
-    // Movement controller
-    let mut movement = movement::MovementController::from_preset(preset);
-    let warmup_frames = (sample_rate as f32 * 1.0) as u32;
-    let chunk_frames = (sample_rate as f32 * 0.05) as u32;
-
-    if movement.has_movement() {
-        let warmup_chunks = warmup_frames / chunk_frames;
-        let dt = chunk_frames as f64 / sample_rate as f64;
-        for _ in 0..warmup_chunks {
-            movement.tick(dt, &engine);
-            let _ = engine.render_audio(chunk_frames);
-        }
-    } else {
-        let _ = engine.render_audio(warmup_frames);
-    }
-
-    let audio = if movement.has_movement() {
-        let dt = chunk_frames as f64 / sample_rate as f64;
-        let mut all_audio = Vec::with_capacity((num_frames * 2) as usize);
-        let mut rendered = 0_u32;
-        while rendered < num_frames {
-            let this_chunk = chunk_frames.min(num_frames - rendered);
-            movement.tick(dt, &engine);
-            all_audio.extend_from_slice(&engine.render_audio(this_chunk));
-            rendered += this_chunk;
-        }
-        all_audio
-    } else {
-        engine.render_audio(num_frames)
-    };
-
-    // Deinterleave to L/R
-    let num_samples = audio.len() / 2;
-    let mut left = Vec::with_capacity(num_samples);
-    let mut right = Vec::with_capacity(num_samples);
-    for i in 0..num_samples {
-        left.push(audio[i * 2]);
-        right.push(audio[i * 2 + 1]);
-    }
-
-    // Cochlear processing — separate L/R
-    let mut fb_l = GammatoneFilterbank::new(sr);
-    let mut fb_r = GammatoneFilterbank::new(sr);
-    let bands_l = fb_l.process_to_band_groups(&left);
-    let bands_r = fb_r.process_to_band_groups(&right);
-
-    // Normalise each ear using GLOBAL max (preserves inter-band energy ratios)
-    let mut left_bands: [Vec<f64>; 4] = [
-        vec![0.0; bands_l.signals[0].len()],
-        vec![0.0; bands_l.signals[1].len()],
-        vec![0.0; bands_l.signals[2].len()],
-        vec![0.0; bands_l.signals[3].len()],
-    ];
-    let mut right_bands: [Vec<f64>; 4] = [
-        vec![0.0; bands_r.signals[0].len()],
-        vec![0.0; bands_r.signals[1].len()],
-        vec![0.0; bands_r.signals[2].len()],
-        vec![0.0; bands_r.signals[3].len()],
-    ];
-    let mut energy_fractions = [0.0_f64; 4];
-
-    let global_max_l = (0..4)
-        .map(|b| bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max))
-        .fold(0.0_f64, f64::max);
-    let global_max_r = (0..4)
-        .map(|b| bands_r.signals[b].iter().cloned().fold(0.0_f64, f64::max))
-        .fold(0.0_f64, f64::max);
-
-    let norm_l = if global_max_l > 1e-10 { 1.0 / global_max_l } else { 1.0 };
-    let norm_r = if global_max_r > 1e-10 { 1.0 / global_max_r } else { 1.0 };
-
-    for b in 0..4 {
-        left_bands[b] = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
-        right_bands[b] = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
-        energy_fractions[b] = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
-    }
-    let ef_sum: f64 = energy_fractions.iter().sum();
-    if ef_sum > 1e-30 { for ef in &mut energy_fractions { *ef /= ef_sum; } }
-
-    // Brightness from FFT
-    let n = left.len();
-    let fft_len = n.next_power_of_two();
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(fft_len);
-    let mut buf: Vec<Complex<f64>> = (0..fft_len)
-        .map(|i| if i < n { Complex::new(left[i] as f64, 0.0) } else { Complex::new(0.0, 0.0) })
-        .collect();
-    fft.process(&mut buf);
-
-    let freq_res = sr / fft_len as f64;
-    let min_bin = (20.0 / freq_res).ceil() as usize;
-    let max_bin = ((20000.0 / freq_res).floor() as usize).min(fft_len / 2);
-    let mut weighted_sum = 0.0_f64;
-    let mut total_power = 0.0_f64;
-    for bin in min_bin..max_bin {
-        let freq = bin as f64 * freq_res;
-        let power = buf[bin].norm_sqr();
-        weighted_sum += freq * power;
-        total_power += power;
-    }
-    let centroid = if total_power > 0.0 { weighted_sum / total_power } else { 500.0 };
-    let log_low = 100.0_f64.ln();
-    let log_high = 10000.0_f64.ln();
-    let brightness = ((centroid.max(100.0).ln() - log_low) / (log_high - log_low)).clamp(0.0, 1.0);
-
-    // NOTE: at this point left_bands / right_bands are still at 48 kHz; the
-    // pipeline.rs decimates before applying ASSR/CET. The detailed pipeline
-    // historically applies ASSR at 48 kHz directly. We follow the same
-    // path here for consistency with the existing display code, but the
-    // CET crossover MUST run at the neural sample rate (1 kHz) where the
-    // 10 Hz cutoff is meaningful — so we decimate before the crossover and
-    // then keep the decimated bands as the JR drive.
-
-    // (Optional) ASSR: attenuate modulation (AC) in band signals only.
-    // DC preserved — operating point is the thalamic gate's domain.
-    if assr_enabled {
-        let assr = crate::auditory::AssrTransfer::new();
-        let assr_mod = assr.compute_input_scale_modifier(preset);
-        if assr_mod < 1.0 - 1e-10 {
-            for bands in [&mut left_bands, &mut right_bands] {
-                for band in bands.iter_mut() {
-                    let n = band.len();
-                    if n == 0 { continue; }
-                    let mean = band.iter().sum::<f64>() / n as f64;
-                    for sample in band.iter_mut() {
-                        let ac = *sample - mean;
-                        *sample = mean + ac * assr_mod;
-                    }
-                }
-            }
-        }
-    }
-
-    // CET 13a — In the detailed pipeline ASSR runs at 48 kHz on the band
-    // envelopes. To bypass ASSR on the slow path we re-extract the slow
-    // 0–10 Hz envelope from the *unattenuated* band signal (we kept the
-    // raw bands_l/bands_r values around) and add it back after ASSR did
-    // its work. This is the equivalent of the bifurcate-then-recombine
-    // dance in pipeline.rs, just done at the audio sample rate.
-    if cet_enabled && assr_enabled {
-        let assr = crate::auditory::AssrTransfer::new();
-        let assr_mod = assr.compute_input_scale_modifier(preset);
-        if assr_mod < 1.0 - 1e-10 {
-            for b in 0..4 {
-                // Slow envelope of the *original* band signal (before ASSR)
-                let mut xover_l = crate::auditory::ButterworthCrossover::new(10.0, sr);
-                let mut xover_r = crate::auditory::ButterworthCrossover::new(10.0, sr);
-                let raw_l: Vec<f64> = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
-                let raw_r: Vec<f64> = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
-                let (slow_l, _) = xover_l.process_signal(&raw_l);
-                let (slow_r, _) = xover_r.process_signal(&raw_r);
-                // Slow envelope of the *post-ASSR* band signal (already attenuated)
-                let mut xover_l2 = crate::auditory::ButterworthCrossover::new(10.0, sr);
-                let mut xover_r2 = crate::auditory::ButterworthCrossover::new(10.0, sr);
-                let (slow_l_atten, _) = xover_l2.process_signal(&left_bands[b]);
-                let (slow_r_atten, _) = xover_r2.process_signal(&right_bands[b]);
-                // Replace the attenuated slow component with the original
-                for i in 0..left_bands[b].len() {
-                    left_bands[b][i] += slow_l[i] - slow_l_atten[i];
-                }
-                for i in 0..right_bands[b].len() {
-                    right_bands[b][i] += slow_r[i] - slow_r_atten[i];
-                }
-            }
-        }
-    }
-
-    // Bilateral cortical model
-    let neural_params = brain_type.params();
-    let mut bilateral = brain_type.bilateral_params();
-
-    // (Optional) Thalamic gate: per-band offset shifts (Steriade et al. 1993).
-    // The physiological gate (Priority 9, Bazhenov 2002 / Paul 2016 TC cell)
-    // takes precedence over the heuristic gate when both flags are set.
-    // Compute arousal for thalamic gate + GABA_B gain modulation
-    let arousal = if physiological_thalamic_gate_enabled {
-        crate::auditory::PhysiologicalThalamicGate::compute_arousal(preset, brightness)
-    } else if thalamic_gate_enabled {
-        crate::auditory::ThalamicGate::compute_arousal(preset, brightness)
-    } else {
-        0.5
-    };
-
-    let band_shifts = if physiological_thalamic_gate_enabled {
-        let gate = crate::auditory::PhysiologicalThalamicGate::new(arousal);
-        gate.band_offset_shifts()
-    } else if thalamic_gate_enabled {
-        let gate = crate::auditory::ThalamicGate::new(arousal);
-        gate.band_offset_shifts()
-    } else {
-        [0.0; 4]
-    };
-    for b in 0..4 {
-        if band_shifts[b].abs() > 1e-10 {
-            bilateral.left.band_offsets[b] += band_shifts[b];
-            bilateral.right.band_offsets[b] += band_shifts[b];
-        }
-    }
-
-    let fast_inhib = neural::FastInhibParams {
-        g_fast_gain: neural_params.jansen_rit.g_fast_gain,
-        g_fast_rate: neural_params.jansen_rit.g_fast_rate,
-        c5: neural_params.jansen_rit.c5,
-        c6: neural_params.jansen_rit.c6,
-        c7: neural_params.jansen_rit.c7,
-    };
-
-    let bi_result = neural::simulate_bilateral(
-        &left_bands,
-        &right_bands,
-        &bands_l.energy_fractions,
-        &bands_r.energy_fractions,
-        &bilateral,
-        neural_params.jansen_rit.c,
-        neural_params.jansen_rit.input_scale,
-        sr,
-        &fast_inhib,
-        neural_params.jansen_rit.v0,
-        0.0, // habituation: disabled in detailed pipeline (short evaluation)
-        0.0,
-        15.0, // stochastic: enabled (Ableidinger 2017 velocity noise)
-        // CET 13b slow GABA_B — engaged when --cet flag is set.
-        if cet_enabled { 10.0 } else { 0.0 },
-        if cet_enabled { 5.0 } else { 0.0 },
-        if cet_enabled { 30.0 } else { 0.0 },
-        arousal,
-    );
-
-    // FHN driven by combined bilateral EEG
-    let fhn = neural::FhnModel::with_params(
-        sr,
-        neural_params.fhn.a,
-        neural_params.fhn.b,
-        neural_params.fhn.epsilon,
-        neural_params.fhn.time_scale,
-    );
-    // Percentile-based EEG scaling for FHN (preserves amplitude information)
-    let fhn_input: Vec<f64> = {
-        let mut abs_values: Vec<f64> = bi_result.combined.eeg.iter().map(|x| x.abs()).collect();
-        abs_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-        let p95_idx = (abs_values.len() as f64 * 0.95) as usize;
-        let p95 = abs_values[p95_idx.min(abs_values.len() - 1)];
-        let scale = if p95 > 1e-10 { 1.0 / p95 } else { 1.0 };
-        bi_result.combined.eeg.iter().map(|x| (x * scale).clamp(-3.0, 3.0)).collect()
-    };
-    let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
-
-    // Performance Vector
-    let target_lfo_freq = preset.objects.iter()
-        .filter(|obj| obj.active)
-        .flat_map(|obj| {
-            let vol = obj.volume as f64;
-            let mut lfos = Vec::new();
-            if obj.bass_mod.kind == 4 && obj.bass_mod.param_a > 0.5 {
-                lfos.push((obj.bass_mod.param_a as f64, obj.bass_mod.param_b as f64 * vol));
-            }
-            if obj.satellite_mod.kind == 4 && obj.satellite_mod.param_a > 0.5 {
-                lfos.push((obj.satellite_mod.param_a as f64, obj.satellite_mod.param_b as f64 * vol));
-            }
-            lfos
-        })
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        .map(|(freq, _)| freq);
-
-    let jr = &bi_result.combined;
-    let eeg_mean = jr.eeg.iter().sum::<f64>() / jr.eeg.len() as f64;
-    let eeg_detrended: Vec<f64> = jr.eeg.iter().map(|x| x - eeg_mean).collect();
-    let performance = neural::PerformanceVector::compute(
-        &eeg_detrended, &jr.fast_inhib_trace, sr, target_lfo_freq,
-    );
-
-    DetailedResult {
-        fhn: fhn_result,
-        bilateral: bi_result,
-        brightness,
-        energy_fractions,
-        performance,
-    }
-}
-
 fn print_comparison_matrix(
     preset: &Preset,
     goals: &[GoalKind],
     brain_types: &[BrainType],
     duration: f32,
-    assr: bool,
-    thalamic_gate: bool,
-    cet: bool,
-    phys_gate: bool,
+    flags: EvaluateFeatureFlags,
 ) {
+    let scores = evaluate_score_matrix(preset, goals, brain_types, duration, flags);
+
     // Header
     print!("  {:<12}", "Brain Type");
     for g in goals {
@@ -1309,31 +1189,18 @@ fn print_comparison_matrix(
     println!();
 
     // Rows
-    for bt in brain_types {
+    for (row_idx, bt) in brain_types.iter().enumerate() {
         print!("  {:<12}", format!("{}", bt));
 
-        for goal_kind in goals {
-            let goal = Goal::new(*goal_kind);
-            let sim_config = SimulationConfig {
-                duration_secs: duration,
-                brain_type: *bt,
-                assr_enabled: assr,
-                thalamic_gate_enabled: thalamic_gate,
-                cet_enabled: cet,
-                physiological_thalamic_gate_enabled: phys_gate,
-                ..SimulationConfig::default()
-            };
-
-            let result = evaluate_preset(preset, &goal, &sim_config);
-
-            let icon = if result.score >= 0.75 {
+        for score in &scores[row_idx] {
+            let icon = if *score >= 0.75 {
                 "\u{2713}"
-            } else if result.score >= 0.50 {
+            } else if *score >= 0.50 {
                 "~"
             } else {
                 "\u{2717}"
             };
-            print!("  {} {:<10.4}", icon, result.score);
+            print!("  {} {:<10.4}", icon, score);
         }
         println!();
     }
@@ -1442,6 +1309,12 @@ fn run_disturb_cmd(
     spike_gain: f64,
     duration: f32,
 ) {
+    ensure_analysis_window_or_exit(
+        "disturb",
+        duration,
+        disturb::DisturbConfig::default().warmup_discard_secs,
+    );
+
     // Load preset
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
         eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
@@ -1637,10 +1510,13 @@ fn run_generate_data(
     brain_type_str: &str,
     duration: f32,
     threads: usize,
+    phys_gate: bool,
     seed: u64,
 ) {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+
+    ensure_analysis_window_or_exit("generate-data", duration, SimulationConfig::default().warmup_discard_secs);
 
     let goals: Vec<GoalKind> = if goals_str.to_lowercase() == "all" {
         GoalKind::all().to_vec()
@@ -1678,6 +1554,7 @@ fn run_generate_data(
     println!("  Total evals:    {total_evals}");
     println!("  Duration:       {duration:.1}s per eval");
     println!("  Threads:        {threads}");
+    println!("  Phys gate:      {}", if phys_gate { "enabled" } else { "disabled" });
     println!("  Output:         {}", output.display());
     println!();
 
@@ -1714,7 +1591,7 @@ fn run_generate_data(
     }
 
     // Thread-safe results collector
-    let results: Arc<Mutex<Vec<(usize, Vec<f64>, GoalKind, BrainType, f64)>>> =
+    let results: Arc<Mutex<Vec<(usize, Vec<f64>, GoalKind, BrainType, SimulationConfig, f64)>>> =
         Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
     let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -1735,11 +1612,7 @@ fn run_generate_data(
                     let (preset_idx, ref genome, goal_kind, bt) = work[i];
                     let preset = Preset::from_genome(genome);
                     let goal = Goal::new(goal_kind);
-                    let config = SimulationConfig {
-                        duration_secs: duration,
-                        brain_type: bt,
-                        ..SimulationConfig::default()
-                    };
+                    let config = build_generate_data_config(duration, bt, phys_gate);
                     let result = evaluate_preset(&preset, &goal, &config);
 
                     results.lock().unwrap().push((
@@ -1747,6 +1620,7 @@ fn run_generate_data(
                         genome.clone(),
                         goal_kind,
                         bt,
+                        config,
                         result.score,
                     ));
 
@@ -1762,26 +1636,241 @@ fn run_generate_data(
     eprintln!();
 
     // Write CSV
-    let results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    let results = match Arc::try_unwrap(results) {
+        Ok(mutex) => match mutex.into_inner() {
+            Ok(values) => values,
+            Err(poisoned) => poisoned.into_inner(),
+        },
+        Err(_) => {
+            eprintln!("Internal error: generate-data results still have outstanding references");
+            std::process::exit(1);
+        }
+    };
     let mut file = std::fs::File::create(output).unwrap_or_else(|e| {
         eprintln!("Failed to create output file: {e}");
         std::process::exit(1);
     });
 
     // Header
-    let genome_cols: Vec<String> = (0..preset::GENOME_LEN).map(|i| format!("g{i}")).collect();
-    write!(file, "{},goal_id,brain_type_id,assr,thalamic_gate,cet,phys_gate,score\n",
-        genome_cols.join(",")).unwrap();
+    writeln!(file, "{}", surrogate_csv_header()).unwrap();
 
     // Data rows
-    for (_, genome, goal_kind, bt, score) in &results {
-        let genome_str: Vec<String> = genome.iter().map(|v| format!("{v:.6}")).collect();
-        let goal_id = GoalKind::all().iter().position(|&g| g == *goal_kind).unwrap_or(0);
-        let bt_id = BrainType::all().iter().position(|&b| b == *bt).unwrap_or(0);
-        writeln!(file, "{},{goal_id},{bt_id},1,1,0,0,{score:.6}",
-            genome_str.join(",")).unwrap();
+    for (_, genome, goal_kind, bt, config, score) in &results {
+        writeln!(file, "{}", surrogate_csv_row(genome, *goal_kind, *bt, config, *score)).unwrap();
     }
 
     println!("  Wrote {} rows to {}", results.len(), output.display());
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluate_disable_flags_override_enabled_defaults() {
+        let flags = resolve_evaluate_feature_flags(
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+
+        assert_eq!(
+            flags,
+            EvaluateFeatureFlags {
+                assr: false,
+                thalamic_gate: false,
+                cet: false,
+                phys_gate: false,
+            }
+        );
+    }
+
+    #[test]
+    fn build_eval_config_carries_feature_flags() {
+        let flags = EvaluateFeatureFlags {
+            assr: false,
+            thalamic_gate: true,
+            cet: false,
+            phys_gate: true,
+        };
+
+        let config = build_eval_config(7.5, BrainType::Aging, flags);
+        assert!((config.duration_secs - 7.5).abs() < 1e-12);
+        assert_eq!(config.brain_type, BrainType::Aging);
+        assert!(!config.assr_enabled);
+        assert!(config.thalamic_gate_enabled);
+        assert!(!config.cet_enabled);
+        assert!(config.physiological_thalamic_gate_enabled);
+    }
+
+    #[test]
+    fn build_generate_data_config_carries_phys_gate() {
+        let config = build_generate_data_config(3.5, BrainType::Adhd, true);
+        assert!((config.duration_secs - 3.5).abs() < 1e-12);
+        assert_eq!(config.brain_type, BrainType::Adhd);
+        assert!(config.assr_enabled);
+        assert!(config.thalamic_gate_enabled);
+        assert!(config.cet_enabled);
+        assert!(config.physiological_thalamic_gate_enabled);
+    }
+
+    #[test]
+    fn surrogate_validation_mask_marks_top_k_and_exploration() {
+        let mask = surrogate_validation_mask(8, 3, 2);
+        let selected: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, keep)| keep.then_some(idx))
+            .collect();
+
+        assert_eq!(selected, vec![0, 1, 2, 5]);
+    }
+
+    #[test]
+    fn surrogate_validation_mask_supports_zero_k() {
+        let mask = surrogate_validation_mask(5, 0, 1);
+        let selected: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, keep)| keep.then_some(idx))
+            .collect();
+
+        assert_eq!(selected, vec![0]);
+    }
+
+    #[test]
+    fn surrogate_validation_mask_validates_all_when_k_covers_population() {
+        let mask = surrogate_validation_mask(4, 9, 7);
+        assert!(mask.into_iter().all(|keep| keep));
+    }
+
+    #[test]
+    fn surrogate_csv_header_matches_current_contract() {
+        let header = surrogate_csv_header();
+        let cols: Vec<&str> = header.split(',').collect();
+
+        assert_eq!(
+            cols.len(),
+            surrogate::GENOME_DIM + surrogate::CSV_METADATA_COLUMNS.len()
+        );
+        assert_eq!(cols[0], "g0");
+        assert_eq!(cols[surrogate::GENOME_DIM - 1], format!("g{}", surrogate::GENOME_DIM - 1));
+        assert_eq!(
+            &cols[surrogate::GENOME_DIM..],
+            &surrogate::CSV_METADATA_COLUMNS
+        );
+    }
+
+    #[test]
+    fn surrogate_csv_row_serializes_actual_config_flags() {
+        let genome = vec![0.5_f64; surrogate::GENOME_DIM];
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            brain_type: BrainType::Aging,
+            assr_enabled: true,
+            thalamic_gate_enabled: false,
+            cet_enabled: true,
+            physiological_thalamic_gate_enabled: true,
+            ..SimulationConfig::default()
+        };
+
+        let row = surrogate_csv_row(&genome, GoalKind::Sleep, BrainType::Aging, &config, 0.375);
+        let cols: Vec<&str> = row.split(',').collect();
+        let meta_start = surrogate::GENOME_DIM;
+        let expected_goal_id = GoalKind::all()
+            .iter()
+            .position(|&g| g == GoalKind::Sleep)
+            .unwrap()
+            .to_string();
+        let expected_brain_type_id = BrainType::all()
+            .iter()
+            .position(|&b| b == BrainType::Aging)
+            .unwrap()
+            .to_string();
+
+        assert_eq!(cols[meta_start], expected_goal_id);
+        assert_eq!(cols[meta_start + 1], expected_brain_type_id);
+        assert_eq!(cols[meta_start + 2], "1");
+        assert_eq!(cols[meta_start + 3], "0");
+        assert_eq!(cols[meta_start + 4], "1");
+        assert_eq!(cols[meta_start + 5], "1");
+        assert_eq!(cols[meta_start + 6], "0.375000");
+    }
+
+    #[test]
+    fn export_best_genome_uses_re_evaluated_real_score() {
+        let best_genome = Preset::default().to_genome();
+        let goal_kind = GoalKind::Focus;
+        let goal = Goal::new(goal_kind);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            brain_type: BrainType::Normal,
+            ..SimulationConfig::default()
+        };
+        let direct = evaluate_preset(&Preset::from_genome(&best_genome), &goal, &config);
+        let fake_cached_fitness = direct.score + 0.12345;
+        let output_path = std::env::temp_dir().join("test_export_best_genome_uses_real_score.json");
+        let _ = std::fs::remove_file(&output_path);
+
+        let (_preset, exported_result) = export_best_genome(
+            &output_path,
+            &best_genome,
+            &goal,
+            goal_kind,
+            7,
+            config.duration_secs,
+            &config,
+        )
+        .expect("best-genome export should succeed");
+
+        let json = std::fs::read_to_string(&output_path).expect("exported JSON should exist");
+        let exported: serde_json::Value =
+            serde_json::from_str(&json).expect("exported JSON should parse");
+        let exported_score = exported["meta"]["score"]
+            .as_f64()
+            .expect("meta.score should be f64");
+        let exported_beta = exported["analysis"]["band_powers"]["beta"]
+            .as_f64()
+            .expect("analysis.band_powers.beta should be f64");
+
+        assert!((exported_result.score - direct.score).abs() < 1e-12);
+        assert!((exported_score - direct.score).abs() < 1e-12);
+        assert!((exported_beta - direct.beta_power).abs() < 1e-12);
+        assert!((exported_score - fake_cached_fitness).abs() > 1e-6);
+
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn matrix_single_cell_score_matches_scalar_evaluate() {
+        let preset = Preset::default();
+        let flags = EvaluateFeatureFlags {
+            assr: true,
+            thalamic_gate: true,
+            cet: true,
+            phys_gate: false,
+        };
+        let duration = 4.0;
+        let goal_kind = GoalKind::Meditation;
+        let brain_type = BrainType::Anxious;
+        let goal = Goal::new(goal_kind);
+        let config = build_eval_config(duration, brain_type, flags);
+
+        let direct = evaluate_preset(&preset, &goal, &config);
+        let matrix = evaluate_score_matrix(&preset, &[goal_kind], &[brain_type], duration, flags);
+
+        assert_eq!(matrix.len(), 1);
+        assert_eq!(matrix[0].len(), 1);
+        assert!(
+            (matrix[0][0] - direct.score).abs() < 1e-12,
+            "matrix 1x1 score {:.12} must match scalar evaluate {:.12}",
+            matrix[0][0],
+            direct.score
+        );
+    }
 }

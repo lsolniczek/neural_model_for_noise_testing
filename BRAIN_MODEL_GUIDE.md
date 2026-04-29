@@ -6,40 +6,52 @@ A field guide for designing presets against the bilateral Jansen-Rit + FHN neura
 
 ## How to Evaluate Presets — Standard Flags
 
-**Always use these flags for correct, physiologically accurate evaluation:**
+The canonical evaluation path lives in `src/pipeline.rs`. `evaluate`, matrix mode, `optimize`, and `generate-data` all use that same simulation and scoring core; `src/main.rs` only resolves flags, selects goals/brain types, and formats output.
+
+For `evaluate`, the current defaults are:
+- `--thalamic-gate` ON
+- `--cet` ON
+- `--assr` OFF
+- `--phys-gate` OFF
+
+Use the default `evaluate` config for broad diagnosis. Add `--assr` when you want `evaluate` to match the default `optimize` scoring stack exactly.
 
 ```bash
-# Standard evaluation (all presets, all goals)
+# Default evaluate path: heuristic thalamic gate + CET already enabled
+cargo run --release -- evaluate <preset.json> --goal <goal> --brain-type <type> --duration <sec>
+
+# Match the optimize defaults exactly: add ASSR
 cargo run --release -- evaluate <preset.json> --goal <goal> --brain-type <type> --duration <sec> \
-    --cet --thalamic-gate
+    --assr
 
 # Disturbance test
 cargo run --release -- disturb <preset.json>
 ```
 
-### Required flags
+### Default-on features
 
 | Flag | What it does | Why it's required |
 |------|-------------|-------------------|
-| `--cet` | Enables Cortical Envelope Tracking: 10 Hz slow/fast crossover, GABA_B slow inhibitory gain modulation, envelope-phase PLV scoring | Without CET, the model has no slow inhibitory feedback — it locks into a single attractor (alpha or theta) and cannot produce mixed brain states. The GABA_B population models real presynaptic GABA_B receptors that modulate excitatory gain (glutamate release). This is basic cortical physiology, not an optional feature. |
-| `--thalamic-gate` | Enables arousal-dependent thalamic gating: preset properties (reverb, brightness, modulation) compute arousal → band_offset shifts toward theta/delta at low arousal | Without the gate, the model has no arousal sensitivity — a dark reverberant brown noise preset scores the same as a bright dry white noise preset. Real thalamocortical dynamics gate sensory input based on arousal state. |
+| `--cet` | Enables Cortical Envelope Tracking: 10 Hz slow/fast crossover, GABA_B slow inhibitory gain modulation, envelope-phase PLV scoring | Enabled by default in `evaluate` and `optimize`. Without CET, the model has no slow inhibitory feedback — it locks into a single attractor (alpha or theta) and cannot produce mixed brain states. |
+| `--thalamic-gate` | Enables arousal-dependent thalamic gating: preset properties (reverb, brightness, modulation) compute arousal → fixed Steriade-profile band_offset shifts `[100%, 70%, 20%, 0%] × max_shift` toward theta/delta at low arousal | Enabled by default in `evaluate` and in the optimize pipeline. Without the gate, the model has no arousal sensitivity — a dark reverberant brown noise preset scores much closer to a bright dry white noise preset than it should. |
 
 ### Optional flags
 
 | Flag | When to use |
 |------|------------|
-| `--phys-gate` | Replaces heuristic thalamic gate with ion-channel TC cell (Bazhenov 2002). More physiologically realistic sigmoid transition but pushes hard toward delta. Use for sleep presets or when the heuristic gate under-differentiates. Takes precedence over `--thalamic-gate`. |
-| `--assr` | ASSR transfer function. Enabled by default in SimulationConfig. Rarely needs manual toggling. |
+| `--assr` | Add when you want `evaluate` to match the default `optimize` pipeline exactly. `optimize` uses ASSR by default; `evaluate` leaves it off unless requested so you can compare the ablation easily. |
+| `--phys-gate` | Replaces the heuristic thalamic gate with an ion-channel TC cell (Bazhenov 2002). More physiologically realistic sigmoid transition, stronger low-arousal burst-mode push, and best reserved for sleep / deep-relaxation exploration. Takes precedence over `--thalamic-gate`. |
+| `--no-cet`, `--no-thalamic-gate`, `--no-assr` | Explicit ablation flags. Use them for comparisons, not as the normal operating mode. |
 
-### What happens without CET+thalamic-gate
+### What happens if you disable CET + thalamic gate
 
-Without these flags, the Jansen-Rit model has a strong alpha attractor at ~10 Hz. The model will:
+If you explicitly run `evaluate --no-cet --no-thalamic-gate`, the Jansen-Rit model has a strong alpha attractor at ~10 Hz. The model will:
 - Lock into **alpha ~90%** for any brown/pink/grey input (relaxation presets score ~0.34)
 - Lock into **beta ~70%** for any white/green input with isochronic (activation presets work better but still limited)
 - Never produce a stable theta-alpha mixed state at durations >60s
 - Score relaxation/sleep/meditation goals poorly regardless of preset quality
 
-With CET+thalamic-gate, the GABA_B slow inhibitory population modulates excitatory gain on a slow timescale (~100ms), creating periodic windows where the dominant frequency shifts between alpha and theta. This produces physiologically realistic mixed states:
+With CET + thalamic-gate enabled (the current `evaluate` default), the GABA_B slow inhibitory population modulates excitatory gain on a slow timescale (~100ms), creating periodic windows where the dominant frequency shifts between alpha and theta. This produces physiologically realistic mixed states:
 - Deep Relaxation at 600s: theta 50% + alpha 43% (vs theta 4% + alpha 94% without CET)
 
 ### Evaluation durations
@@ -775,9 +787,9 @@ The two scores can diverge: Shield v3 shows entrainment resilience 0.92 (phase-l
 - `src/neural/performance.rs` — Performance vector (entrainment ratio, E/I stability, spectral centroid, carrier PLV, envelope PLV). `compute_plv()` measures phase-lock against a synthetic sinusoid at the LFO frequency; `compute_envelope_plv()` measures phase-lock against the Hilbert phase of the slow auditory envelope (CET 13c). Both use the 2–9 Hz CET-relevant bandpass.
 - `src/pipeline.rs` — Audio → cochlea → neural. Global max normalization (across all 4 bands) replaces per-band. 95th percentile FHN scaling clamped to [-3, 3]. CET bifurcate-recombine logic in steps 5d/5e/5f.
 - `src/optimizer/differential_evolution.rs` — The DE optimizer.
-- `src/surrogate.rs` — **Priority 14c:** Hand-coded MLP inference for surrogate-assisted optimization. Loads a trained weights file (f32 little-endian binary), runs a 208→256→256→128→1 forward pass (~5 µs), predicts approximate scores. Used only for pre-screening DE candidates when `--surrogate` is active; never replaces the real pipeline for final scoring. Zero external dependencies.
+- `src/surrogate.rs` — **Priority 14c:** Hand-coded MLP inference for surrogate-assisted optimization. Loads a trained weights file (f32 little-endian binary), validates the compiled 248-input contract, runs a 248→256→256→128→1 forward pass, and predicts approximate scores. Used only for pre-screening DE candidates when `--surrogate` is active; never replaces the real pipeline for final scoring. Zero external dependencies.
 - `tools/train_surrogate.py` — **Priority 14b:** Offline Python/PyTorch script that trains the surrogate MLP from CSV data produced by `generate-data` and exports weights. Not called by Rust at runtime.
-- `src/main.rs` — CLI entry point. `evaluate` ships `--assr`, `--thalamic-gate`, `--cet`, and `--phys-gate` off by default. `optimize` adds `--cet`, `--phys-gate`, and `--surrogate` flags. `generate-data` produces training CSV for the surrogate.
+- `src/main.rs` — CLI entry point. `evaluate` defaults to heuristic thalamic gate + CET on, ASSR off, physiological gate off, and exposes explicit `--no-assr`, `--no-thalamic-gate`, and `--no-cet` ablations. `optimize` defaults to CET on, heuristic gate on, ASSR on, and adds `--phys-gate` / `--surrogate`. `generate-data` produces surrogate-training CSVs and now supports `--phys-gate`.
 
 ---
 
@@ -785,18 +797,21 @@ The two scores can diverge: Shield v3 shows entrainment resilience 0.92 (phase-l
 
 The full simulation pipeline takes ~100 ms per preset evaluation. A 200-generation DE run with population 50 takes ~2.8 hours. Priority 14 adds an optional MLP surrogate that approximates the pipeline at ~5 µs per evaluation, enabling ~10x faster optimization.
 
-**How it works:** the surrogate pre-screens all DE trial candidates, then only the top-K (default 5) plus 1 random exploration candidate are validated with the real pipeline. The real pipeline's scores — never the surrogate's — enter DE's population. The surrogate is a filter, not a substitute.
+**How it works:** the surrogate pre-screens all DE trial candidates, then only the top-K (default 5) plus 1 deterministic exploration candidate are validated with the real pipeline. The real pipeline's scores — never the surrogate's — enter DE's population. The surrogate is a ranking/filter layer, not a substitute.
 
 **Workflow:**
-1. `generate-data --count 20000 --goals all --threads 8` — sample random presets, evaluate with real pipeline, write CSV (~3.5 hours with 8 threads, one-time cost)
-2. `python tools/train_surrogate.py training_data.csv surrogate_weights.bin` — train MLP (208→256→256→128→1), export weights (~5 min, requires PyTorch)
-3. `optimize --goal sleep --surrogate --surrogate-weights surrogate_weights.bin` — DE uses surrogate for pre-screening, ~10x faster
+1. `generate-data --count 20000 --goals all --threads 8` — sample random presets, evaluate with the real pipeline, write a 237-column CSV (`g0..g229`, goal/brain IDs, 4 config flags, score)
+2. Optional phys-gate slice: `generate-data --count 20000 --goals sleep,deep_relaxation,meditation --brain-type all --phys-gate --threads 8`
+3. `python tools/train_surrogate.py training_data.csv surrogate_weights.bin` — train MLP (248→256→256→128→1), export weights (~5 min, requires PyTorch)
+4. `optimize --goal sleep --surrogate --surrogate-weights surrogate_weights.bin` — DE uses surrogate for pre-screening, ~10x faster
 
 **Key properties:**
 - The NMM pipeline is NEVER modified. The surrogate is additive and flag-gated.
 - When `--surrogate` is off (default), behavior is bit-for-bit identical.
-- The surrogate becomes stale when scoring.rs changes — regenerate data and retrain.
-- Expected R² > 0.92 on held-out data for a smooth 190-dim → scalar function.
+- The surrogate becomes stale when the input contract or scoring changes — regenerate data and retrain. The Rust loader now rejects stale weight files instead of silently accepting mismatched dimensions.
+- The checked-in artifacts (`surrogate_weights.bin`, `surrogate_weights_small.bin`, `surrogate_weights_med.bin`) were regenerated for the current 248-input contract and load under test.
+- The current bundled CSV datasets (`training_data.csv`, `training_combined.csv`) use the 237-column schema and include both default rows (`1,1,1,0`) and physiological-gate rows (`1,1,1,1`).
+- Expected R² remains high for this smooth 248-input → scalar function, but the runtime contract that matters operationally is stricter: only verified real-pipeline scores are allowed to affect DE state.
 - The surrogate inference is pure Rust (hand-coded matmul, no external dependencies).
 
 ---

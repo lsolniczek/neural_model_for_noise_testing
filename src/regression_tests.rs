@@ -11,9 +11,16 @@ mod tests {
     use crate::neural::jansen_rit::*;
     use crate::neural::fhn::*;
     use crate::optimizer::DifferentialEvolution;
-    use crate::pipeline::{evaluate_preset, SimulationConfig};
+    use crate::pipeline::{evaluate_preset, evaluate_preset_detailed, SimulationConfig};
     use crate::preset::{Preset, GENOME_LEN};
     use crate::scoring::{Goal, GoalKind};
+
+    fn fast_pipeline_config() -> SimulationConfig {
+        SimulationConfig {
+            duration_secs: 4.0,
+            ..SimulationConfig::default()
+        }
+    }
 
     // ════════════════════════════════════════════════════════════════════════
     // 1. Scoring regression tests
@@ -347,7 +354,7 @@ mod tests {
     #[test]
     fn pipeline_default_preset_produces_valid_score() {
         let preset = Preset::default();
-        let config = SimulationConfig::default();
+        let config = fast_pipeline_config();
 
         for kind in GoalKind::all() {
             let goal = Goal::new(*kind);
@@ -415,6 +422,79 @@ mod tests {
             "default duration should be 12.0s, got {}", config.duration_secs);
         assert!((config.warmup_discard_secs - 2.0).abs() < 1e-6,
             "default warmup discard should be 2.0s, got {}", config.warmup_discard_secs);
+    }
+
+    /// The detailed evaluation path must carry the same scalar result as the
+    /// legacy summary API so single-preset diagnostics cannot drift from the
+    /// canonical optimizer/matrix score.
+    #[test]
+    fn detailed_pipeline_summary_matches_scalar_evaluate() {
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 1; // pink
+        preset.objects[0].volume = 0.85;
+        preset.objects[0].bass_mod.kind = 4; // NeuralLfo
+        preset.objects[0].bass_mod.param_a = 5.0;
+        preset.objects[0].bass_mod.param_b = 0.90;
+        preset.objects[0].satellite_mod.kind = 4;
+        preset.objects[0].satellite_mod.param_a = 5.0;
+        preset.objects[0].satellite_mod.param_b = 0.75;
+
+        let goal = Goal::new(GoalKind::Sleep);
+        let config = SimulationConfig::default();
+
+        let scalar = evaluate_preset(&preset, &goal, &config);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let summary = detailed.summary;
+
+        assert!((scalar.score - summary.score).abs() < 1e-12);
+        assert!((scalar.fhn_firing_rate - summary.fhn_firing_rate).abs() < 1e-12);
+        assert!((scalar.fhn_isi_cv - summary.fhn_isi_cv).abs() < 1e-12);
+        assert!((scalar.dominant_freq - summary.dominant_freq).abs() < 1e-12);
+        assert!((scalar.alpha_asymmetry - summary.alpha_asymmetry).abs() < 1e-12);
+        assert_eq!(scalar.performance.plv, summary.performance.plv);
+        assert_eq!(scalar.performance.envelope_plv, summary.performance.envelope_plv);
+    }
+
+    /// The canonical detailed result must contain everything `Goal::diagnose()`
+    /// needs to reproduce the same score the pipeline already computed.
+    #[test]
+    fn canonical_detailed_result_reproduces_diagnosis_score() {
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 2; // brown
+        preset.objects[0].volume = 0.80;
+        preset.objects[0].reverb_send = 0.80;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 5.0;
+        preset.objects[0].bass_mod.param_b = 0.95;
+
+        let goal = Goal::new(GoalKind::DeepRelaxation);
+        let config = SimulationConfig::default();
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+
+        let diagnosis = goal.diagnose(
+            &detailed.fhn,
+            &detailed.bilateral.combined,
+            detailed.summary.brightness,
+            detailed.summary.alpha_asymmetry,
+            detailed.summary.performance.plv,
+            detailed.summary.performance.envelope_plv,
+            Some(detailed.summary.performance),
+        );
+
+        assert!(
+            (diagnosis.score - detailed.summary.score).abs() < 1e-12,
+            "diagnosis score {:.12} must match summary score {:.12}",
+            diagnosis.score,
+            detailed.summary.score
+        );
+        assert_eq!(
+            diagnosis.performance.unwrap().envelope_plv,
+            detailed.summary.performance.envelope_plv
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -653,7 +733,7 @@ mod tests {
     fn both_features_enabled_produces_valid_scores() {
         let preset = Preset::default();
 
-        let mut config = SimulationConfig::default();
+        let mut config = fast_pipeline_config();
         config.assr_enabled = true;
         config.thalamic_gate_enabled = true;
 
@@ -785,18 +865,27 @@ mod tests {
     /// All presets still produce valid scores after normalization change.
     #[test]
     fn normalization_change_preserves_valid_scores() {
-        let config = SimulationConfig::default();
+        let config = fast_pipeline_config();
 
-        // Test with various noise colors
-        for color in [0u8, 1, 2, 3, 5, 6] { // White, Pink, Brown, Green, Black, SSN
+        // Representative color/goal coverage is enough here because other
+        // tests already cover all goals' math and several color-specific
+        // spectral differences. This test is guarding "pipeline stays finite
+        // and bounded after the normalization change", not exhaustively
+        // re-validating the whole search space.
+        for color in [0u8, 2, 6] { // White, Brown, SSN
             let mut preset = Preset::default();
             preset.source_count = 1;
             preset.objects[0].active = true;
             preset.objects[0].color = color;
             preset.objects[0].volume = 0.80;
 
-            for kind in GoalKind::all() {
-                let goal = Goal::new(*kind);
+            for kind in [
+                GoalKind::Focus,
+                GoalKind::Sleep,
+                GoalKind::Isolation,
+                GoalKind::DeepRelaxation,
+            ] {
+                let goal = Goal::new(kind);
                 let result = evaluate_preset(&preset, &goal, &config);
 
                 assert!(
