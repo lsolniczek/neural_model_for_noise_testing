@@ -13,7 +13,6 @@
 /// - Fujihira & Shiraishi (2015): ASSR reduced under reverberation
 /// - Bidelman & Krishnan (2010): brainstem FFR degraded by reverb
 /// - Carney et al. (2015): computational models always place room before cochlea
-
 use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Environment parameters for RIR generation.
@@ -113,9 +112,21 @@ pub fn generate_rir(params: &EnvironmentParams, sample_rate: u32) -> Vec<f32> {
     let sr = sample_rate as f64;
 
     // Decay constants per band (6.91 = 3 × ln(10) for 60 dB decay)
-    let decay_low = if params.rt60_low > 0.01 { 6.91 / params.rt60_low } else { 100.0 };
-    let decay_mid = if params.rt60_mid > 0.01 { 6.91 / params.rt60_mid } else { 100.0 };
-    let decay_high = if params.rt60_high > 0.01 { 6.91 / params.rt60_high } else { 100.0 };
+    let decay_low = if params.rt60_low > 0.01 {
+        6.91 / params.rt60_low
+    } else {
+        100.0
+    };
+    let decay_mid = if params.rt60_mid > 0.01 {
+        6.91 / params.rt60_mid
+    } else {
+        100.0
+    };
+    let decay_high = if params.rt60_high > 0.01 {
+        6.91 / params.rt60_high
+    } else {
+        100.0
+    };
 
     // Generate RIR in frequency domain for frequency-dependent decay.
     // For each time sample, compute the weighted decay across 3 bands.
@@ -196,7 +207,11 @@ pub fn generate_rir(params: &EnvironmentParams, sample_rate: u32) -> Vec<f32> {
         .iter()
         .map(|c| (c.re * scale).powi(2))
         .sum();
-    let norm = if energy > 1e-10 { 1.0 / energy.sqrt() } else { 1.0 };
+    let norm = if energy > 1e-10 {
+        1.0 / energy.sqrt()
+    } else {
+        1.0
+    };
 
     for i in 0..rir_len {
         result[i] = (spectrum[i].re * scale * norm) as f32;
@@ -293,9 +308,7 @@ mod tests {
     fn reverberant_changes_signal() {
         let params = EnvironmentParams::from_index(3); // VastSpace
         let rir = generate_rir(&params, SR);
-        let signal: Vec<f32> = (0..48000)
-            .map(|i| (i as f32 * 0.01).sin() * 0.5)
-            .collect();
+        let signal: Vec<f32> = (0..48000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
         let result = apply_rir(&signal, &rir, params.wet_mix);
 
         // Signal should be different after reverb
@@ -305,7 +318,10 @@ mod tests {
             .map(|(&a, &b)| (a as f64 - b as f64).abs())
             .sum::<f64>()
             / signal.len() as f64;
-        assert!(diff > 1e-4, "VastSpace reverb should change the signal, MAD={diff}");
+        assert!(
+            diff > 1e-4,
+            "VastSpace reverb should change the signal, MAD={diff}"
+        );
     }
 
     #[test]
@@ -314,10 +330,14 @@ mod tests {
         let vast = generate_rir(&EnvironmentParams::from_index(3), SR);
         let deep = generate_rir(&EnvironmentParams::from_index(4), SR);
 
-        assert!(focus.len() < vast.len(),
-            "FocusRoom RIR should be shorter than VastSpace");
-        assert!(vast.len() < deep.len(),
-            "VastSpace RIR should be shorter than DeepSanctuary");
+        assert!(
+            focus.len() < vast.len(),
+            "FocusRoom RIR should be shorter than VastSpace"
+        );
+        assert!(
+            vast.len() < deep.len(),
+            "VastSpace RIR should be shorter than DeepSanctuary"
+        );
     }
 
     #[test]
@@ -338,9 +358,7 @@ mod tests {
         // create or destroy energy dramatically.
         let params = EnvironmentParams::from_index(2); // OpenLounge
         let rir = generate_rir(&params, SR);
-        let signal: Vec<f32> = (0..48000)
-            .map(|i| (i as f32 * 0.002).sin() * 0.3)
-            .collect();
+        let signal: Vec<f32> = (0..48000).map(|i| (i as f32 * 0.002).sin() * 0.3).collect();
 
         let dry_energy: f64 = signal.iter().map(|&x| (x as f64).powi(2)).sum();
         let result = apply_rir(&signal, &rir, params.wet_mix);
@@ -381,9 +399,7 @@ mod tests {
 
     #[test]
     fn deeper_environment_has_more_effect() {
-        let signal: Vec<f32> = (0..48000)
-            .map(|i| (i as f32 * 0.005).sin() * 0.4)
-            .collect();
+        let signal: Vec<f32> = (0..48000).map(|i| (i as f32 * 0.005).sin() * 0.4).collect();
 
         let mut diffs = Vec::new();
         for env in 1..5 {

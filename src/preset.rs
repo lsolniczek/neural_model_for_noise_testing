@@ -3,11 +3,8 @@
 /// Maps the full NoiseEngine configuration into a flat f64 vector
 /// that the optimizer can search over. Handles encoding/decoding
 /// of mixed continuous and discrete parameters.
-
 use crate::movement::MovementConfig;
-use noise_generator_core::{
-    AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine,
-};
+use noise_generator_core::{AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -24,6 +21,10 @@ pub const MAX_OBJECTS: usize = 8;
 //               + mov_reverb_max(1) + tint_freq(1) + tint_db(1)
 //               + source_kind(1) + tone_freq(1) + tone_amplitude(1) = 28
 // Total: 6 + 8×28 = 230
+//
+// NOTE: per-object `spread` is serialized in preset JSON and applied at runtime,
+// but intentionally excluded from the optimizer genome for now. That keeps the
+// preset / surrogate contract stable while we validate the DSP control.
 pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 28;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +126,9 @@ pub struct ObjectConfig {
     pub z: f32,
     pub volume: f32,
     pub reverb_send: f32,
+    /// Per-object apparent source width / decorrelation. 0 = point source.
+    #[serde(default)]
+    pub spread: f32,
     pub bass_mod: ModConfig,
     pub satellite_mod: ModConfig,
     #[serde(default)]
@@ -146,7 +150,9 @@ pub struct ObjectConfig {
     pub tone_amplitude: f32,
 }
 
-fn default_tone_freq() -> f32 { 200.0 }
+fn default_tone_freq() -> f32 {
+    200.0
+}
 
 impl Default for ObjectConfig {
     fn default() -> Self {
@@ -158,6 +164,7 @@ impl Default for ObjectConfig {
             z: 1.0,
             volume: 1.0,
             reverb_send: 0.1,
+            spread: 0.0,
             bass_mod: ModConfig::default(),
             satellite_mod: ModConfig::default(),
             movement: MovementConfig::default(),
@@ -178,6 +185,7 @@ impl ObjectConfig {
         self.z = self.z.clamp(-5.0, 5.0);
         self.volume = self.volume.clamp(0.0, 1.0);
         self.reverb_send = self.reverb_send.clamp(0.0, 1.0);
+        self.spread = self.spread.clamp(0.0, 1.0);
         self.bass_mod.clamp();
         self.satellite_mod.clamp();
         self.movement.clamp();
@@ -280,6 +288,7 @@ impl Preset {
                 obj.volume,
                 obj.reverb_send,
             );
+            engine.set_object_spread(i as u32, if obj.active { obj.spread } else { 0.0 });
             engine.set_bass_modulator(
                 i as u32,
                 obj.bass_mod.to_modulator_kind(),
@@ -335,7 +344,10 @@ impl Preset {
             g.push(obj.bass_mod.param_c as f64);
             g.push(obj.satellite_mod.kind as f64);
             g.push(obj.satellite_mod.param_a as f64);
-            g.push(encode_mod_param_b(obj.satellite_mod.kind, obj.satellite_mod.param_b));
+            g.push(encode_mod_param_b(
+                obj.satellite_mod.kind,
+                obj.satellite_mod.param_b,
+            ));
             g.push(obj.satellite_mod.param_c as f64);
             g.push(obj.movement.kind as f64);
             g.push(obj.movement.radius as f64);
@@ -358,7 +370,16 @@ impl Preset {
     }
 
     /// Decode from a flat f64 vector. Values are clamped to valid ranges.
+    /// Spread defaults to 0.0 for every object — see `from_genome_with_spread`
+    /// when you need to preserve spread from a seed preset.
     pub fn from_genome(g: &[f64]) -> Self {
+        Self::from_genome_with_spread(g, &[0.0_f32; MAX_OBJECTS])
+    }
+
+    /// Decode from a flat f64 vector while injecting per-slot spread values
+    /// that are not part of the genome encoding. Used by the optimizer to
+    /// preserve spread from a seed preset across genome roundtrips.
+    pub fn from_genome_with_spread(g: &[f64], spread_per_slot: &[f32; MAX_OBJECTS]) -> Self {
         assert!(g.len() >= GENOME_LEN, "genome too short");
 
         let mut preset = Preset {
@@ -381,6 +402,7 @@ impl Preset {
                 z: g[base + 4] as f32,
                 volume: g[base + 5] as f32,
                 reverb_send: g[base + 6] as f32,
+                spread: spread_per_slot[i],
                 bass_mod: {
                     let bk = g[base + 7].round() as u8;
                     ModConfig {
@@ -439,9 +461,9 @@ impl Preset {
         // Per-object discrete params
         for i in 0..MAX_OBJECTS {
             let base = 6 + i * 28;
-            indices.push(base);      // active (0/1)
-            indices.push(base + 1);  // color
-            indices.push(base + 7);  // bass_mod.kind
+            indices.push(base); // active (0/1)
+            indices.push(base + 1); // color
+            indices.push(base + 7); // bass_mod.kind
             indices.push(base + 11); // satellite_mod.kind
             indices.push(base + 15); // movement.kind
         }
@@ -453,45 +475,45 @@ impl Preset {
         let mut b = Vec::with_capacity(GENOME_LEN);
 
         // Global
-        b.push((0.1, 1.0));   // master_gain
-        b.push((0.0, 1.0));   // spatial_mode (discrete: 0 or 1)
-        b.push((2.0, 8.0));   // source_count
-        b.push((0.0, 6.0));   // anchor_color
-        b.push((0.0, 1.0));   // anchor_volume
-        b.push((0.0, 4.0));   // environment
+        b.push((0.1, 1.0)); // master_gain
+        b.push((0.0, 1.0)); // spatial_mode (discrete: 0 or 1)
+        b.push((2.0, 8.0)); // source_count
+        b.push((0.0, 6.0)); // anchor_color
+        b.push((0.0, 1.0)); // anchor_volume
+        b.push((0.0, 4.0)); // environment
 
         // Per-object (×8)
         for _ in 0..MAX_OBJECTS {
-            b.push((0.0, 1.0));     // active
-            b.push((0.0, 6.0));     // color
-            b.push((-5.0, 5.0));    // x
-            b.push((-3.0, 3.0));    // y
-            b.push((-5.0, 5.0));    // z
-            b.push((0.0, 1.0));     // volume
-            b.push((0.0, 1.0));     // reverb_send
-            b.push((0.0, 6.0));     // bass_mod.kind (0=Flat,1=SineLfo,2=Breathing,3=Stochastic,4=NeuralLfo,5=Isochronic,6=RandomPulse)
-            b.push((0.0, 40.0));    // bass_mod.param_a (max covers NeuralLfo/Isochronic 40 Hz)
-            b.push((0.0, 1.0));     // bass_mod.param_b
-            b.push((0.0, 0.8));     // bass_mod.param_c (covers Isochronic duty cycle 0.2–0.8)
-            b.push((0.0, 6.0));     // sat_mod.kind (same range as bass)
-            b.push((0.0, 40.0));    // sat_mod.param_a
-            b.push((0.0, 1.0));     // sat_mod.param_b
-            b.push((0.0, 0.8));     // sat_mod.param_c
-            b.push((0.0, 5.0));     // movement.kind
-            b.push((0.0, 5.0));     // movement.radius
-            b.push((0.0, 5.0));     // movement.speed
-            b.push((0.0, 6.283));   // movement.phase
-            b.push((0.5, 5.0));     // movement.depth_min
-            b.push((0.5, 6.0));     // movement.depth_max
-            b.push((0.0, 1.0));     // movement.reverb_min
-            b.push((0.0, 1.0));     // movement.reverb_max
-            // Color tint (DSP Priority 2b): per-object spectral EQ
+            b.push((0.0, 1.0)); // active
+            b.push((0.0, 6.0)); // color
+            b.push((-5.0, 5.0)); // x
+            b.push((-3.0, 3.0)); // y
+            b.push((-5.0, 5.0)); // z
+            b.push((0.0, 1.0)); // volume
+            b.push((0.0, 1.0)); // reverb_send
+            b.push((0.0, 6.0)); // bass_mod.kind (0=Flat,1=SineLfo,2=Breathing,3=Stochastic,4=NeuralLfo,5=Isochronic,6=RandomPulse)
+            b.push((0.0, 40.0)); // bass_mod.param_a (max covers NeuralLfo/Isochronic 40 Hz)
+            b.push((0.0, 1.0)); // bass_mod.param_b
+            b.push((0.0, 0.8)); // bass_mod.param_c (covers Isochronic duty cycle 0.2–0.8)
+            b.push((0.0, 6.0)); // sat_mod.kind (same range as bass)
+            b.push((0.0, 40.0)); // sat_mod.param_a
+            b.push((0.0, 1.0)); // sat_mod.param_b
+            b.push((0.0, 0.8)); // sat_mod.param_c
+            b.push((0.0, 5.0)); // movement.kind
+            b.push((0.0, 5.0)); // movement.radius
+            b.push((0.0, 5.0)); // movement.speed
+            b.push((0.0, 6.283)); // movement.phase
+            b.push((0.5, 5.0)); // movement.depth_min
+            b.push((0.5, 6.0)); // movement.depth_max
+            b.push((0.0, 1.0)); // movement.reverb_min
+            b.push((0.0, 1.0)); // movement.reverb_max
+                                // Color tint (DSP Priority 2b): per-object spectral EQ
             b.push((0.0, 8000.0)); // tint_freq (0 = disabled, 100-8000 when active)
-            b.push((-6.0, 6.0));   // tint_db (-6 to +6 dB)
-            // Tone source
-            b.push((0.0, 1.0));    // source_kind (0=Noise, 1=Tone)
+            b.push((-6.0, 6.0)); // tint_db (-6 to +6 dB)
+                                 // Tone source
+            b.push((0.0, 1.0)); // source_kind (0=Noise, 1=Tone)
             b.push((20.0, 8000.0)); // tone_freq
-            b.push((0.0, 1.0));    // tone_amplitude
+            b.push((0.0, 1.0)); // tone_amplitude
         }
 
         b
@@ -563,10 +585,7 @@ mod tests {
 
         // After clamp, re-encoding should give identical genome
         for (i, (a, b)) in genome.iter().zip(re_encoded.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-6,
-                "Gene {i} differs: {a} vs {b}"
-            );
+            assert!((a - b).abs() < 1e-6, "Gene {i} differs: {a} vs {b}");
         }
     }
 
@@ -579,8 +598,18 @@ mod tests {
         preset.objects[0].x = 2.0;
         preset.objects[0].y = -1.5;
         preset.objects[0].z = 3.0;
-        preset.objects[0].bass_mod = ModConfig { kind: 1, param_a: 0.5, param_b: 0.8, param_c: 0.0 };
-        preset.objects[0].satellite_mod = ModConfig { kind: 4, param_a: 10.0, param_b: 0.6, param_c: 0.0 };
+        preset.objects[0].bass_mod = ModConfig {
+            kind: 1,
+            param_a: 0.5,
+            param_b: 0.8,
+            param_c: 0.0,
+        };
+        preset.objects[0].satellite_mod = ModConfig {
+            kind: 4,
+            param_a: 10.0,
+            param_b: 0.6,
+            param_c: 0.0,
+        };
 
         let genome = preset.to_genome();
         let decoded = Preset::from_genome(&genome);
@@ -590,6 +619,55 @@ mod tests {
         assert!((decoded.objects[0].volume - 0.75).abs() < 1e-5);
         assert_eq!(decoded.objects[0].bass_mod.kind, 1);
         assert!((decoded.objects[0].bass_mod.param_a - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn legacy_json_without_spread_defaults_to_zero() {
+        let preset: Preset =
+            serde_json::from_str(include_str!("../presets/normal_set_shield_v3.json"))
+                .expect("legacy preset should deserialize without spread");
+        assert!(preset.objects.iter().all(|obj| obj.spread == 0.0));
+    }
+
+    #[test]
+    fn from_genome_drops_spread_but_with_spread_preserves_it() {
+        // Regression: `from_genome` always zeroed spread because spread is
+        // intentionally outside the optimizer genome. Without
+        // `from_genome_with_spread`, an init-preset's spread values would be
+        // silently lost when the optimizer roundtrips the seed through the
+        // genome encoding.
+        let mut preset = Preset::default();
+        preset.objects[2].active = true;
+        preset.objects[2].spread = 1.0;
+        preset.objects[4].active = true;
+        preset.objects[4].spread = 0.85;
+
+        let genome = preset.to_genome();
+
+        let decoded_default = Preset::from_genome(&genome);
+        assert!(decoded_default.objects.iter().all(|obj| obj.spread == 0.0));
+
+        let mut spread_per_slot = [0.0_f32; MAX_OBJECTS];
+        for (i, obj) in preset.objects.iter().enumerate() {
+            spread_per_slot[i] = obj.spread;
+        }
+        let decoded_with_spread = Preset::from_genome_with_spread(&genome, &spread_per_slot);
+        assert!((decoded_with_spread.objects[2].spread - 1.0).abs() < 1e-6);
+        assert!((decoded_with_spread.objects[4].spread - 0.85).abs() < 1e-6);
+        assert_eq!(decoded_with_spread.objects[0].spread, 0.0);
+    }
+
+    #[test]
+    fn from_genome_with_spread_clamps_out_of_range_values() {
+        let preset = Preset::default();
+        let genome = preset.to_genome();
+        let mut spread = [0.0_f32; MAX_OBJECTS];
+        spread[1] = 5.0;
+        spread[3] = -2.0;
+        let decoded = Preset::from_genome_with_spread(&genome, &spread);
+        // Preset::clamp() runs at the end of from_genome_with_spread.
+        assert_eq!(decoded.objects[1].spread, 1.0);
+        assert_eq!(decoded.objects[3].spread, 0.0);
     }
 
     // ---------------------------------------------------------------
@@ -617,18 +695,30 @@ mod tests {
     fn stochastic_param_b_at_boundaries() {
         // Min: 10 → 0.0
         let enc_min = encode_mod_param_b(3, 10.0);
-        assert!((enc_min - 0.0).abs() < 1e-6, "decay_ms=10 should encode to ~0, got {enc_min}");
+        assert!(
+            (enc_min - 0.0).abs() < 1e-6,
+            "decay_ms=10 should encode to ~0, got {enc_min}"
+        );
 
         // Max: 500 → 1.0
         let enc_max = encode_mod_param_b(3, 500.0);
-        assert!((enc_max - 1.0).abs() < 1e-6, "decay_ms=500 should encode to ~1, got {enc_max}");
+        assert!(
+            (enc_max - 1.0).abs() < 1e-6,
+            "decay_ms=500 should encode to ~1, got {enc_max}"
+        );
 
         // Decode back
         let dec_min = decode_mod_param_b(3, 0.0);
-        assert!((dec_min - 10.0).abs() < 0.1, "genome=0 should decode to ~10, got {dec_min}");
+        assert!(
+            (dec_min - 10.0).abs() < 0.1,
+            "genome=0 should decode to ~10, got {dec_min}"
+        );
 
         let dec_max = decode_mod_param_b(3, 1.0);
-        assert!((dec_max - 500.0).abs() < 0.1, "genome=1 should decode to ~500, got {dec_max}");
+        assert!(
+            (dec_max - 500.0).abs() < 0.1,
+            "genome=1 should decode to ~500, got {dec_max}"
+        );
     }
 
     #[test]
@@ -655,9 +745,9 @@ mod tests {
         preset.objects[0].active = true;
         preset.objects[0].bass_mod = ModConfig {
             kind: 3,
-            param_a: 5.0,     // lambda
-            param_b: 250.0,   // decay_ms (midrange)
-            param_c: 0.2,     // min_gain
+            param_a: 5.0,   // lambda
+            param_b: 250.0, // decay_ms (midrange)
+            param_c: 0.2,   // min_gain
         };
 
         let genome = preset.to_genome();
@@ -716,11 +806,28 @@ mod tests {
     #[test]
     fn clamp_enforces_mod_params() {
         let mut p = Preset::default();
-        p.objects[0].bass_mod = ModConfig { kind: 1, param_a: 100.0, param_b: -1.0, param_c: 0.0 };
+        p.objects[0].bass_mod = ModConfig {
+            kind: 1,
+            param_a: 100.0,
+            param_b: -1.0,
+            param_c: 0.0,
+        };
         p.clamp();
         // SineLfo: freq clamped to [0.01, 2.0], depth to [0, 1]
         assert_eq!(p.objects[0].bass_mod.param_a, 2.0);
         assert_eq!(p.objects[0].bass_mod.param_b, 0.0);
+    }
+
+    #[test]
+    fn clamp_enforces_spread_bounds() {
+        let mut p = Preset::default();
+        p.objects[0].spread = 2.0;
+        p.clamp();
+        assert_eq!(p.objects[0].spread, 1.0);
+
+        p.objects[0].spread = -1.0;
+        p.clamp();
+        assert_eq!(p.objects[0].spread, 0.0);
     }
 
     // ---------------------------------------------------------------
@@ -731,13 +838,13 @@ mod tests {
     fn from_genome_clamps_out_of_bounds() {
         let mut genome = vec![999.0; GENOME_LEN];
         // Set discrete values to valid-ish ranges so they don't overflow u8
-        genome[1] = 1.0;  // spatial_mode
-        genome[3] = 6.0;  // anchor_color
-        genome[5] = 4.0;  // environment
+        genome[1] = 1.0; // spatial_mode
+        genome[3] = 6.0; // anchor_color
+        genome[5] = 4.0; // environment
         for i in 0..MAX_OBJECTS {
             let base = 6 + i * 28;
-            genome[base + 1] = 6.0;  // color
-            genome[base + 7] = 0.0;  // bass kind (Flat)
+            genome[base + 1] = 6.0; // color
+            genome[base + 7] = 0.0; // bass kind (Flat)
             genome[base + 11] = 0.0; // sat kind (Flat)
             genome[base + 15] = 0.0; // movement kind (Static)
         }
@@ -765,5 +872,21 @@ mod tests {
     fn default_preset_no_active_objects() {
         let p = Preset::default();
         assert_eq!(p.active_object_count(), 0);
+    }
+
+    #[test]
+    fn apply_to_engine_sets_object_spread() {
+        let engine = NoiseEngine::new(48_000, 0.8);
+        let mut preset = Preset::default();
+        preset.source_count = 2;
+        preset.objects[0].active = true;
+        preset.objects[0].spread = 0.65;
+        preset.objects[1].active = false;
+        preset.objects[1].spread = 0.4;
+
+        preset.apply_to_engine(&engine);
+
+        assert!((engine.object_spread(0) - 0.65).abs() < 1e-6);
+        assert_eq!(engine.object_spread(1), 0.0);
     }
 }

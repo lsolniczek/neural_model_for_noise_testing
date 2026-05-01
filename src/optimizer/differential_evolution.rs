@@ -2,7 +2,6 @@
 ///
 /// Well-suited for the mixed continuous/discrete parameter space of noise
 /// presets. Population-based, gradient-free, handles non-convex landscapes.
-
 use rand::prelude::*;
 use rand_distr::Uniform;
 
@@ -40,13 +39,7 @@ impl DifferentialEvolution {
     /// - `f`: mutation scale (0.5–0.9 typical)
     /// - `cr`: crossover rate (0.7–0.9 typical)
     /// - `seed`: RNG seed for reproducibility
-    pub fn new(
-        bounds: Vec<(f64, f64)>,
-        pop_size: usize,
-        f: f64,
-        cr: f64,
-        seed: u64,
-    ) -> Self {
+    pub fn new(bounds: Vec<(f64, f64)>, pop_size: usize, f: f64, cr: f64, seed: u64) -> Self {
         Self::with_discrete(bounds, pop_size, f, cr, seed, Vec::new())
     }
 
@@ -116,7 +109,10 @@ impl DifferentialEvolution {
                     .zip(self.bounds.iter())
                     .map(|(g, (lo, hi))| {
                         let range = hi - lo;
-                        let delta = self.rng.sample(Uniform::new(-perturbation_frac, perturbation_frac)) * range;
+                        let delta = self
+                            .rng
+                            .sample(Uniform::new(-perturbation_frac, perturbation_frac))
+                            * range;
                         (g + delta).clamp(*lo, *hi)
                     })
                     .collect();
@@ -164,8 +160,7 @@ impl DifferentialEvolution {
                 // Binomial crossover
                 if self.rng.gen::<f64>() < self.cr || j == j_rand {
                     let mutant = self.population[a].genome[j]
-                        + self.f
-                            * (self.population[b].genome[j] - self.population[c].genome[j]);
+                        + self.f * (self.population[b].genome[j] - self.population[c].genome[j]);
                     trial[j] = self.clamp_to_bounds(j, mutant);
                 } else {
                     trial[j] = self.population[i].genome[j];
@@ -181,7 +176,12 @@ impl DifferentialEvolution {
     }
 
     /// Report trial evaluation results. Replaces parent if trial is better.
-    pub fn report_trial_result(&mut self, target_index: usize, trial_genome: Vec<f64>, trial_fitness: f64) {
+    pub fn report_trial_result(
+        &mut self,
+        target_index: usize,
+        trial_genome: Vec<f64>,
+        trial_fitness: f64,
+    ) {
         if trial_fitness >= self.population[target_index].fitness {
             self.population[target_index] = Individual {
                 genome: trial_genome,
@@ -204,7 +204,9 @@ impl DifferentialEvolution {
 
     /// Mean fitness of current population.
     pub fn mean_fitness(&self) -> f64 {
-        let valid: Vec<f64> = self.population.iter()
+        let valid: Vec<f64> = self
+            .population
+            .iter()
             .filter(|i| i.fitness > f64::NEG_INFINITY)
             .map(|i| i.fitness)
             .collect();
@@ -216,7 +218,9 @@ impl DifferentialEvolution {
 
     /// Fitness standard deviation of current population.
     pub fn fitness_std(&self) -> f64 {
-        let valid: Vec<f64> = self.population.iter()
+        let valid: Vec<f64> = self
+            .population
+            .iter()
             .filter(|i| i.fitness > f64::NEG_INFINITY)
             .map(|i| i.fitness)
             .collect();
@@ -246,7 +250,6 @@ impl DifferentialEvolution {
             }
         }
     }
-
 
     fn pick_three(&mut self, exclude: usize) -> (usize, usize, usize) {
         let pop_size = self.population.len();
@@ -297,10 +300,7 @@ mod tests {
         for ind in &de.population {
             for (j, &g) in ind.genome.iter().enumerate() {
                 let (lo, hi) = bounds[j];
-                assert!(
-                    g >= lo && g <= hi,
-                    "Gene {j} = {g} out of [{lo}, {hi}]"
-                );
+                assert!(g >= lo && g <= hi, "Gene {j} = {g} out of [{lo}, {hi}]");
             }
         }
     }
@@ -546,7 +546,10 @@ mod tests {
         for i in 0..5 {
             de.report_fitness(i, 0.7);
         }
-        assert!(de.fitness_std() < 1e-10, "Uniform fitness should have std=0");
+        assert!(
+            de.fitness_std() < 1e-10,
+            "Uniform fitness should have std=0"
+        );
     }
 
     #[test]

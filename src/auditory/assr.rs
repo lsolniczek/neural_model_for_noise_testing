@@ -15,7 +15,6 @@
 /// The transfer function is applied in the frequency domain to the decimated
 /// band signals (1 kHz sample rate) between the cochlear filterbank and the
 /// cortical neural models.
-
 use rustfft::{num_complex::Complex, FftPlanner};
 
 use crate::preset::Preset;
@@ -77,8 +76,8 @@ impl AssrTransfer {
 
         // Secondary peak: log-Gaussian centered at secondary_freq
         let ln_sec = self.secondary_freq.ln();
-        let secondary =
-            self.secondary_strength * (-0.5 * ((ln_f - ln_sec) / self.sigma_secondary).powi(2)).exp();
+        let secondary = self.secondary_strength
+            * (-0.5 * ((ln_f - ln_sec) / self.sigma_secondary).powi(2)).exp();
 
         // Combined: max of primary and secondary, floored at min_gain
         let raw = primary.max(secondary);
@@ -345,10 +344,7 @@ mod tests {
         assr.apply(&mut bands, 1000.0);
         for (i, (orig, result)) in original.iter().zip(bands.iter()).enumerate() {
             for (j, (&o, &r)) in orig.iter().zip(result.iter()).enumerate() {
-                assert_eq!(
-                    o, r,
-                    "Disabled ASSR should not change band {i} sample {j}"
-                );
+                assert_eq!(o, r, "Disabled ASSR should not change band {i} sample {j}");
             }
         }
     }
@@ -361,12 +357,7 @@ mod tests {
     fn apply_preserves_signal_length() {
         let assr = AssrTransfer::new();
         let n = 1000;
-        let mut bands = [
-            vec![0.5; n],
-            vec![0.5; n],
-            vec![0.5; n],
-            vec![0.5; n],
-        ];
+        let mut bands = [vec![0.5; n], vec![0.5; n], vec![0.5; n], vec![0.5; n]];
         assr.apply(&mut bands, 1000.0);
         for (i, band) in bands.iter().enumerate() {
             assert_eq!(

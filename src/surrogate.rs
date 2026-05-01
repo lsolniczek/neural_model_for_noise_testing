@@ -37,7 +37,6 @@
 ///   Inference." arXiv:2406.05002 — similar MLP for JR parameter inference.
 /// - Tenne Y, Armfield SW (2009). "Surrogate-assisted DE." — top-K
 ///   pre-screening pattern.
-
 use crate::brain_type::BrainType;
 use crate::scoring::GoalKind;
 use std::io;
@@ -69,8 +68,8 @@ pub const CSV_METADATA_COLUMNS: [&str; 7] = [
 /// A dense (fully connected) layer: y = Wx + b.
 #[derive(Debug, Clone)]
 struct DenseLayer {
-    weights: Vec<f32>,  // row-major [out_dim × in_dim]
-    biases: Vec<f32>,   // [out_dim]
+    weights: Vec<f32>, // row-major [out_dim × in_dim]
+    biases: Vec<f32>,  // [out_dim]
     in_dim: usize,
     out_dim: usize,
 }
@@ -113,26 +112,44 @@ impl SurrogateModel {
 
         let read_u32 = |cursor: &mut usize| -> io::Result<u32> {
             if *cursor + 4 > data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated header",
+                ));
             }
-            let val = u32::from_le_bytes([data[*cursor], data[*cursor+1], data[*cursor+2], data[*cursor+3]]);
+            let val = u32::from_le_bytes([
+                data[*cursor],
+                data[*cursor + 1],
+                data[*cursor + 2],
+                data[*cursor + 3],
+            ]);
             *cursor += 4;
             Ok(val)
         };
 
         let read_f32 = |cursor: &mut usize| -> io::Result<f32> {
             if *cursor + 4 > data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated weights"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated weights",
+                ));
             }
-            let val = f32::from_le_bytes([data[*cursor], data[*cursor+1], data[*cursor+2], data[*cursor+3]]);
+            let val = f32::from_le_bytes([
+                data[*cursor],
+                data[*cursor + 1],
+                data[*cursor + 2],
+                data[*cursor + 3],
+            ]);
             *cursor += 4;
             Ok(val)
         };
 
         let n_layers = read_u32(&mut cursor)? as usize;
         if n_layers == 0 || n_layers > 10 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("invalid n_layers={n_layers}")));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid n_layers={n_layers}"),
+            ));
         }
 
         let mut dims = Vec::with_capacity(n_layers + 1);
@@ -174,7 +191,12 @@ impl SurrogateModel {
             for _ in 0..out_dim {
                 biases.push(read_f32(&mut cursor)?);
             }
-            layers.push(DenseLayer { weights, biases, in_dim, out_dim });
+            layers.push(DenseLayer {
+                weights,
+                biases,
+                in_dim,
+                out_dim,
+            });
         }
 
         if cursor != data.len() {
@@ -229,7 +251,10 @@ impl SurrogateModel {
         }
 
         // Brain type one-hot (5 dims)
-        let bt_idx = BrainType::all().iter().position(|&b| b == brain_type).unwrap_or(0);
+        let bt_idx = BrainType::all()
+            .iter()
+            .position(|&b| b == brain_type)
+            .unwrap_or(0);
         for i in 0..BRAIN_TYPE_DIM {
             input.push(if i == bt_idx { 1.0 } else { 0.0 });
         }
@@ -297,7 +322,12 @@ impl SurrogateModel {
             let out_dim = dims[i + 1];
             let weights: Vec<f32> = (0..out_dim * in_dim).map(|_| next_f32()).collect();
             let biases: Vec<f32> = (0..out_dim).map(|_| next_f32()).collect();
-            layers.push(DenseLayer { weights, biases, in_dim, out_dim });
+            layers.push(DenseLayer {
+                weights,
+                biases,
+                in_dim,
+                out_dim,
+            });
         }
         SurrogateModel { layers }
     }
@@ -354,8 +384,11 @@ mod tests {
         let input = vec![0.5_f32; INPUT_DIM];
         let pred_orig = model.predict(&input);
         let pred_loaded = loaded.predict(&input);
-        assert_eq!(pred_orig.to_bits(), pred_loaded.to_bits(),
-            "Round-trip prediction mismatch: {pred_orig} vs {pred_loaded}");
+        assert_eq!(
+            pred_orig.to_bits(),
+            pred_loaded.to_bits(),
+            "Round-trip prediction mismatch: {pred_orig} vs {pred_loaded}"
+        );
 
         std::fs::remove_file(&tmp).ok();
     }
@@ -411,11 +444,17 @@ mod tests {
             "surrogate_weights_med.bin",
         ] {
             let path = root.join(rel);
-            let model = SurrogateModel::load(&path)
-                .unwrap_or_else(|e| panic!("failed to load bundled artifact {}: {e}", path.display()));
+            let model = SurrogateModel::load(&path).unwrap_or_else(|e| {
+                panic!("failed to load bundled artifact {}: {e}", path.display())
+            });
             let input = vec![0.5_f32; INPUT_DIM];
             let score = model.predict(&input);
-            assert!((0.0..=1.0).contains(&score), "bundled artifact {} produced invalid score {}", path.display(), score);
+            assert!(
+                (0.0..=1.0).contains(&score),
+                "bundled artifact {} produced invalid score {}",
+                path.display(),
+                score
+            );
         }
     }
 
@@ -447,14 +486,21 @@ mod tests {
 
         let input_zero = vec![0.0_f32; INPUT_DIM];
         let score_zero = model.predict(&input_zero);
-        assert!(score_zero.is_finite(), "Score must be finite for zero input, got {score_zero}");
+        assert!(
+            score_zero.is_finite(),
+            "Score must be finite for zero input, got {score_zero}"
+        );
     }
 
     #[test]
     fn batch_matches_individual() {
         let model = SurrogateModel::synthetic(&[INPUT_DIM, 32, 1], 77);
         let inputs: Vec<Vec<f32>> = (0..5)
-            .map(|s| (0..INPUT_DIM).map(|i| ((i + s) as f32 * 0.01) % 1.0).collect())
+            .map(|s| {
+                (0..INPUT_DIM)
+                    .map(|i| ((i + s) as f32 * 0.01) % 1.0)
+                    .collect()
+            })
             .collect();
 
         let batch_scores = model.predict_batch(&inputs);
@@ -493,18 +539,33 @@ mod tests {
     fn build_input_correct_length() {
         let genome = vec![0.5_f64; GENOME_DIM];
         let input = SurrogateModel::build_input(
-            &genome, GoalKind::Sleep, BrainType::Normal,
-            true, true, false, false,
+            &genome,
+            GoalKind::Sleep,
+            BrainType::Normal,
+            true,
+            true,
+            false,
+            false,
         );
-        assert_eq!(input.len(), INPUT_DIM, "Input should be {INPUT_DIM} dims, got {}", input.len());
+        assert_eq!(
+            input.len(),
+            INPUT_DIM,
+            "Input should be {INPUT_DIM} dims, got {}",
+            input.len()
+        );
     }
 
     #[test]
     fn build_input_goal_one_hot_sums_to_one() {
         let genome = vec![0.5_f64; GENOME_DIM];
         let input = SurrogateModel::build_input(
-            &genome, GoalKind::Focus, BrainType::Normal,
-            true, true, false, false,
+            &genome,
+            GoalKind::Focus,
+            BrainType::Normal,
+            true,
+            true,
+            false,
+            false,
         );
         let goal_sum: f32 = input[GENOME_DIM..GENOME_DIM + GOAL_DIM].iter().sum();
         assert!(
@@ -519,8 +580,13 @@ mod tests {
         // Set genome to the midpoint of each bound
         let genome: Vec<f64> = bounds.iter().map(|(lo, hi)| (lo + hi) / 2.0).collect();
         let input = SurrogateModel::build_input(
-            &genome, GoalKind::Sleep, BrainType::Normal,
-            true, true, false, false,
+            &genome,
+            GoalKind::Sleep,
+            BrainType::Normal,
+            true,
+            true,
+            false,
+            false,
         );
         for (i, &v) in input[..GENOME_DIM].iter().enumerate() {
             assert!(
@@ -534,8 +600,13 @@ mod tests {
     fn build_input_config_flags_correct() {
         let genome = vec![0.5_f64; GENOME_DIM];
         let input = SurrogateModel::build_input(
-            &genome, GoalKind::Sleep, BrainType::Normal,
-            true, false, true, false,
+            &genome,
+            GoalKind::Sleep,
+            BrainType::Normal,
+            true,
+            false,
+            true,
+            false,
         );
         let flags_start = GENOME_DIM + GOAL_DIM + BRAIN_TYPE_DIM;
         assert_eq!(input[flags_start], 1.0, "assr should be 1.0");

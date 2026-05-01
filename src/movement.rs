@@ -7,7 +7,6 @@
 /// During evaluation the controller is stepped in discrete time increments
 /// (matching the render chunk size) so that the rendered audio reflects
 /// object motion through the HRTF pipeline.
-
 use noise_generator_core::NoiseEngine;
 use serde::{Deserialize, Serialize};
 
@@ -205,7 +204,8 @@ impl MovementController {
                 rw_vel_x: 0.0,
                 rw_vel_z: 0.0,
                 // Seed RNG from object index + phase for determinism
-                rng_state: 0xDEAD_BEEF_u64.wrapping_add(i as u64 * 7919)
+                rng_state: 0xDEAD_BEEF_u64
+                    .wrapping_add(i as u64 * 7919)
                     .wrapping_add((mv.phase * 1000.0) as u64),
             });
         }
@@ -433,7 +433,8 @@ mod tests {
         let dist_sq = x * x + z * z;
         assert!(
             (dist_sq - r * r).abs() < 0.01,
-            "Orbit should trace circle: x²+z²={dist_sq}, expected {}", r * r
+            "Orbit should trace circle: x²+z²={dist_sq}, expected {}",
+            r * r
         );
     }
 
@@ -639,11 +640,19 @@ mod tests {
         let mut preset = Preset::default();
         preset.objects[0].active = true;
         preset.objects[0].movement = MovementConfig {
-            kind: 1, radius: 2.0, speed: 1.0, phase: 0.0, ..MovementConfig::default()
+            kind: 1,
+            radius: 2.0,
+            speed: 1.0,
+            phase: 0.0,
+            ..MovementConfig::default()
         };
         preset.objects[2].active = true;
         preset.objects[2].movement = MovementConfig {
-            kind: 5, radius: 1.5, speed: 0.5, phase: 1.0, ..MovementConfig::default()
+            kind: 5,
+            radius: 1.5,
+            speed: 0.5,
+            phase: 1.0,
+            ..MovementConfig::default()
         };
         // Object 1 active but static → not tracked
         preset.objects[1].active = true;

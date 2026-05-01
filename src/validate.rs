@@ -1,7 +1,6 @@
 /// Model validation tests — drive the JR model directly to verify
 /// core neural dynamics: frequency tracking, bifurcation threshold,
 /// impulse response, stochastic resonance, and spectral discrimination.
-
 use crate::brain_type::BrainType;
 use crate::neural::jansen_rit::{FastInhibParams, JansenRitModel};
 use crate::neural::{simulate_bilateral, simulate_tonotopic};
@@ -57,7 +56,7 @@ fn brown_noise(duration: f64, seed: u64) -> Vec<f64> {
     let mut acc = 0.0_f64;
     for &s in &wn {
         acc += s - 0.5; // center around 0
-        acc *= 0.999;   // leak to prevent drift
+        acc *= 0.999; // leak to prevent drift
         brown.push(acc);
     }
     // Normalise to [0, 1]
@@ -146,9 +145,8 @@ pub fn test_frequency_tracking() {
     for &freq in &test_freqs {
         let input = sine_signal(freq, duration, 1.0);
 
-        let mut jr = JansenRitModel::with_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0,
-        );
+        let mut jr =
+            JansenRitModel::with_params(SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0);
         let result = jr.simulate(&input);
 
         // Detrend
@@ -167,7 +165,9 @@ pub fn test_frequency_tracking() {
         let (dom_f, _) = peak_in_range(&freqs, &powers, 0.5, 50.0);
 
         let pass = peak_frac > 0.05; // At least 5% of spectral power near target
-        if !pass { all_pass = false; }
+        if !pass {
+            all_pass = false;
+        }
 
         println!(
             "    {:.0} Hz input → dominant={:.1} Hz, power@{:.0}Hz={:.1}%  {}",
@@ -212,9 +212,8 @@ pub fn test_bifurcation() {
     let mut results: Vec<(f64, f64, bool)> = Vec::new();
 
     for &offset in &offsets {
-        let mut jr = JansenRitModel::with_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, 0.0,
-        );
+        let mut jr =
+            JansenRitModel::with_params(SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, 0.0);
         let result = jr.simulate(&constant_input);
 
         // Measure EEG oscillation amplitude (detrended RMS)
@@ -264,7 +263,10 @@ pub fn test_bifurcation() {
             );
         }
         (Some(on), None) => {
-            println!("  Bifurcation ON at p ≈ {:.0}, still oscillating at p=400", on);
+            println!(
+                "  Bifurcation ON at p ≈ {:.0}, still oscillating at p=400",
+                on
+            );
             println!("  Result: OK — onset detected, upper boundary beyond test range");
         }
         (None, _) => {
@@ -290,9 +292,8 @@ pub fn test_impulse_response() {
         input[i] = 1.0; // Max impulse
     }
 
-    let mut jr = JansenRitModel::with_params(
-        SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 200.0,
-    );
+    let mut jr =
+        JansenRitModel::with_params(SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 200.0);
     let result = jr.simulate(&input);
 
     // Measure EEG amplitude in successive 0.5s windows
@@ -330,7 +331,11 @@ pub fn test_impulse_response() {
             "    {:>5.1}      {:>8.4}    {}",
             t,
             w_rms,
-            if w_rms > peak_rms * 0.1 { "active" } else { "settled" }
+            if w_rms > peak_rms * 0.1 {
+                "active"
+            } else {
+                "settled"
+            }
         );
     }
 
@@ -398,8 +403,8 @@ pub fn test_stochastic_resonance() {
 
     let offset = 80.0;
     let scale = 100.0;
-    let signal_center = 0.3;  // Base input level: p = 80 + 100*0.3 = 110
-    let signal_amp = 0.05;    // ±5 p-units of modulation
+    let signal_center = 0.3; // Base input level: p = 80 + 100*0.3 = 110
+    let signal_amp = 0.05; // ±5 p-units of modulation
 
     // Weak 10 Hz subthreshold signal
     let weak_sine: Vec<f64> = (0..n)
@@ -412,9 +417,8 @@ pub fn test_stochastic_resonance() {
     let noise = white_noise(duration, 12345);
 
     // Phase A: signal alone
-    let mut jr_a = JansenRitModel::with_params(
-        SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, scale,
-    );
+    let mut jr_a =
+        JansenRitModel::with_params(SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, scale);
     let result_a = jr_a.simulate(&weak_sine);
     let mean_a = result_a.eeg.iter().sum::<f64>() / n as f64;
     let det_a: Vec<f64> = result_a.eeg.iter().map(|x| x - mean_a).collect();
@@ -424,7 +428,11 @@ pub fn test_stochastic_resonance() {
     let signal_power_a = band_power(&freqs_a, &powers_a, 9.0, 11.0);
     let total_a: f64 = powers_a.iter().sum();
     let noise_power_a = total_a - signal_power_a;
-    let snr_a = if noise_power_a > 1e-15 { signal_power_a / noise_power_a } else { 0.0 };
+    let snr_a = if noise_power_a > 1e-15 {
+        signal_power_a / noise_power_a
+    } else {
+        0.0
+    };
     let p_min_a = offset + scale * (signal_center - signal_amp);
     let p_max_a = offset + scale * (signal_center + signal_amp);
 
@@ -432,7 +440,10 @@ pub fn test_stochastic_resonance() {
     println!("    ──────────────────────────────────────────────────────────────────────────");
     println!(
         "    Signal only                  [{:.0}–{:.0}]     {:>8.3}   {:>8.4}    baseline",
-        p_min_a, p_max_a, snr_a, rms(&det_a)
+        p_min_a,
+        p_max_a,
+        snr_a,
+        rms(&det_a)
     );
 
     let mut best_snr_ratio = 0.0_f64;
@@ -444,14 +455,11 @@ pub fn test_stochastic_resonance() {
         let combined: Vec<f64> = weak_sine
             .iter()
             .zip(noise.iter())
-            .map(|(&s, &n)| {
-                (s + noise_amp * (n - 0.5)).clamp(0.0, 1.0)
-            })
+            .map(|(&s, &n)| (s + noise_amp * (n - 0.5)).clamp(0.0, 1.0))
             .collect();
 
-        let mut jr_b = JansenRitModel::with_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, scale,
-        );
+        let mut jr_b =
+            JansenRitModel::with_params(SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, offset, scale);
         let result_b = jr_b.simulate(&combined);
         let mean_b = result_b.eeg.iter().sum::<f64>() / n as f64;
         let det_b: Vec<f64> = result_b.eeg.iter().map(|x| x - mean_b).collect();
@@ -460,12 +468,22 @@ pub fn test_stochastic_resonance() {
         let signal_power_b = band_power(&freqs_b, &powers_b, 9.0, 11.0);
         let total_b: f64 = powers_b.iter().sum();
         let noise_power_b = total_b - signal_power_b;
-        let snr_b = if noise_power_b > 1e-15 { signal_power_b / noise_power_b } else { 0.0 };
+        let snr_b = if noise_power_b > 1e-15 {
+            signal_power_b / noise_power_b
+        } else {
+            0.0
+        };
 
         let p_min_b = offset + scale * (signal_center - signal_amp - noise_amp * 0.5);
         let p_max_b = offset + scale * (signal_center + signal_amp + noise_amp * 0.5);
 
-        let snr_ratio = if snr_a > 1e-10 { snr_b / snr_a } else if snr_b > 1e-10 { 100.0 } else { 1.0 };
+        let snr_ratio = if snr_a > 1e-10 {
+            snr_b / snr_a
+        } else if snr_b > 1e-10 {
+            100.0
+        } else {
+            1.0
+        };
 
         if snr_ratio > best_snr_ratio {
             best_snr_ratio = snr_ratio;
@@ -476,7 +494,8 @@ pub fn test_stochastic_resonance() {
         println!(
             "    Signal + noise(amp={:.2})    [{:.0}–{:.0}]{}  {:>8.3}   {:>8.4}    {:.2}×",
             noise_amp,
-            p_min_b.max(0.0), p_max_b,
+            p_min_b.max(0.0),
+            p_max_b,
             if crosses { "*" } else { " " },
             snr_b,
             rms(&det_b),
@@ -629,10 +648,7 @@ pub fn test_spectral_discrimination() {
     println!("  White dominant: {:.1} Hz", result_w.dominant_freq);
     println!("  Brown dominant: {:.1} Hz", result_b.dominant_freq);
     let pass = max_diff > 0.05;
-    println!(
-        "  Max band difference: {:.1}%",
-        max_diff * 100.0
-    );
+    println!("  Max band difference: {:.1}%", max_diff * 100.0);
     println!(
         "  Result: {} — {}",
         if pass { "PASS" } else { "FAIL" },
@@ -667,17 +683,20 @@ fn normalise_bands(bands: &[Vec<f64>; 4]) -> [Vec<f64>; 4] {
 /// Helper: build 4-band signals from a mono signal, distributing energy
 /// according to given fractions. Each band gets an independent noise-like
 /// modulation but weighted by the fraction to simulate spectral shape.
-fn make_bands_from_signal(signal: &[f64], energy_fractions: &[f64; 4], seed_offset: u64) -> [Vec<f64>; 4] {
+fn make_bands_from_signal(
+    signal: &[f64],
+    energy_fractions: &[f64; 4],
+    seed_offset: u64,
+) -> [Vec<f64>; 4] {
     let n = signal.len();
-    let mut bands: [Vec<f64>; 4] = [
-        vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n],
-    ];
+    let mut bands: [Vec<f64>; 4] = [vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]];
     for b in 0..4 {
         let modulation = white_noise(n as f64 / SAMPLE_RATE, 1000 + seed_offset + b as u64);
         for i in 0..n {
             // Band signal = base signal * energy weight + small independent modulation
             bands[b][i] = (signal[i] * energy_fractions[b].sqrt()
-                + 0.1 * modulation[i] * energy_fractions[b]).clamp(0.0, 1.0);
+                + 0.1 * modulation[i] * energy_fractions[b])
+                .clamp(0.0, 1.0);
         }
     }
     normalise_bands(&bands)
@@ -708,14 +727,23 @@ pub fn test_bilateral_frequency_tracking() {
         let bands = make_bands_from_signal(&input, &equal_energy, 0);
 
         let result = simulate_bilateral(
-            &bands, &bands,
-            &equal_energy, &equal_energy,
+            &bands,
+            &bands,
+            &equal_energy,
+            &equal_energy,
             &bilateral,
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            neural.jansen_rit.v0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
         );
 
         let lf = result.left_dominant_freq;
@@ -726,11 +754,18 @@ pub fn test_bilateral_frequency_tracking() {
 
         // Both hemispheres should produce meaningful oscillations
         let pass = lf > 0.5 && rf > 0.5;
-        if !pass { all_pass = false; }
+        if !pass {
+            all_pass = false;
+        }
 
         println!(
             "    {:.0} Hz    {:>6.1}     {:>6.1}     {:.3}     {:.3}     {:>+.3}    {}",
-            freq, lf, rf, la, ra, asym,
+            freq,
+            lf,
+            rf,
+            la,
+            ra,
+            asym,
             if pass { "✓ PASS" } else { "✗ FAIL" }
         );
     }
@@ -746,20 +781,32 @@ pub fn test_bilateral_frequency_tracking() {
     let input = sine_signal(10.0, duration, 1.0);
     let bands = make_bands_from_signal(&input, &equal_energy, 100);
     let result = simulate_bilateral(
-        &bands, &bands,
-        &equal_energy, &equal_energy,
+        &bands,
+        &bands,
+        &equal_energy,
+        &equal_energy,
         &bilateral,
         neural.jansen_rit.c,
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
         &fi,
-        neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+        neural.jansen_rit.v0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.5,
     );
 
     // Note: asymmetry won't be exactly 0 because L/R hemispheres have different
     // intrinsic rates (L=fast, R=slow in the AST model)
     println!("\n  Symmetric input asymmetry check:");
-    println!("    Alpha asymmetry with identical L/R input: {:+.4}", result.alpha_asymmetry);
+    println!(
+        "    Alpha asymmetry with identical L/R input: {:+.4}",
+        result.alpha_asymmetry
+    );
     println!("    Left hemisphere is 'fast' (theta/beta), Right is 'slow' (delta/alpha)");
     println!("    Non-zero asymmetry with symmetric input reflects hemispheric specialisation.");
 }
@@ -800,14 +847,23 @@ pub fn test_bilateral_bifurcation() {
         ];
 
         let result = simulate_bilateral(
-            &scaled_bands, &scaled_bands,
-            &equal_energy, &equal_energy,
+            &scaled_bands,
+            &scaled_bands,
+            &equal_energy,
+            &equal_energy,
             &bilateral,
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            neural.jansen_rit.v0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
         );
 
         let mean = result.combined.eeg.iter().sum::<f64>() / n as f64;
@@ -822,8 +878,10 @@ pub fn test_bilateral_bifurcation() {
 
         println!(
             "    {:.2}         {:>10.4}     {:>6.1} Hz    {:>6.1} Hz    {}",
-            amp, eeg_rms,
-            result.left_dominant_freq, result.right_dominant_freq,
+            amp,
+            eeg_rms,
+            result.left_dominant_freq,
+            result.right_dominant_freq,
             if active { "oscillating" } else { "silent" }
         );
     }
@@ -882,14 +940,23 @@ pub fn test_bilateral_impulse() {
     let right_bands = make_bands_from_signal(&right_input, &right_energy, 400);
 
     let result = simulate_bilateral(
-        &left_bands, &right_bands,
-        &left_energy, &right_energy,
+        &left_bands,
+        &right_bands,
+        &left_energy,
+        &right_energy,
         &bilateral,
         neural.jansen_rit.c,
         neural.jansen_rit.input_scale,
         SAMPLE_RATE,
         &fi,
-        neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+        neural.jansen_rit.v0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.5,
     );
 
     // Analyse response in 0.5s windows
@@ -907,12 +974,19 @@ pub fn test_bilateral_impulse() {
         let window: Vec<f64> = combined[start..end].iter().map(|x| x - mean).collect();
         let w_rms = rms(&window);
         let t = (start as f64 + window_samples as f64 / 2.0) / SAMPLE_RATE;
-        if w_rms > peak_rms { peak_rms = w_rms; }
+        if w_rms > peak_rms {
+            peak_rms = w_rms;
+        }
 
         println!(
             "    {:>5.1}      {:>10.4}     {}",
-            t, w_rms,
-            if w_rms > peak_rms * 0.5 { "active" } else { "settling" }
+            t,
+            w_rms,
+            if w_rms > peak_rms * 0.5 {
+                "active"
+            } else {
+                "settling"
+            }
         );
     }
 
@@ -921,8 +995,14 @@ pub fn test_bilateral_impulse() {
     println!();
     println!("  Hemispheric analysis:");
     println!("    Impulse delivered to: LEFT ear");
-    println!("    Right hemisphere (contralateral): dominant = {:.1} Hz", result.right_dominant_freq);
-    println!("    Left hemisphere (ipsilateral):    dominant = {:.1} Hz", result.left_dominant_freq);
+    println!(
+        "    Right hemisphere (contralateral): dominant = {:.1} Hz",
+        result.right_dominant_freq
+    );
+    println!(
+        "    Left hemisphere (ipsilateral):    dominant = {:.1} Hz",
+        result.left_dominant_freq
+    );
     println!("    Alpha asymmetry: {:+.4}", result.alpha_asymmetry);
     println!();
 
@@ -938,9 +1018,11 @@ pub fn test_bilateral_impulse() {
             "hemispheres show nearly identical response (callosal coupling may be too strong)"
         }
     );
-    println!("  Callosal coupling: {:.0}%, delay: {:.0}ms",
+    println!(
+        "  Callosal coupling: {:.0}%, delay: {:.0}ms",
         bilateral.callosal_coupling * 100.0,
-        bilateral.callosal_delay_s * 1000.0);
+        bilateral.callosal_delay_s * 1000.0
+    );
 }
 
 // ── Bilateral Test 4: Stochastic Resonance (ADHD Bilateral Check) ────────────
@@ -976,10 +1058,10 @@ pub fn test_bilateral_stochastic_resonance() {
         ("Normal", &bilateral_normal, &neural_normal),
         ("ADHD", &bilateral_adhd, &neural_adhd),
     ] {
-        println!("    Brain type: {} (offsets: L0={:.0}, R0={:.0})",
-            brain_label,
-            bilateral.left.band_offsets[0],
-            bilateral.right.band_offsets[0]);
+        println!(
+            "    Brain type: {} (offsets: L0={:.0}, R0={:.0})",
+            brain_label, bilateral.left.band_offsets[0], bilateral.right.band_offsets[0]
+        );
         println!("    Noise amp   Beta     EEG RMS    20Hz SNR   SR ratio   Dominant");
         println!("    ──────────────────────────────────────────────────────────────────");
 
@@ -990,12 +1072,14 @@ pub fn test_bilateral_stochastic_resonance() {
         for &noise_amp in &noise_levels {
             // Build band signals with explicit amplitude control (no normalisation)
             // Signal = signal_amp * sin(20Hz) + noise_amp * white_noise
-            let band_signal: Vec<f64> = (0..n).map(|i| {
-                let t = i as f64 / SAMPLE_RATE;
-                let sig = signal_amp * (0.5 + 0.5 * (2.0 * PI * 20.0 * t).sin());
-                let nz = noise_amp * noise_raw[i];
-                (sig + nz).clamp(0.0, 1.0)
-            }).collect();
+            let band_signal: Vec<f64> = (0..n)
+                .map(|i| {
+                    let t = i as f64 / SAMPLE_RATE;
+                    let sig = signal_amp * (0.5 + 0.5 * (2.0 * PI * 20.0 * t).sin());
+                    let nz = noise_amp * noise_raw[i];
+                    (sig + nz).clamp(0.0, 1.0)
+                })
+                .collect();
 
             // All 4 bands get the same signal (equal energy distribution)
             let bands: [Vec<f64>; 4] = [
@@ -1013,14 +1097,23 @@ pub fn test_bilateral_stochastic_resonance() {
                 c7: neural.jansen_rit.c7,
             };
             let result = simulate_bilateral(
-                &bands, &bands,
-                &energy_frac, &energy_frac,
+                &bands,
+                &bands,
+                &energy_frac,
+                &energy_frac,
                 bilateral,
                 neural.jansen_rit.c,
                 neural.jansen_rit.input_scale,
                 SAMPLE_RATE,
                 &fi_inner,
-                neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+                neural.jansen_rit.v0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.5,
             );
 
             let bp_norm = result.combined.band_powers.normalized();
@@ -1031,10 +1124,22 @@ pub fn test_bilateral_stochastic_resonance() {
             let signal_20 = band_power(&freqs, &powers, 19.0, 21.0);
             let total: f64 = powers.iter().sum();
             let noise_power = total - signal_20;
-            let snr = if noise_power > 1e-15 { signal_20 / noise_power } else { 0.0 };
+            let snr = if noise_power > 1e-15 {
+                signal_20 / noise_power
+            } else {
+                0.0
+            };
 
-            if noise_amp == 0.0 { snr_baseline = snr; }
-            let sr_ratio = if snr_baseline > 1e-10 { snr / snr_baseline } else if snr > 1e-10 { 100.0 } else { 1.0 };
+            if noise_amp == 0.0 {
+                snr_baseline = snr;
+            }
+            let sr_ratio = if snr_baseline > 1e-10 {
+                snr / snr_baseline
+            } else if snr > 1e-10 {
+                100.0
+            } else {
+                1.0
+            };
 
             if sr_ratio > best_sr {
                 best_sr = sr_ratio;
@@ -1043,11 +1148,18 @@ pub fn test_bilateral_stochastic_resonance() {
 
             println!(
                 "    {:.2}        {:.4}   {:.4}     {:.3}      {:.2}×       {:>5.1} Hz",
-                noise_amp, bp_norm.beta, rms(&det), snr, sr_ratio,
+                noise_amp,
+                bp_norm.beta,
+                rms(&det),
+                snr,
+                sr_ratio,
                 result.combined.dominant_freq
             );
         }
-        println!("    Best SR ratio: {:.2}× at noise={:.1}", best_sr, best_noise);
+        println!(
+            "    Best SR ratio: {:.2}× at noise={:.1}",
+            best_sr, best_noise
+        );
         println!();
     }
 
@@ -1089,7 +1201,9 @@ pub fn test_bilateral_spectral_discrimination() {
     ];
 
     println!("    Brain Type   Noise    Delta   Theta   Alpha   Beta    Gamma   Dominant  Asym");
-    println!("    ──────────────────────────────────────────────────────────────────────────────────");
+    println!(
+        "    ──────────────────────────────────────────────────────────────────────────────────"
+    );
 
     let mut any_discriminates = false;
 
@@ -1099,25 +1213,43 @@ pub fn test_bilateral_spectral_discrimination() {
         let fi = fast_inhib_for(*brain);
 
         let result_w = simulate_bilateral(
-            &white_bands_l, &white_bands_r,
-            &white_energy, &white_energy,
+            &white_bands_l,
+            &white_bands_r,
+            &white_energy,
+            &white_energy,
             &bilateral,
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            neural.jansen_rit.v0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
         );
 
         let result_b = simulate_bilateral(
-            &brown_bands_l, &brown_bands_r,
-            &brown_energy, &brown_energy,
+            &brown_bands_l,
+            &brown_bands_r,
+            &brown_energy,
+            &brown_energy,
             &bilateral,
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            neural.jansen_rit.v0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
         );
 
         let bpw = result_w.combined.band_powers.normalized();
@@ -1129,20 +1261,37 @@ pub fn test_bilateral_spectral_discrimination() {
             (bpw.alpha - bpb.alpha).abs(),
             (bpw.beta - bpb.beta).abs(),
             (bpw.gamma - bpb.gamma).abs(),
-        ].iter().cloned().fold(0.0_f64, f64::max);
+        ]
+        .iter()
+        .cloned()
+        .fold(0.0_f64, f64::max);
 
-        if max_diff > 0.03 { any_discriminates = true; }
+        if max_diff > 0.03 {
+            any_discriminates = true;
+        }
 
         let label = format!("{:?}", brain);
         println!(
             "    {:<12} White    {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1} Hz  {:>+.3}",
-            label, bpw.delta, bpw.theta, bpw.alpha, bpw.beta, bpw.gamma,
-            result_w.combined.dominant_freq, result_w.alpha_asymmetry
+            label,
+            bpw.delta,
+            bpw.theta,
+            bpw.alpha,
+            bpw.beta,
+            bpw.gamma,
+            result_w.combined.dominant_freq,
+            result_w.alpha_asymmetry
         );
         println!(
             "    {:<12} Brown    {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1} Hz  {:>+.3}",
-            "", bpb.delta, bpb.theta, bpb.alpha, bpb.beta, bpb.gamma,
-            result_b.combined.dominant_freq, result_b.alpha_asymmetry
+            "",
+            bpb.delta,
+            bpb.theta,
+            bpb.alpha,
+            bpb.beta,
+            bpb.gamma,
+            result_b.combined.dominant_freq,
+            result_b.alpha_asymmetry
         );
         println!(
             "    {:<12} Diff     {:>+.3}  {:>+.3}  {:>+.3}  {:>+.3}  {:>+.3}   max={:.1}%",
@@ -1188,9 +1337,8 @@ pub fn test_wendling_legacy_recovery() {
     let input = sine_signal(10.0, duration, 1.0);
 
     // Classic JR95 via with_params (no fast inhibition)
-    let mut jr95 = JansenRitModel::with_params(
-        SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0,
-    );
+    let mut jr95 =
+        JansenRitModel::with_params(SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0);
     let result_jr95 = jr95.simulate(&input);
 
     // Wendling with G=0 (should degenerate to JR95)
@@ -1202,26 +1350,45 @@ pub fn test_wendling_legacy_recovery() {
         c7: 108.0,
     };
     let mut wendling_off = JansenRitModel::with_wendling_params(
-        SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_zero,
-        0.20, 6.0, 0.62,
+        SAMPLE_RATE,
+        3.25,
+        22.0,
+        100.0,
+        50.0,
+        135.0,
+        220.0,
+        100.0,
+        &fi_zero,
+        0.20,
+        6.0,
+        0.62,
     );
     let result_w0 = wendling_off.simulate(&input);
 
     // Compare EEG outputs
     let n = result_jr95.eeg.len().min(result_w0.eeg.len());
-    let mean_abs_diff: f64 = result_jr95.eeg[..n].iter()
+    let mean_abs_diff: f64 = result_jr95.eeg[..n]
+        .iter()
         .zip(result_w0.eeg[..n].iter())
         .map(|(a, b)| (a - b).abs())
-        .sum::<f64>() / n as f64;
-    let max_abs_diff: f64 = result_jr95.eeg[..n].iter()
+        .sum::<f64>()
+        / n as f64;
+    let max_abs_diff: f64 = result_jr95.eeg[..n]
+        .iter()
         .zip(result_w0.eeg[..n].iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max);
 
     let jr95_rms = rms(&result_jr95.eeg);
 
-    println!("    JR95 dominant freq:     {:.1} Hz", result_jr95.dominant_freq);
-    println!("    Wendling(G=0) dom freq: {:.1} Hz", result_w0.dominant_freq);
+    println!(
+        "    JR95 dominant freq:     {:.1} Hz",
+        result_jr95.dominant_freq
+    );
+    println!(
+        "    Wendling(G=0) dom freq: {:.1} Hz",
+        result_w0.dominant_freq
+    );
     println!("    JR95 EEG RMS:          {:.6}", jr95_rms);
     println!("    Wendling(G=0) EEG RMS: {:.6}", rms(&result_w0.eeg));
     println!("    Mean |diff|:           {:.2e}", mean_abs_diff);
@@ -1263,8 +1430,18 @@ pub fn test_wendling_gamma_gate() {
             c7: 108.0,
         };
         let mut jr = JansenRitModel::with_wendling_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
-            0.20, 6.0, 0.62,
+            SAMPLE_RATE,
+            3.25,
+            22.0,
+            100.0,
+            50.0,
+            135.0,
+            220.0,
+            100.0,
+            &fi,
+            0.20,
+            6.0,
+            0.62,
         );
         let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input_const);
 
@@ -1306,8 +1483,12 @@ pub fn test_wendling_gamma_gate() {
 
     let b_values = [22.0, 15.0, 10.0, 7.0, 5.0, 3.0, 1.0];
 
-    println!("    B       Delta   Theta   Alpha   Beta    Gamma   Dom Hz   @40Hz%   EEG RMS  y3 AC");
-    println!("    ──────────────────────────────────────────────────────────────────────────────────");
+    println!(
+        "    B       Delta   Theta   Alpha   Beta    Gamma   Dom Hz   @40Hz%   EEG RMS  y3 AC"
+    );
+    println!(
+        "    ──────────────────────────────────────────────────────────────────────────────────"
+    );
 
     let mut gamma_increased = false;
     let mut dom_freq_shifted = false;
@@ -1322,8 +1503,18 @@ pub fn test_wendling_gamma_gate() {
             c7: 108.0,
         };
         let mut jr = JansenRitModel::with_wendling_params(
-            SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
-            0.20, 6.0, 0.62,
+            SAMPLE_RATE,
+            3.25,
+            b,
+            100.0,
+            50.0,
+            135.0,
+            220.0,
+            100.0,
+            &fi,
+            0.20,
+            6.0,
+            0.62,
         );
         let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input_40hz);
         let bp = result.band_powers.normalized();
@@ -1336,7 +1527,11 @@ pub fn test_wendling_gamma_gate() {
         let detrended: Vec<f64> = result.eeg.iter().map(|x| x - mean).collect();
         let (freqs, powers) = power_spectrum(&detrended);
         let total_power: f64 = powers.iter().sum();
-        let pct_40 = if total_power > 1e-20 { band_power(&freqs, &powers, 38.0, 42.0) / total_power * 100.0 } else { 0.0 };
+        let pct_40 = if total_power > 1e-20 {
+            band_power(&freqs, &powers, 38.0, 42.0) / total_power * 100.0
+        } else {
+            0.0
+        };
 
         if idx == 0 {
             baseline_beta_gamma = bp.beta + bp.gamma;
@@ -1366,45 +1561,75 @@ pub fn test_wendling_gamma_gate() {
     let mut jr95_differs = false;
 
     for &b in &b_values {
-        let mut jr = JansenRitModel::with_params(
-            SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0,
-        );
+        let mut jr =
+            JansenRitModel::with_params(SAMPLE_RATE, 3.25, b, 100.0, 50.0, 135.0, 220.0, 100.0);
         let result = jr.simulate(&input_40hz);
         let bp = result.band_powers.normalized();
 
         println!(
             "    {:<5.0}   {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1}    {:.4}",
-            b, bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma,
-            result.dominant_freq, rms(&result.eeg)
+            b,
+            bp.delta,
+            bp.theta,
+            bp.alpha,
+            bp.beta,
+            bp.gamma,
+            result.dominant_freq,
+            rms(&result.eeg)
         );
     }
 
     // Compare JR95 vs Wendling at low B
     let fi_on = FastInhibParams {
-        g_fast_gain: 10.0, g_fast_rate: 500.0,
-        c5: 40.5, c6: 13.5, c7: 108.0,
+        g_fast_gain: 10.0,
+        g_fast_rate: 500.0,
+        c5: 40.5,
+        c6: 13.5,
+        c7: 108.0,
     };
     let mut jr_w_b5 = JansenRitModel::with_wendling_params(
-        SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_on,
-        0.20, 6.0, 0.62,
+        SAMPLE_RATE,
+        3.25,
+        5.0,
+        100.0,
+        50.0,
+        135.0,
+        220.0,
+        100.0,
+        &fi_on,
+        0.20,
+        6.0,
+        0.62,
     );
-    let mut jr95_b5 = JansenRitModel::with_params(
-        SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0,
-    );
+    let mut jr95_b5 =
+        JansenRitModel::with_params(SAMPLE_RATE, 3.25, 5.0, 100.0, 50.0, 135.0, 220.0, 100.0);
     let result_w = jr_w_b5.simulate(&input_40hz);
     let result_95 = jr95_b5.simulate(&input_40hz);
 
-    let eeg_diff: f64 = result_w.eeg.iter()
+    let eeg_diff: f64 = result_w
+        .eeg
+        .iter()
         .zip(result_95.eeg.iter())
         .map(|(a, b)| (a - b).abs())
-        .sum::<f64>() / result_w.eeg.len() as f64;
+        .sum::<f64>()
+        / result_w.eeg.len() as f64;
 
-    if eeg_diff > 0.01 { jr95_differs = true; }
+    if eeg_diff > 0.01 {
+        jr95_differs = true;
+    }
 
     println!();
     println!("  Comparison at B=5:");
-    println!("    Wendling (G=10): dom={:.1} Hz, RMS={:.4}", result_w.dominant_freq, rms(&result_w.eeg));
-    println!("    JR95 (G=0):     dom={:.1} Hz, RMS={:.4}", result_95.dominant_freq, rms(&result_95.eeg));
+    println!(
+        "    Wendling (G=10): dom={:.1} Hz, RMS={:.4}",
+        result_w.dominant_freq,
+        rms(&result_w.eeg)
+    );
+    println!(
+        "    JR95 (G=0):     dom={:.1} Hz, RMS={:.4}",
+        result_95.dominant_freq,
+        rms(&result_95.eeg)
+    );
     println!("    Mean |EEG diff|: {:.4}", eeg_diff);
 
     // ── Part D: G sweep near bifurcation (offset=120) ──────────────────────
@@ -1428,35 +1653,70 @@ pub fn test_wendling_gamma_gate() {
         };
         // offset=120 — right at the Hopf bifurcation
         let mut jr = JansenRitModel::with_wendling_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 120.0, 100.0, &fi,
-            0.20, 6.0, 0.62,
+            SAMPLE_RATE,
+            3.25,
+            22.0,
+            100.0,
+            50.0,
+            135.0,
+            120.0,
+            100.0,
+            &fi,
+            0.20,
+            6.0,
+            0.62,
         );
         let (result, y3_trace) = jr.simulate_with_fast_inhib_trace(&input_40hz);
         let bp = result.band_powers.normalized();
         let y3_ac = y3_trace.iter().cloned().fold(f64::MIN, f64::max)
             - y3_trace.iter().cloned().fold(f64::MAX, f64::min);
 
-        if g == 0.0 { near_bif_g0_bg = bp.beta + bp.gamma; }
-        if g == 20.0 { near_bif_gmax_bg = bp.beta + bp.gamma; }
+        if g == 0.0 {
+            near_bif_g0_bg = bp.beta + bp.gamma;
+        }
+        if g == 20.0 {
+            near_bif_gmax_bg = bp.beta + bp.gamma;
+        }
 
         println!(
             "    {:<5.0}   {:.3}   {:.3}   {:.3}   {:.3}   {:.3}   {:>5.1}    {:.4}   {:.4}",
-            g, bp.delta, bp.theta, bp.alpha, bp.beta, bp.gamma,
-            result.dominant_freq, rms(&result.eeg), y3_ac
+            g,
+            bp.delta,
+            bp.theta,
+            bp.alpha,
+            bp.beta,
+            bp.gamma,
+            result.dominant_freq,
+            rms(&result.eeg),
+            y3_ac
         );
     }
 
     println!();
 
     // Final assessment
-    let any_effect = gamma_increased || dom_freq_shifted || jr95_differs
+    let any_effect = gamma_increased
+        || dom_freq_shifted
+        || jr95_differs
         || (near_bif_gmax_bg - near_bif_g0_bg).abs() > 0.01;
 
     println!("  ── Summary ──");
-    println!("    B-reduction shifts dominant freq:    {}", if dom_freq_shifted { "YES" } else { "NO" });
-    println!("    B-reduction increases beta+gamma:    {}", if gamma_increased { "YES" } else { "NO" });
-    println!("    G=10 differs from G=0 at low B:     {}", if jr95_differs { "YES" } else { "NO" });
-    println!("    G effect near bifurcation:           beta+gamma change = {:+.3}", near_bif_gmax_bg - near_bif_g0_bg);
+    println!(
+        "    B-reduction shifts dominant freq:    {}",
+        if dom_freq_shifted { "YES" } else { "NO" }
+    );
+    println!(
+        "    B-reduction increases beta+gamma:    {}",
+        if gamma_increased { "YES" } else { "NO" }
+    );
+    println!(
+        "    G=10 differs from G=0 at low B:     {}",
+        if jr95_differs { "YES" } else { "NO" }
+    );
+    println!(
+        "    G effect near bifurcation:           beta+gamma change = {:+.3}",
+        near_bif_gmax_bg - near_bif_g0_bg
+    );
 
     println!();
     println!(
@@ -1490,8 +1750,12 @@ pub fn test_wendling_adhd_sensitivity() {
     let input = white_noise(duration, 777);
     let bands = make_bands_from_signal(&input, &equal_energy, 500);
 
-    println!("    Brain Type   Delta   Theta   Alpha   Beta    Gamma   Dom Hz   g_rate  G     Asym");
-    println!("    ─────────────────────────────────────────────────────────────────────────────────────");
+    println!(
+        "    Brain Type   Delta   Theta   Alpha   Beta    Gamma   Dom Hz   g_rate  G     Asym"
+    );
+    println!(
+        "    ─────────────────────────────────────────────────────────────────────────────────────"
+    );
 
     let brain_types = [
         BrainType::Normal,
@@ -1509,14 +1773,23 @@ pub fn test_wendling_adhd_sensitivity() {
         let fi = fast_inhib_for(bt);
 
         let result = simulate_bilateral(
-            &bands, &bands,
-            &equal_energy, &equal_energy,
+            &bands,
+            &bands,
+            &equal_energy,
+            &equal_energy,
             &bilateral,
             neural.jansen_rit.c,
             neural.jansen_rit.input_scale,
             SAMPLE_RATE,
             &fi,
-            neural.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            neural.jansen_rit.v0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
         );
 
         let bp = result.combined.band_powers.normalized();
@@ -1536,7 +1809,7 @@ pub fn test_wendling_adhd_sensitivity() {
     // Verify brain types are actually differentiated
     let mut any_pair_differs = false;
     for i in 0..spectral_profiles.len() {
-        for j in (i+1)..spectral_profiles.len() {
+        for j in (i + 1)..spectral_profiles.len() {
             let (bt_i, di, ti, ai, bi_v, gi) = spectral_profiles[i];
             let (bt_j, dj, tj, aj, bj, gj) = spectral_profiles[j];
             let max_diff = [
@@ -1545,7 +1818,10 @@ pub fn test_wendling_adhd_sensitivity() {
                 (ai - aj).abs(),
                 (bi_v - bj).abs(),
                 (gi - gj).abs(),
-            ].iter().cloned().fold(0.0_f64, f64::max);
+            ]
+            .iter()
+            .cloned()
+            .fold(0.0_f64, f64::max);
             if max_diff > 0.01 {
                 any_pair_differs = true;
             }
@@ -1553,8 +1829,12 @@ pub fn test_wendling_adhd_sensitivity() {
     }
 
     // Check ADHD-specific expectations
-    let adhd = spectral_profiles.iter().find(|(bt, ..)| *bt == BrainType::Adhd);
-    let normal = spectral_profiles.iter().find(|(bt, ..)| *bt == BrainType::Normal);
+    let adhd = spectral_profiles
+        .iter()
+        .find(|(bt, ..)| *bt == BrainType::Adhd);
+    let normal = spectral_profiles
+        .iter()
+        .find(|(bt, ..)| *bt == BrainType::Normal);
 
     if let (Some(adhd_p), Some(normal_p)) = (adhd, normal) {
         let adhd_theta_beta = adhd_p.2 / (adhd_p.4 + 1e-10);
@@ -1604,12 +1884,25 @@ pub fn test_wendling_numerical_stress() {
 
     for &gain in &gains {
         // Scale input: higher gain = louder noise = higher p values
-        let input: Vec<f64> = noise_input.iter().map(|&x| (x * gain).clamp(0.0, 1.0)).collect();
+        let input: Vec<f64> = noise_input
+            .iter()
+            .map(|&x| (x * gain).clamp(0.0, 1.0))
+            .collect();
 
         let fi_off = FastInhibParams::default();
         let mut jr = JansenRitModel::with_wendling_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi_off,
-            0.20, 6.0, 0.62,
+            SAMPLE_RATE,
+            3.25,
+            22.0,
+            100.0,
+            50.0,
+            135.0,
+            220.0,
+            100.0,
+            &fi_off,
+            0.20,
+            6.0,
+            0.62,
         );
         let result = jr.simulate(&input);
         let bp = result.band_powers.normalized();
@@ -1622,12 +1915,25 @@ pub fn test_wendling_numerical_stress() {
             jr95_delta_collapse_gain = Some(gain);
         }
 
-        jr95_results.push((gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta));
+        jr95_results.push((
+            gain,
+            result.dominant_freq,
+            bp.delta,
+            bp.theta,
+            bp.alpha,
+            bp.beta,
+        ));
 
         println!(
             "    {:<6.1}   {:>5.1}    {:.3}    {:.3}    {:.3}    {:.3}    {:.4}    {}",
-            gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta,
-            eeg_rms, if stable { "OK" } else { "UNSTABLE" }
+            gain,
+            result.dominant_freq,
+            bp.delta,
+            bp.theta,
+            bp.alpha,
+            bp.beta,
+            eeg_rms,
+            if stable { "OK" } else { "UNSTABLE" }
         );
     }
 
@@ -1641,7 +1947,10 @@ pub fn test_wendling_numerical_stress() {
     let mut all_stable = true;
 
     for &gain in &gains {
-        let input: Vec<f64> = noise_input.iter().map(|&x| (x * gain).clamp(0.0, 1.0)).collect();
+        let input: Vec<f64> = noise_input
+            .iter()
+            .map(|&x| (x * gain).clamp(0.0, 1.0))
+            .collect();
 
         let fi = FastInhibParams {
             g_fast_gain: 10.0,
@@ -1651,8 +1960,18 @@ pub fn test_wendling_numerical_stress() {
             c7: 108.0,
         };
         let mut jr = JansenRitModel::with_wendling_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
-            0.20, 6.0, 0.62,
+            SAMPLE_RATE,
+            3.25,
+            22.0,
+            100.0,
+            50.0,
+            135.0,
+            220.0,
+            100.0,
+            &fi,
+            0.20,
+            6.0,
+            0.62,
         );
         let result = jr.simulate(&input);
         let bp = result.band_powers.normalized();
@@ -1660,18 +1979,33 @@ pub fn test_wendling_numerical_stress() {
         let max_eeg = result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
         let stable = !result.eeg.iter().any(|x| x.is_nan() || x.is_infinite()) && max_eeg < 1e6;
 
-        if !stable { all_stable = false; }
+        if !stable {
+            all_stable = false;
+        }
 
         if result.dominant_freq < 4.0 && w02_delta_collapse_gain.is_none() && gain > 0.3 {
             w02_delta_collapse_gain = Some(gain);
         }
 
-        w02_results.push((gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta));
+        w02_results.push((
+            gain,
+            result.dominant_freq,
+            bp.delta,
+            bp.theta,
+            bp.alpha,
+            bp.beta,
+        ));
 
         println!(
             "    {:<6.1}   {:>5.1}    {:.3}    {:.3}    {:.3}    {:.3}    {:.4}    {}",
-            gain, result.dominant_freq, bp.delta, bp.theta, bp.alpha, bp.beta,
-            eeg_rms, if stable { "OK" } else { "UNSTABLE" }
+            gain,
+            result.dominant_freq,
+            bp.delta,
+            bp.theta,
+            bp.alpha,
+            bp.beta,
+            eeg_rms,
+            if stable { "OK" } else { "UNSTABLE" }
         );
     }
 
@@ -1682,25 +2016,46 @@ pub fn test_wendling_numerical_stress() {
     let w02_above_4hz = w02_results.iter().filter(|(_, df, ..)| *df >= 4.0).count();
 
     // Spectral complexity: average number of bands with >5% power
-    let jr95_complexity: f64 = jr95_results.iter().map(|(_, _, d, t, a, b)| {
-        [*d, *t, *a, *b].iter().filter(|&&x| x > 0.05).count() as f64
-    }).sum::<f64>() / jr95_results.len() as f64;
-    let w02_complexity: f64 = w02_results.iter().map(|(_, _, d, t, a, b)| {
-        [*d, *t, *a, *b].iter().filter(|&&x| x > 0.05).count() as f64
-    }).sum::<f64>() / w02_results.len() as f64;
+    let jr95_complexity: f64 = jr95_results
+        .iter()
+        .map(|(_, _, d, t, a, b)| [*d, *t, *a, *b].iter().filter(|&&x| x > 0.05).count() as f64)
+        .sum::<f64>()
+        / jr95_results.len() as f64;
+    let w02_complexity: f64 = w02_results
+        .iter()
+        .map(|(_, _, d, t, a, b)| [*d, *t, *a, *b].iter().filter(|&&x| x > 0.05).count() as f64)
+        .sum::<f64>()
+        / w02_results.len() as f64;
 
     println!("  Comparison:");
-    println!("    JR95 (G=0):     gains with dom freq >= 4 Hz: {}/{}", jr95_above_4hz, gains.len());
-    println!("    Wendling (G=10): gains with dom freq >= 4 Hz: {}/{}", w02_above_4hz, gains.len());
-    println!("    JR95 avg spectral bands active (>5%):     {:.1}", jr95_complexity);
-    println!("    Wendling avg spectral bands active (>5%): {:.1}", w02_complexity);
+    println!(
+        "    JR95 (G=0):     gains with dom freq >= 4 Hz: {}/{}",
+        jr95_above_4hz,
+        gains.len()
+    );
+    println!(
+        "    Wendling (G=10): gains with dom freq >= 4 Hz: {}/{}",
+        w02_above_4hz,
+        gains.len()
+    );
+    println!(
+        "    JR95 avg spectral bands active (>5%):     {:.1}",
+        jr95_complexity
+    );
+    println!(
+        "    Wendling avg spectral bands active (>5%): {:.1}",
+        w02_complexity
+    );
 
     match (jr95_delta_collapse_gain, w02_delta_collapse_gain) {
         (Some(jr_g), Some(w_g)) => {
             println!("    JR95 delta collapse at gain: {:.1}", jr_g);
             println!("    Wendling delta collapse at gain: {:.1}", w_g);
             if w_g > jr_g {
-                println!("    Wendling is more resilient (collapses {:.1} gain later)", w_g - jr_g);
+                println!(
+                    "    Wendling is more resilient (collapses {:.1} gain later)",
+                    w_g - jr_g
+                );
             }
         }
         (Some(jr_g), None) => {
@@ -1720,9 +2075,9 @@ pub fn test_wendling_numerical_stress() {
     println!("    ──────────────────────────────────────────────");
 
     let extreme_configs = [
-        ("G=0 (JR95)",      0.0,  500.0, 40.5, 13.5, 108.0),
-        ("G=30 (high)",     30.0, 500.0, 40.5, 13.5, 108.0),
-        ("g_rate=1000",     10.0, 1000.0, 40.5, 13.5, 108.0),
+        ("G=0 (JR95)", 0.0, 500.0, 40.5, 13.5, 108.0),
+        ("G=30 (high)", 30.0, 500.0, 40.5, 13.5, 108.0),
+        ("g_rate=1000", 10.0, 1000.0, 40.5, 13.5, 108.0),
         ("C7=200 (strong)", 10.0, 500.0, 40.5, 13.5, 200.0),
     ];
 
@@ -1737,8 +2092,18 @@ pub fn test_wendling_numerical_stress() {
             c7,
         };
         let mut jr = JansenRitModel::with_wendling_params(
-            SAMPLE_RATE, 3.25, 22.0, 100.0, 50.0, 135.0, 220.0, 100.0, &fi,
-            0.20, 6.0, 0.62,
+            SAMPLE_RATE,
+            3.25,
+            22.0,
+            100.0,
+            50.0,
+            135.0,
+            220.0,
+            100.0,
+            &fi,
+            0.20,
+            6.0,
+            0.62,
         );
         let result = jr.simulate(&input_mid);
 
@@ -1746,11 +2111,15 @@ pub fn test_wendling_numerical_stress() {
         let max_eeg = result.eeg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
         let stable = !result.eeg.iter().any(|x| x.is_nan() || x.is_infinite()) && max_eeg < 1e6;
 
-        if !stable { all_stable = false; }
+        if !stable {
+            all_stable = false;
+        }
 
         println!(
             "    {:<19} {:<10.4} {:>5.1}    {}",
-            label, eeg_rms, result.dominant_freq,
+            label,
+            eeg_rms,
+            result.dominant_freq,
             if stable { "OK" } else { "UNSTABLE" }
         );
     }
@@ -1760,7 +2129,13 @@ pub fn test_wendling_numerical_stress() {
     let resilience_improved = w02_above_4hz >= jr95_above_4hz && w02_complexity >= jr95_complexity;
     println!(
         "  Result: {} — {}",
-        if all_stable && resilience_improved { "PASS" } else if all_stable { "PARTIAL" } else { "FAIL" },
+        if all_stable && resilience_improved {
+            "PASS"
+        } else if all_stable {
+            "PARTIAL"
+        } else {
+            "FAIL"
+        },
         if !all_stable {
             "numerical instability detected"
         } else if resilience_improved {

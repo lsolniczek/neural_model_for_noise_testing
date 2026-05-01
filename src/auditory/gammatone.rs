@@ -6,7 +6,6 @@
 ///
 /// After filtering, half-wave rectification + low-pass smoothing models
 /// inner hair cell transduction, producing a firing-rate envelope per channel.
-
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -146,10 +145,20 @@ pub struct GammatoneFilterbank {
 
 impl GammatoneFilterbank {
     pub fn new(sample_rate: f64) -> Self {
-        Self::with_params(sample_rate, DEFAULT_NUM_CHANNELS, DEFAULT_LOW_FREQ, DEFAULT_HIGH_FREQ)
+        Self::with_params(
+            sample_rate,
+            DEFAULT_NUM_CHANNELS,
+            DEFAULT_LOW_FREQ,
+            DEFAULT_HIGH_FREQ,
+        )
     }
 
-    pub fn with_params(sample_rate: f64, num_channels: usize, low_freq: f64, high_freq: f64) -> Self {
+    pub fn with_params(
+        sample_rate: f64,
+        num_channels: usize,
+        low_freq: f64,
+        high_freq: f64,
+    ) -> Self {
         let low_erb = freq_to_erb_rate(low_freq);
         let high_erb = freq_to_erb_rate(high_freq);
 
@@ -237,7 +246,9 @@ impl GammatoneFilterbank {
         let num_samples = audio.len();
 
         // Assign each channel to a band based on center frequency
-        let band_membership: Vec<usize> = self.channels.iter()
+        let band_membership: Vec<usize> = self
+            .channels
+            .iter()
             .map(|ch| band_for_freq(ch.cf))
             .collect();
 
@@ -364,7 +375,12 @@ pub struct BandGroupOutput {
 }
 
 /// Band labels for display.
-pub const BAND_LABELS: [&str; 4] = ["Low (50-200)", "Low-mid (200-800)", "Mid-high (800-3k)", "High (3k-8k)"];
+pub const BAND_LABELS: [&str; 4] = [
+    "Low (50-200)",
+    "Low-mid (200-800)",
+    "Mid-high (800-3k)",
+    "High (3k-8k)",
+];
 
 #[cfg(test)]
 mod tests {
@@ -457,8 +473,16 @@ mod tests {
         let cfs = fb.center_frequencies();
 
         // First and last match the configured range
-        assert!((cfs[0] - DEFAULT_LOW_FREQ).abs() < 0.1, "First cf = {}", cfs[0]);
-        assert!((cfs[31] - DEFAULT_HIGH_FREQ).abs() < 0.5, "Last cf = {}", cfs[31]);
+        assert!(
+            (cfs[0] - DEFAULT_LOW_FREQ).abs() < 0.1,
+            "First cf = {}",
+            cfs[0]
+        );
+        assert!(
+            (cfs[31] - DEFAULT_HIGH_FREQ).abs() < 0.5,
+            "Last cf = {}",
+            cfs[31]
+        );
 
         // Monotonically increasing
         for w in cfs.windows(2) {
@@ -510,7 +534,10 @@ mod tests {
         let audio = silence(SR, 0.1);
         let ni = fb.process_to_neural_input(&audio);
         let max = ni.iter().cloned().fold(0.0_f64, f64::max);
-        assert!(max < 1e-15, "Neural input should be zero for silence, got {max}");
+        assert!(
+            max < 1e-15,
+            "Neural input should be zero for silence, got {max}"
+        );
     }
 
     #[test]

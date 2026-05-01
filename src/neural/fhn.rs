@@ -134,7 +134,11 @@ impl FhnModel {
         let isi_cv = Self::compute_isi_cv(&spike_times, self.sample_rate);
 
         let mean_voltage = voltage.iter().sum::<f64>() / n as f64;
-        let voltage_variance = voltage.iter().map(|v| (v - mean_voltage).powi(2)).sum::<f64>() / n as f64;
+        let voltage_variance = voltage
+            .iter()
+            .map(|v| (v - mean_voltage).powi(2))
+            .sum::<f64>()
+            / n as f64;
 
         FhnResult {
             voltage,
@@ -266,7 +270,10 @@ mod tests {
         let spikes: Vec<usize> = (0..10).map(|i| i * 100).collect();
         let cv = FhnModel::compute_isi_cv(&spikes, SR);
         assert!(!cv.is_nan());
-        assert!(cv.abs() < 1e-10, "CV should be 0 for regular spikes, got {cv}");
+        assert!(
+            cv.abs() < 1e-10,
+            "CV should be 0 for regular spikes, got {cv}"
+        );
     }
 
     #[test]
@@ -275,7 +282,10 @@ mod tests {
         let spikes = vec![0, 50, 200, 250, 400, 450, 600];
         let cv = FhnModel::compute_isi_cv(&spikes, SR);
         assert!(!cv.is_nan());
-        assert!(cv > 0.1, "CV should be positive for irregular spikes, got {cv}");
+        assert!(
+            cv > 0.1,
+            "CV should be positive for irregular spikes, got {cv}"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -485,9 +495,12 @@ mod tests {
         );
 
         // Manual computation of variance
-        let expected_var = result.voltage.iter()
+        let expected_var = result
+            .voltage
+            .iter()
             .map(|v| (v - expected_mean).powi(2))
-            .sum::<f64>() / result.voltage.len() as f64;
+            .sum::<f64>()
+            / result.voltage.len() as f64;
         assert!(
             (result.voltage_variance - expected_var).abs() < 1e-12,
             "Voltage variance mismatch"
@@ -530,10 +543,8 @@ mod tests {
         }
 
         // Not all brain types should produce identical mean voltage
-        let unique: std::collections::HashSet<u64> = voltages
-            .iter()
-            .map(|(_, v)| v.to_bits())
-            .collect();
+        let unique: std::collections::HashSet<u64> =
+            voltages.iter().map(|(_, v)| v.to_bits()).collect();
         assert!(
             unique.len() > 1,
             "Brain types should differ in dynamics: {:?}",

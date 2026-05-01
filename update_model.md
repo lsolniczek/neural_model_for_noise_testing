@@ -27,6 +27,13 @@
 - [x] 276 total tests, 0 failures
 - [x] CLI flags: `--assr`, `--thalamic-gate` on evaluate command
 
+### Per-Object Spread Preset Support
+- [x] Added optional per-object `spread` to preset JSON/runtime (`src/preset.rs`) with backward-compatible serde default `0.0` and clamp to `[0.0, 1.0]`.
+- [x] Applied spread to the DSP engine via `engine.set_object_spread(...)` inside `Preset::apply_to_engine()`.
+- [x] Added regression coverage for legacy preset deserialization, bound clamping, and runtime engine propagation.
+- [x] Kept spread out of the optimizer genome and surrogate contract on purpose. The current genome remains 230 genes and the surrogate input remains 248 dims; spread is a manual/runtime preset control for now.
+- [x] Evaluated Shield-preserving `normal_set_shield_v4` variants with spread: direct-source spread on the two side leads degrades Shield strongly, while spread on the wet-isolated rear/canopy layers is neutral-to-slightly-positive. The checked-in `presets/normal_set_shield_v4.json` uses spread only on those background layers.
+
 ---
 
 ## Priority 1: Signal Normalization Fixes (HIGH IMPACT, LOW EFFORT)
@@ -445,11 +452,14 @@ Deep relaxation 0.9237 is the highest score this model has ever produced on any 
 
 Also propagate to bilateral `band_rates` where the `b` component of `(a_rate, b_rate)` tuples should reflect the same per-brain-type inhibitory profile for consistency with the scalar `b_rate`.
 
-- [ ] Change ADHD `b_rate` from 50.0 to 45.0 in `brain_type.rs` (scalar JansenRitParams)
-- [ ] Change Anxious `b_rate` from 50.0 to 55.0 in `brain_type.rs` (scalar JansenRitParams)
-- [ ] Propagate ADHD b_rate adjustment to bilateral `band_rates` tuples where appropriate
-- [ ] Propagate Anxious b_rate adjustment to bilateral `band_rates` tuples where appropriate
-- [ ] Run `cargo test` — all existing tests pass (the changes only affect ADHD and Anxious brain types)
+- [x] Change ADHD `b_rate` from 50.0 to 45.0 in `brain_type.rs` (scalar JansenRitParams)
+- [x] Change Anxious `b_rate` from 50.0 to 55.0 in `brain_type.rs` (scalar JansenRitParams)
+- [x] Propagate ADHD b_rate adjustment to JR-driven `band_rates` tuples in tonotopic and bilateral profiles
+- [x] Propagate Anxious b_rate adjustment to tonotopic and bilateral `band_rates` tuples
+- [x] Add parameter-contract regression tests:
+  - `adhd_b_rate_is_slower_than_normal_across_jr_profiles`
+  - `anxious_b_rate_is_faster_than_normal_across_jr_profiles`
+- [x] Run `cargo test` — all existing tests pass after the brain-type retune (`417 passed; 0 failed; 4 ignored`)
 - [ ] Evaluate: compare ADHD Ignition scores before/after (expect: slight reduction in gamma PLV, reflecting weaker 40 Hz ASSR — physiologically correct)
 - [ ] Evaluate: compare Anxious Shield/Focus scores before/after (expect: slight increase in beta stability — matching hyperactive inhibition)
 - [ ] Evaluate: confirm Normal/HighAlpha/Aging scores are bitwise identical (no change to these brain types)
@@ -1048,6 +1058,591 @@ The first problem hurts user trust; the second hurts engineering throughput beca
 - `cargo test --no-run`
 - `cargo test`
 
+## Priority 25: Acoustic Masking and Psychoacoustic Subscore Layer (HIGH IMPACT, MEDIUM-HIGH EFFORT)
+
+**Problem:** The current scoring stack is dominated by the neural-model output: EEG band powers, FHN response, asymmetry, PLV, and related modifiers. That is appropriate for "brain-state" goals, but it under-specifies goals whose product value also depends on the acoustic task in the ear. `shield` is the clearest example:
+
+- a preset can create a calmer NMM state while still leaving speech too intelligible to be useful in an office
+- a preset can also improve speech masking acoustically while slightly worsening the current EEG-based Shield score
+- the result is that preset search and manual tuning are forced to use one proxy (`scoring.rs`) for two different phenomena:
+  1. cortical state alignment
+  2. acoustic masking / comfort / privacy
+
+This is not just a Shield issue. A generalized acoustic layer is useful across goals:
+
+- `shield`, `isolation`: speech privacy / masking effectiveness
+- `focus`, `deep_work`: distraction suppression and non-fatiguing masking
+- `relaxation`, `sleep`, `meditation`: acoustic comfort, low sharpness, low fluctuation, low roughness
+- `flow`, `ignition`: avoid harsh or overly salient sound design while preserving neural drive
+
+**Solution:** Add a second scoring branch that evaluates the rendered sound as an acoustic stimulus, then combine it with the existing NMM score using goal-specific weights.
+
+Proposed top-level structure:
+
+```text
+FinalGoalScore =
+  w_nmm(goal)      * NMMScore
++ w_acoustic(goal) * AcousticGoalScore
+```
+
+where:
+
+```text
+AcousticGoalScore = weighted combination of:
+  - speech_privacy / intelligibility suppression
+  - modulation / envelope masking
+  - psychoacoustic comfort
+  - optional spatial coverage / diffuseness
+```
+
+The current NMM score remains intact. This priority adds a parallel acoustic evaluation layer rather than replacing the neural model.
+
+### 25a. Acoustic feature vector
+
+- [ ] Define a reusable `AcousticFeatureVector` in a new module (for example `src/acoustic_score.rs`) with at least:
+  - `speech_privacy`
+  - `envelope_masking`
+  - `loudness_comfort`
+  - `sharpness_penalty`
+  - `roughness_penalty`
+  - `fluctuation_penalty`
+  - `spatial_diffuseness` (optional first pass; can be deferred if expensive)
+- [ ] Keep the feature vector goal-agnostic. Goal-specific meaning should come from weights in `scoring.rs`, not from hard-coded logic inside the extractor.
+- [ ] Make the extractor operate on rendered stereo audio, so it can be reused by `evaluate`, `optimize`, `disturb`, and later subjective/offline analysis scripts.
+
+**Design rule:** this layer must remain additive and flag-gated at first, just like ASSR / CET / surrogate integration. Existing scores should remain reproducible when the acoustic branch is disabled.
+
+### 25b. Speech intelligibility / privacy term
+
+- [ ] Implement a first-pass intelligibility proxy using a small reference speech corpus:
+  - dry male + female speech
+  - short fixed utterances
+  - deterministic seed / asset set for reproducibility
+- [ ] Render `speech`, `preset`, and `speech + preset`.
+- [ ] Compute a band-weighted effective SNR or SII-like proxy over speech-relevant auditory bands.
+- [ ] Convert that into a monotonic privacy score, e.g. `speech_privacy = 1 - intelligibility_proxy`.
+- [ ] Calibrate the first version against office masking expectations, not against arbitrary absolute thresholds.
+
+**Why this first:** office-distraction literature consistently points to speech intelligibility, not raw sound level, as the main driver of cognitive disruption in open-plan environments.
+
+**References:**
+- ANSI/ASA S3.5 — *Methods for Calculation of the Speech Intelligibility Index (SII)*.
+- IEC 60268-16 — *Speech Transmission Index (STI)*.
+- Hongisto V (2005). "A model predicting the effect of speech of varying intelligibility on work performance." *Indoor Air* 15(6):458-468.
+- Haapakangas A, Hongisto V, Liebl A (2020). "The relation between the intelligibility of irrelevant speech and cognitive performance: A revised model based on laboratory studies." *Indoor Air* 30(6):1130-1146.
+- Venetjoki N, Kaarlela-Tuomaala A, Keskinen E, Hongisto V (2006). "The effect of speech and speech intelligibility on task performance." *Ergonomics* 49(11):1068-1091.
+
+### 25c. Envelope / modulation masking term
+
+- [ ] Add a second speech-specific term that measures how much the preset destroys speech-envelope fidelity rather than only its band-energy SNR.
+- [ ] Reuse the repo's auditory front end where practical:
+  - gammatone banding
+  - per-band envelope extraction
+  - modulation-band analysis focused on the speech-relevant slow envelope range
+- [ ] Weight low modulation rates most strongly (roughly syllabic / fluctuation range).
+- [ ] Define a bounded score such as `envelope_masking in [0, 1]`, where higher means stronger disruption of speech-envelope cues.
+
+**Why this matters:** two presets with similar spectra can differ substantially in how much intelligible envelope structure they leave intact. A purely spectral masker can miss that.
+
+**References:**
+- Chi T, Gao Y, Guyton MC, Ru P, Shamma S (1999). "Spectro-temporal modulation transfer functions and speech intelligibility." *J Acoust Soc Am* 106(5):2719-2732.
+- Elliott TM, Theunissen FE (2009). "The modulation transfer function for speech intelligibility." *PLoS Comput Biol* 5(3):e1000302.
+- Drullman R, Festen JM, Plomp R (1994). "Effect of temporal envelope smearing on speech reception." *J Acoust Soc Am* 95(5 Pt 1):2670-2680.
+- Kates JM, Arehart KH (2005). "Coherence and the speech intelligibility index." *J Acoust Soc Am* 117(4 Pt 1):2224-2237.
+
+### 25d. Psychoacoustic comfort term
+
+- [ ] Add a lightweight psychoacoustic comfort branch, initially independent of speech:
+  - loudness
+  - sharpness
+  - roughness
+  - fluctuation strength
+- [ ] Convert those into bounded penalties/rewards that can be weighted differently by goal.
+- [ ] Keep the first implementation simple and monotonic:
+  - sleep / meditation should penalize sharpness, roughness, and fluctuation more strongly
+  - shield / focus can tolerate somewhat higher loudness, but should still penalize harshness and aggressive temporal roughness
+- [ ] Consider a later composite "annoyance" score only after the individual dimensions are stable and tested.
+
+**Why this matters:** a preset that looks good neurally but sounds harsh, rough, or fatiguing is not shippable. This term is the bridge between NMM search and product sound quality.
+
+**References:**
+- Zwicker E, Fastl H (1999). *Psychoacoustics: Facts and Models.* 2nd ed. Springer.
+- Fastl H (1982). "Fluctuation strength and temporal masking patterns of amplitude-modulated broadband noise." *Hear Res* 8(1):59-69.
+- Fastl H (1990). "The hearing sensation roughness and neuronal responses to AM-tones." *Hear Res* 46(3):293-295.
+
+### 25e. Goal-specific fusion
+
+- [ ] Extend `scoring.rs` so acoustic features are fused with the existing NMM score using per-goal weights.
+- [ ] Start with explicit hand-tuned weights rather than trying to learn them automatically.
+- [ ] Proposed initial policy:
+  - `shield`, `isolation`: high acoustic weight
+  - `focus`, `deep_work`: moderate acoustic weight
+  - `sleep`, `meditation`, `deep_relaxation`: low speech-privacy weight but meaningful comfort weight
+  - `ignition`, `flow`: mostly neural, small comfort guardrail
+- [ ] Keep these weights visible and documented so they can be revised after listening tests or human-data calibration.
+
+Suggested first-pass weights (engineering prior, not yet empirically validated):
+
+```text
+Shield / Isolation:
+  Final = 0.60 * NMM + 0.40 * Acoustic
+
+Focus / DeepWork:
+  Final = 0.70 * NMM + 0.30 * Acoustic
+
+Sleep / Meditation / DeepRelaxation:
+  Final = 0.85 * NMM + 0.15 * Acoustic
+```
+
+### 25f. Implementation phases
+
+- [ ] **Phase 1: SII/STI-style proxy**
+  - implement the speech-privacy term only
+  - add deterministic fixtures and unit tests
+  - expose metrics in `evaluate`
+- [ ] **Phase 2: modulation masking**
+  - add envelope-fidelity degradation
+  - verify that presets with similar band spectra but different temporal structure separate correctly
+- [ ] **Phase 3: psychoacoustic comfort**
+  - add loudness / sharpness / roughness / fluctuation terms
+  - gate by goal weighting
+- [ ] **Phase 4: optimizer integration**
+  - include the acoustic branch in the optimization objective
+  - update surrogate/data contract if the final scalar score changes materially
+
+### 25g. Regression and acceptance criteria
+
+- [ ] Unit tests:
+  - louder speech masker in speech bands should reduce intelligibility proxy
+  - envelope-smearing maskers should outperform spectrally matched flat maskers on `envelope_masking`
+  - comfort penalties should increase for deliberately rough / sharp / highly fluctuating synthetic cases
+- [ ] Integration tests:
+  - `shield` presets optimized under the new score should separate better from sleep/relaxation presets on intelligibility suppression
+  - `sleep` presets should not be rewarded for high speech masking if they become sharp/rough
+- [ ] CLI output:
+  - `evaluate` should print acoustic sub-metrics alongside neural metrics when enabled
+- [ ] Backward compatibility:
+  - acoustic scoring branch disabled => bit-for-bit identical legacy scores
+
+**Expected outcome:** Shield stops being a pure EEG proxy and becomes a composite model of "protective brain state + useful acoustic masking". More broadly, the repo gains a reusable acoustic quality layer that improves preset selection across all goals, not just shielding.
+
+### 25h. Controlled rollout plan (regression-first)
+
+**Implementation rule:** do not ship the acoustic scoring branch as one large feature. Land it in small, testable layers with explicit flags, so every phase can be evaluated locally and disabled without changing legacy behavior.
+
+#### Phase 0 — Scaffolding only
+
+**Goal:** add the architecture without changing any score.
+
+- [x] Create a dedicated module (for example `src/acoustic_score.rs`).
+- [x] Define:
+  - `AcousticFeatureVector`
+  - `AcousticScoreConfig`
+  - `AcousticScoreResult`
+- [x] Add `acoustic_scoring_enabled: bool` to the simulation/evaluation config surface.
+- [x] Thread the config through `evaluate`, `optimize`, and `disturb`, but keep it default-off everywhere.
+- [x] No score fusion, no optimizer use, no CLI output change yet.
+
+**Acceptance / regression bar:**
+- [x] Config default is disabled.
+- [x] When disabled, all legacy scoring paths are bit-for-bit unchanged.
+- [x] `cargo test` remains green with zero score-delta regressions.
+
+**Status (2026-04-29):**
+- Landed `src/acoustic_score.rs` scaffolding plus a default-off `acoustic_scoring_enabled` flag on the simulation and disturb config surfaces.
+- Added regression guards:
+  - `tests::acoustic_scaffolding_defaults_are_disabled`
+  - `regression_tests::tests::acoustic_scaffolding_flag_does_not_change_scores`
+- Verification: `cargo test` -> `419 passed; 0 failed; 4 ignored`.
+
+#### Phase 1 — Render-path extraction only
+
+**Goal:** expose reusable rendered audio for acoustic analysis, still with no scoring effect.
+
+- [x] Add a helper that provides rendered stereo audio in a stable, reusable form for analysis.
+- [x] Keep this helper side-effect-free and separate from neural scoring.
+- [x] Do not yet compute final acoustic scores; only expose the data path.
+
+**Acceptance / regression bar:**
+- [x] Silence, short audio, and normal presets produce finite extracted buffers.
+- [x] No acoustic path execution when `acoustic_scoring_enabled=false`.
+- [x] Legacy evaluation score remains unchanged.
+
+**Status (2026-04-29):**
+- Added `RenderedStereoAudio` plus shared `render_preset_stereo_dry()` / `render_preset_ear_signals()` helpers.
+- Reused the shared dry render helper in both the canonical evaluation path and `disturb`, removing duplicate movement/HRTF rendering logic without changing downstream scoring.
+- Exposed the rendered stereo ear signal only on `DetailedSimulationResult.acoustic_render` and only when `acoustic_scoring_enabled=true`.
+- Added regression coverage:
+  - `pipeline::tests::render_preset_ear_signals_short_silence_is_finite`
+  - `pipeline::tests::render_preset_ear_signals_normal_preset_is_finite`
+  - `regression_tests::tests::acoustic_render_is_exposed_only_when_enabled`
+- Verification: `cargo test` -> `422 passed; 0 failed; 4 ignored`.
+
+#### Phase 2 — AcousticFeatureVector v1 (non-speech features only)
+
+**Goal:** compute safe, bounded acoustic features before adding any speech fixtures or score fusion.
+
+Suggested first features:
+- [x] broadband level / RMS proxy
+- [x] speech-band energy ratio
+- [x] modulation-depth or temporal-variance proxy
+- [x] simple brightness / sharpness proxy (cheap first-pass, not full Zwicker yet)
+
+Do **not** add these to the final score yet. First make sure the extractor behaves sensibly and can be tested independently.
+
+**Acceptance / regression bar:**
+- [x] Louder signal increases level feature.
+- [x] Brighter signal increases brightness / sharpness proxy.
+- [x] All features are finite, bounded, and deterministic for fixed input.
+- [x] Legacy score still unchanged when acoustic fusion is off.
+
+**Status (2026-04-30):**
+- Implemented `extract_features_v1()` and `extract_score_result_v1()` in `src/acoustic_score.rs`.
+- The canonical evaluation path now populates `SimulationResult.acoustic_score.features` only when `acoustic_scoring_enabled=true`.
+- The scalar NMM score remains unchanged; only the optional acoustic payload is added behind the flag.
+- Added unit coverage for monotonic feature behavior:
+  - louder signal -> higher broadband level
+  - brighter signal -> higher sharpness proxy
+  - mid-band tone -> higher speech-band ratio than off-band tone
+  - amplitude modulation -> higher modulation-depth proxy
+  - deterministic and bounded feature extraction
+- Regression coverage still proves:
+  - acoustic payload is absent when disabled
+  - legacy scalar summary is unchanged when enabled
+- Verification: `cargo test` -> `427 passed; 0 failed; 4 ignored`.
+
+#### Phase 3 — Speech privacy proxy v1
+
+**Goal:** implement the first useful masking metric, still in evaluate-only mode.
+
+- [x] Add fixed speech fixtures:
+  - dry, short utterances
+  - deterministic and version-controlled
+- [x] Render:
+  - speech alone
+  - preset alone
+  - speech + preset
+- [x] Compute a band-weighted effective SNR or SII-style intelligibility proxy.
+- [x] Convert to:
+  - `intelligibility_proxy`
+  - `speech_privacy = 1 - intelligibility_proxy`
+
+This is the first phase where the acoustic branch becomes product-useful, but it should still be inspectable before it becomes optimization-driving.
+
+**Acceptance / regression bar:**
+- [x] Stronger speech-band masker lowers intelligibility proxy.
+- [x] Off-band masker performs worse than speech-band-focused masker.
+- [x] Silent or weak masker gives poor privacy score.
+- [x] Results are deterministic for the same speech fixture and preset.
+
+**Status (2026-04-30):**
+- Added a deterministic synthetic speech fixture generator in `src/acoustic_score.rs` to avoid external asset churn while still giving the acoustic branch a fixed, version-controlled speech reference.
+- `extract_score_result_v1()` now computes:
+  - Phase 2 non-speech acoustic features
+  - `intelligibility_proxy`
+  - `speech_privacy = 1 - intelligibility_proxy`
+- The proxy is a first-pass band-weighted speech-preservation score over speech-relevant bands, using:
+  - generated speech alone
+  - preset masker alone
+  - mixed speech + preset
+- The canonical evaluation path still does **not** fuse any acoustic term into the scalar NMM score. Only the optional acoustic payload changes when `acoustic_scoring_enabled=true`.
+- Added unit coverage for:
+  - deterministic speech fixture generation
+  - stronger speech-band masker -> lower intelligibility
+  - off-band masker -> weaker privacy than speech-band masker
+  - silent masker -> poor privacy
+- Regression coverage still proves:
+  - scalar summary fields are unchanged when the acoustic flag is enabled
+  - acoustic payload is present and bounded only behind the flag
+- Verification: `cargo test` -> `431 passed; 0 failed; 4 ignored`.
+
+#### Phase 4 — `evaluate` display only
+
+**Goal:** expose acoustic metrics to users before using them for decision-making.
+
+- [x] Add evaluate-time acoustic output (for example under `--acoustic-score`).
+- [x] Print:
+  - speech privacy
+  - intelligibility proxy
+  - non-speech acoustic features from Phase 2
+- [x] Keep the legacy NMM score as the primary result and expose acoustic metrics as a separate inspectable block.
+
+This phase is for inspection and calibration, not yet for optimizer-driving behavior.
+
+**Acceptance / regression bar:**
+- [x] Acoustic metrics appear only when requested or enabled.
+- [x] Existing evaluate output remains unchanged by default.
+- [x] Users can compare NMM score vs acoustic subscore directly.
+
+**Status (2026-04-30):**
+- Added `--acoustic-score` to the `evaluate` CLI in `src/main.rs`.
+- Single goal / single brain-type `evaluate` now prints an `Acoustic Subscore` block with:
+  - broadband level
+  - speech-band ratio
+  - modulation depth
+  - sharpness proxy
+  - intelligibility proxy
+  - speech privacy
+- Matrix mode intentionally remains legacy-score-only and prints a note when `--acoustic-score` is requested, to avoid implying that acoustic metrics are already part of the scalar objective.
+- `build_eval_config()` now carries `acoustic_scoring_enabled` explicitly, so the display path is still gated by the same canonical `SimulationConfig` used by the evaluator.
+- Regression coverage confirms:
+  - default evaluate output remains unchanged
+  - enabling acoustic scoring still leaves the scalar NMM summary unchanged
+  - acoustic payload and render details appear only behind the explicit gate
+- Verification:
+  - `cargo test build_eval_config_carries_feature_flags -- --nocapture`
+  - `cargo test acoustic_render_is_exposed_only_when_enabled -- --nocapture`
+  - `cargo test acoustic_score::tests -- --nocapture`
+  - `cargo test` -> `431 passed; 0 failed; 4 ignored`
+
+#### Phase 5 — Goal-specific score fusion behind a second flag
+
+**Goal:** integrate acoustic scoring in a narrow, controllable way.
+
+- [x] Add `acoustic_score_fusion_enabled: bool`.
+- [x] Fuse only when explicitly enabled:
+
+```text
+Final = w_nmm * NMM + w_acoustic * Acoustic
+```
+
+- [x] Start with `shield` and `isolation` only.
+- [x] Leave all other goals on the legacy score initially.
+
+**Why narrow first:** Shield is the clearest case where the current NMM score is missing an acoustic task dimension. Rolling fusion out to every goal immediately would make debugging much harder.
+
+**Acceptance / regression bar:**
+- [x] Fusion disabled => exact legacy score.
+- [x] Fusion enabled => Shield/Isolation scores move in expected direction on known masking examples.
+- [x] Non-Shield goals are unchanged in the first fusion pass.
+
+**Status (2026-04-30):**
+- Added `SimulationConfig.acoustic_score_fusion_enabled` and kept it default-off.
+- Added `Goal::supports_acoustic_fusion()` plus a first bounded fusion path in `src/scoring.rs`.
+- The first-pass acoustic branch uses currently available Phase 2/3 metrics only:
+  - `speech_privacy`
+  - `speech_band_ratio`
+  - a lightweight comfort proxy derived from `sharpness_proxy` and `modulation_depth`
+- Fusion is intentionally limited to:
+  - `shield`: `0.82 * NMM + 0.18 * Acoustic`
+  - `isolation`: `0.78 * NMM + 0.22 * Acoustic`
+- All other goals keep the exact legacy NMM score even if fusion is requested.
+- Added an explicit pipeline-side guard: fusion requires acoustic scoring to be enabled, so direct callers fail immediately instead of silently falling back.
+- `evaluate` now exposes `--acoustic-score-fusion` as an evaluate-only switch. It implies acoustic analysis, leaves optimize/surrogate behavior unchanged, and prints the fused-vs-legacy breakdown on supported single-goal evaluations.
+- Matrix mode supports the fused scalar score when requested, but remains scalar-only in presentation and prints a note that only `shield` / `isolation` cells are affected.
+- Added regression coverage for:
+  - supported-goal fusion changing only the scalar score
+  - unsupported-goal fusion staying bit-identical to legacy
+  - config propagation for the new flag
+  - invalid direct config (`fusion=true`, `acoustic_scoring=false`) panicking immediately
+- Targeted verification:
+  - `cargo test acoustic_fusion -- --nocapture`
+  - `cargo test build_eval_config_carries_feature_flags -- --nocapture`
+  - `cargo test acoustic_fusion_requires_acoustic_scoring -- --nocapture`
+  - `cargo test` -> `436 passed; 0 failed; 4 ignored`
+
+#### Phase 6 — Optimizer integration
+
+**Goal:** allow acoustic-aware optimization only after evaluate behavior is trusted.
+
+- [x] Permit `optimize` to use fused scores only when explicitly enabled.
+- [x] Keep default optimizer behavior legacy-safe.
+- [x] Do not update surrogate assumptions until the fused scalar score contract is stable.
+
+**Acceptance / regression bar:**
+- [x] Optimizer runs with fusion on/off.
+- [x] Export path still re-evaluates with the real pipeline.
+- [x] Surrogate remains disabled, stale-marked, or explicitly retrained if the scalar score contract changes.
+
+**Status (2026-04-30):**
+- Added `--acoustic-score-fusion` to `optimize`.
+- Added `build_optimize_config()` so the optimizer config path has one canonical place to derive:
+  - `acoustic_scoring_enabled`
+  - `acoustic_score_fusion_enabled`
+- Added `validate_optimize_acoustic_mode()` and made the optimize CLI fail fast for unsupported or unsafe combinations:
+  - unsupported goals are rejected up front (`shield` / `isolation` only for now)
+  - `--acoustic-score-fusion` + `--surrogate` is rejected until the surrogate score contract is updated
+  - `--acoustic-score-fusion` + `--log-evaluations` is rejected until the CSV/data contract can distinguish fused-score runs from legacy-score runs
+- Default optimize behavior is unchanged when `--acoustic-score-fusion` is omitted.
+- Supported fused optimize runs now:
+  - evaluate all candidates with the real fused scalar objective
+  - preserve the existing "final preset is re-evaluated with the real pipeline before export" rule
+  - print the acoustic breakdown in the final optimize summary so the fused objective is inspectable
+- Added regression coverage for:
+  - optimize config propagation
+  - safe/unsafe mode validation
+  - fused export re-evaluation
+- Verification:
+  - `cargo test validate_optimize_acoustic_mode -- --nocapture`
+  - `cargo test build_optimize_config_enables_fusion_implies_acoustic_scoring -- --nocapture`
+  - `cargo test export_best_genome_uses_re_evaluated_fused_score -- --nocapture`
+  - `cargo run -- optimize --help`
+  - `cargo run -- optimize --goal shield --population 4 --generations 1 --duration 3 --acoustic-score-fusion --output /tmp/phase6_optimize_shield.json`
+  - `cargo test` -> `442 passed; 0 failed; 4 ignored`
+
+#### Phase 7 — Envelope masking
+
+**Goal:** add the second speech-aware refinement after the privacy proxy is stable.
+
+- [ ] Implement envelope degradation / modulation masking using the repo's auditory front end.
+- [ ] Confirm that two maskers with similar spectrum but different temporal structure separate correctly.
+
+**Acceptance / regression bar:**
+- [ ] Envelope-smearing or modulation-dense maskers outperform spectrally matched flat maskers on the envelope metric.
+- [ ] Metric remains bounded and deterministic.
+
+#### Phase 8 — Psychoacoustic comfort
+
+**Goal:** add a reusable acoustic quality layer for all goals.
+
+- [ ] Add loudness / sharpness / roughness / fluctuation terms.
+- [ ] Start with monotonic penalties rather than a complex composite annoyance model.
+- [ ] Weight these differently per goal after they are stable independently.
+
+**Acceptance / regression bar:**
+- [ ] Deliberately harsh / rough / pulsed synthetic cases score worse on comfort.
+- [ ] Sleep / meditation goals can use comfort penalties without inheriting Shield-specific speech privacy logic.
+
+### 25i. Governance rules for maintainability
+
+To keep this priority under control:
+
+- [ ] Use **one flag per behavior boundary**:
+  - `acoustic_scoring_enabled`
+  - `acoustic_score_fusion_enabled`
+- [ ] Do **not** let the optimizer use the acoustic branch before `evaluate` is trusted.
+- [ ] Do **not** retrain or modify the surrogate until the final fused scalar score is stable.
+- [ ] Prefer **monotonic tests** ("masker A lowers intelligibility more than masker B") over brittle absolute snapshot-score tests.
+- [ ] Every phase must support exact legacy fallback.
+
+**Expected outcome:** Priority 25 becomes a controlled engineering program rather than a monolithic scoring rewrite. Each phase can be validated, rolled back, and tuned independently, which is the only sane way to add an acoustic branch without destabilizing the current NMM stack.
+
+## Priority 26: Brain-Type-Dependent Noise Tolerance / Overstimulation Penalty (MEDIUM IMPACT, LOW-MEDIUM EFFORT)
+
+**Problem:** The current scoring stack differentiates brain types through model parameters (for example `input_offset`, inhibitory constants, bilateral coupling), but it does not yet encode a strong behavioral finding from the noise-attention literature: the same broadband noise that can slightly improve ADHD performance can degrade performance in neurotypical listeners. Right now a Normal-brain evaluation can still reward "more masking / more stimulation" whenever the EEG target moves in the right direction, even if the preset has crossed into an over-stimulating regime that the human literature associates with worse task performance.
+
+This gap matters most for:
+
+- `focus`, `deep_work`, `shield`, `isolation` on `normal`
+- comparisons between `normal` and `adhd`
+- future acoustic-scoring work where louder / more speech-band-heavy presets may look useful acoustically but should not receive unlimited reward on neurotypical brains
+
+**Solution:** Add a mild, brain-type-dependent "noise tolerance" or "arousal mismatch" term to scoring. The term should not act like a blanket volume penalty. It should only activate when a preset pushes a brain type beyond its likely beneficial stimulation range.
+
+Conceptually:
+
+```text
+AdjustedScore =
+  BaseScore
+- overstimulation_penalty(brain_type, acoustic_drive, neural_drive)
+```
+
+Where the penalty is:
+
+- near-zero for `adhd` across a broader stimulation range
+- earlier / steeper for `normal`
+- potentially different again for `anxious` and `high_alpha`
+
+The penalty should be informed by both:
+
+1. **acoustic drive**:
+   - broadband level
+   - speech-band masking density
+   - modulation salience
+2. **neural drive**:
+   - excess beta / gamma relative to goal
+   - elevated FHN firing beyond target regime
+   - possibly future acoustic-subscore outputs from Priority 25
+
+This is explicitly **not** a claim that "noise is bad for neurotypicals" in general. The literature shows small average harms in the comparison groups used in ADHD noise studies, not a universal prohibition. The correct interpretation for the roadmap is narrower: the model should stop treating additional broadband stimulation as uniformly acceptable on Normal brain once the preset has already reached a good state.
+
+- [ ] Add a bounded `overstimulation_penalty` term in `scoring.rs`, initially gated to `normal` and `adhd`
+- [ ] Make the first version conservative: penalty should be small and only activate at clearly high stimulation regimes
+- [ ] Define the trigger from existing metrics first (for example excessive beta/gamma + high FHN firing + high acoustic drive), rather than inventing a new latent variable immediately
+- [ ] Verify that ADHD presets are less penalized than Normal for the same drive level
+- [ ] Verify that a clearly overdriven Normal-brain preset loses score while moderate Shield / Focus presets remain unaffected
+- [ ] Re-evaluate whether `anxious` should share part of the Normal penalty or have its own curve
+
+**Expected outcome:** brain-type comparisons become more behaviorally plausible, especially for attention / masking goals, and future acoustic-score work gains a principled way to avoid rewarding "just add more noise" on neurotypical brains.
+
+**References:**
+- [ ] **Ref:** (2024). "Systematic Review and Meta-Analysis: Do White Noise and Pink Noise Help With Attention in ADHD?" *J Am Acad Child Adolesc Psychiatry* 63(8):859-870. — Meta-analysis (k=13, N=335) reporting small but reliable benefit in ADHD (g=0.249) and small but reliable harm in non-ADHD comparison groups (g=−0.212), with minimal heterogeneity. Strongest direct evidence that noise tolerance should differ by brain type. [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC11283987/)
+- [ ] **Ref:** Söderlund G, Sikström S, Smart A (2007). "Listen to the noise: noise is beneficial for cognitive performance in ADHD." *J Child Psychol Psychiatry* 48(8):840-847. — Foundational Moderate Brain Arousal framing for ADHD benefit from external noise; useful as historical context even though later work weakens the strict stochastic-resonance interpretation.
+- [ ] **Ref:** Rijmen M, Senoussi M, Wiersema JR (2026). "Pink Noise and a Pure Tone Both Reduce 1/f Neural Noise in Adults With Elevated ADHD Traits." *J Attention Disorders.* — Suggests the benefit may reflect a broader arousal / neural-noise regulation effect rather than a pink-noise-specific mechanism. Use as interpretive support, not as the primary scoring basis.
+
+## Priority 27: ASSR Phase-Consistency Refinement at 40 Hz (LOW-MEDIUM IMPACT, MEDIUM EFFORT)
+
+**Problem:** The current ASSR implementation is fundamentally amplitude-oriented: it computes a frequency-dependent modifier and applies it to the AC component of the signal. That captures "how much drive gets through" but it does not capture an important refinement from newer ASSR literature: the 40 Hz peak is not just stronger, it is more temporally consistent. In other words, the 40 Hz ASSR appears to reflect reduced response-latency variability / increased phase consistency, not merely larger response gain.
+
+This matters most for:
+
+- `ignition` and any future gamma-forward goals
+- PLV-based interpretation of 40 Hz entrainment
+- brain-type differences that should express as weaker or noisier gamma locking rather than only lower amplitude
+
+**Solution:** Extend the ASSR branch so that it can modulate not only amplitude transmission but also the expected phase-consistency / temporal-jitter properties of the downstream cortical response.
+
+The first implementation does not need a full spiking-network redesign. A practical v1 could:
+
+- keep the current scalar AC gain path
+- add a 40 Hz-centered **phase-consistency modifier**
+- feed that modifier into PLV-related terms, or into controlled temporal jitter / coherence penalties upstream of PLV computation
+
+Conceptually:
+
+```text
+ASSR response = amplitude_gain(f) + temporal_consistency(f)
+```
+
+where `temporal_consistency(f)` peaks around 40 Hz more sharply than the current amplitude-only approximation.
+
+Possible implementation directions:
+
+1. **PLV weighting route (lower risk):**
+   - augment the PLV bonus near 40 Hz based on an ASSR-derived consistency prior
+   - minimal disruption to the signal path
+2. **Temporal-jitter route (higher fidelity):**
+   - make effective response jitter frequency-dependent before PLV is measured
+   - more mechanistic, but higher regression risk
+
+- [ ] Add an explicit roadmap note in the ASSR code path that 40 Hz resonance is partly a temporal-consistency phenomenon, not only an amplitude phenomenon
+- [ ] Prototype a bounded `assr_phase_consistency_modifier(f)` peaking at 40 Hz
+- [ ] Evaluate whether it should enter:
+  - PLV scoring only, or
+  - both signal path and PLV scoring
+- [ ] Run focused regressions on `ignition` and gamma-heavy presets to confirm the refinement improves discrimination without destabilizing non-gamma goals
+- [ ] Keep the feature flag-gated initially; legacy ASSR behavior must remain reproducible when disabled
+
+**Expected outcome:** 40 Hz-driven presets are judged more by stable locking and less by raw amplitude alone, which better matches the empirical ASSR literature and should improve gamma-goal plausibility.
+
+**References:**
+- [ ] **Ref:** (2024). "Network resonance and the auditory steady state response." *Scientific Reports.* — Shows that the large 40 Hz ASSR peak is linked to decreased latency variability / enhanced temporal consistency rather than a simple gain-only explanation. This is the direct motivation for adding a phase-consistency branch to the ASSR approximation.
+- [ ] **Ref:** (2024). "40 Hz Steady-State Response in Human Auditory Cortex Is Shaped by Gabaergic Neuronal Inhibition." *J Neurosci* 44(24):e2029232024. — Connects inhibitory kinetics to the strength and quality of 40 Hz locking; supports treating gamma ASSR as a timing/coherence phenomenon, not only an amplitude phenomenon.
+- [ ] **Ref:** Ross B, Borgmann C, Draganova R, Roberts LE, Pantev C (2000). "A high-precision magnetoencephalographic study of human auditory steady-state responses to amplitude-modulated tones." *J Acoust Soc Am* 108(2):679-691. — Classic empirical basis for the exceptional robustness of 40 Hz ASSRs in humans.
+
+## Explicitly Deferred: Aperiodic (1/f) Slope as a Scoring Metric
+
+**Status:** reviewed, scientifically interesting, but intentionally **not** promoted to an implementation priority yet.
+
+**Why it was considered:** several recent ADHD / noise papers argue that background noise changes the aperiodic component of EEG spectra and that this may reflect altered neural-noise or E/I balance. In principle, an aperiodic-slope term could become a new `PerformanceVector` feature and improve ADHD-specific scoring.
+
+**Why it is deferred:** the measurement and interpretation remain too unstable for the current roadmap:
+
+- decomposition methods such as FOOOF / specparam have known confounds when periodic peaks and aperiodic structure overlap
+- the literature is not yet consistent on whether ADHD reliably shows flatter slopes, steeper slopes, or mixed age/task-dependent patterns
+- the biological interpretation ("aperiodic slope = E/I balance") is still model-driven and not settled enough to use as a product-facing score component
+
+That means this metric is suitable for exploratory diagnostics, but not yet for a production scoring term that would steer optimization.
+
+- [ ] Do **not** add `aperiodic_slope` to `PerformanceVector` as a scored metric until the methodological debate settles
+- [ ] If revisited later, start with offline analysis / reporting only, not optimizer-driving fitness
+- [ ] Reconsider only after stronger clinical ADHD replication and clearer guidance on decomposition robustness
+
+**References:**
+- [ ] **Ref:** Rijmen M, Senoussi M, Wiersema JR (2026). "Pink Noise and a Pure Tone Both Reduce 1/f Neural Noise in Adults With Elevated ADHD Traits." *J Attention Disorders.* — Interesting motivating finding, but based on elevated traits in neurotypical adults rather than a clinical ADHD sample.
+- [ ] **Ref:** Donoghue T, Voytek B (2021). "Characterizing pink and white noise in the human electroencephalogram." *J Neurophysiol* 125(4):1545-1554. — Useful background on spectral parameterization, but not a license to treat slope as a settled biomarker.
+- [ ] **Ref:** (2024). "Systematic Review and Meta-Analysis: Do White Noise and Pink Noise Help With Attention in ADHD?" *J Am Acad Child Adolesc Psychiatry* 63(8):859-870. — Supports brain-type-dependent noise effects, but does **not** establish aperiodic slope as the correct operational metric for scoring.
+
 ## Obsolete / Superseded
 
 ### ~~Envelope Extraction (Priority 1b — original)~~
@@ -1114,6 +1709,17 @@ The first problem hurts user trust; the second hurts engineering throughput beca
 ### Auditory Perception & Loudness
 - Glasberg BR, Moore BCJ (2002). "A model of loudness applicable to time-varying sounds." *J Audio Eng Soc* 50(5):331-342.
 - Zwicker E, Fastl H (1999). *Psychoacoustics: Facts and Models.* 2nd ed. Springer.
+
+### Speech Intelligibility & Acoustic Masking
+- Hongisto V (2005). "A model predicting the effect of speech of varying intelligibility on work performance." *Indoor Air* 15(6):458-468.
+- Venetjoki N, Kaarlela-Tuomaala A, Keskinen E, Hongisto V (2006). "The effect of speech and speech intelligibility on task performance." *Ergonomics* 49(11):1068-1091.
+- Haapakangas A, Hongisto V, Liebl A (2020). "The relation between the intelligibility of irrelevant speech and cognitive performance: A revised model based on laboratory studies." *Indoor Air* 30(6):1130-1146.
+- Chi T, Gao Y, Guyton MC, Ru P, Shamma S (1999). "Spectro-temporal modulation transfer functions and speech intelligibility." *J Acoust Soc Am* 106(5):2719-2732.
+- Elliott TM, Theunissen FE (2009). "The modulation transfer function for speech intelligibility." *PLoS Comput Biol* 5(3):e1000302.
+- Drullman R, Festen JM, Plomp R (1994). "Effect of temporal envelope smearing on speech reception." *J Acoust Soc Am* 95(5 Pt 1):2670-2680.
+- Kates JM, Arehart KH (2005). "Coherence and the speech intelligibility index." *J Acoust Soc Am* 117(4 Pt 1):2224-2237.
+- ANSI/ASA S3.5. *Methods for Calculation of the Speech Intelligibility Index (SII).* 
+- IEC 60268-16. *Sound system equipment — Part 16: Objective rating of speech intelligibility by speech transmission index.*
 
 ### Bilateral Coupling
 - Innocenti GM (1986). "General organization of callosal connections in the cerebral cortex." In: Jones EG, Peters A (eds) *Cerebral Cortex,* vol 5. Plenum Press.

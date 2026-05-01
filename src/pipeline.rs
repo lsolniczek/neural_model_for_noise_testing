@@ -1,12 +1,17 @@
+use crate::acoustic_score::{extract_score_result_v1, AcousticScoreResult, RenderedStereoAudio};
 /// Simulation pipeline: Engine → Auditory → Neural → Score.
 ///
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
-
-use crate::auditory::{GammatoneFilterbank, AssrTransfer, ThalamicGate, PhysiologicalThalamicGate, ButterworthCrossover, EnvironmentParams, generate_rir, apply_rir};
+use crate::auditory::{
+    apply_rir, generate_rir, AssrTransfer, ButterworthCrossover, EnvironmentParams,
+    GammatoneFilterbank, PhysiologicalThalamicGate, ThalamicGate,
+};
 use crate::brain_type::BrainType;
 use crate::movement::MovementController;
-use crate::neural::{BilateralResult, FhnModel, FhnResult, FastInhibParams, PerformanceVector, simulate_bilateral};
+use crate::neural::{
+    simulate_bilateral, BilateralResult, FastInhibParams, FhnModel, FhnResult, PerformanceVector,
+};
 use crate::preset::Preset;
 use crate::scoring::Goal;
 use noise_generator_core::NoiseEngine;
@@ -123,6 +128,17 @@ pub struct SimulationConfig {
     /// regression-safe; the heuristic gate path is unchanged when this
     /// flag is off.
     pub physiological_thalamic_gate_enabled: bool,
+    /// Enable Phase 0 acoustic-scoring scaffolding.
+    ///
+    /// This flag is intentionally inert in Phase 0 so the evaluation path
+    /// stays bit-identical while later phases wire in acoustic analysis.
+    pub acoustic_scoring_enabled: bool,
+    /// Enable Phase 5 acoustic/NMM score fusion.
+    ///
+    /// Requires `acoustic_scoring_enabled=true`. In the first rollout pass
+    /// this only affects Shield and Isolation scoring. All other goals keep
+    /// the exact legacy NMM score path even when this flag is set.
+    pub acoustic_score_fusion_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -137,6 +153,8 @@ impl Default for SimulationConfig {
             stochastic_jr_enabled: true,
             cet_enabled: true,
             physiological_thalamic_gate_enabled: false,
+            acoustic_scoring_enabled: false,
+            acoustic_score_fusion_enabled: false,
         }
     }
 }
@@ -163,6 +181,8 @@ pub struct SimulationResult {
     pub alpha_asymmetry: f64,
     /// Performance vector: entrainment, E/I stability, spectral centroid.
     pub performance: PerformanceVector,
+    /// Optional acoustic-scoring payload reserved for later rollout phases.
+    pub acoustic_score: Option<AcousticScoreResult>,
 }
 
 pub struct DetailedSimulationResult {
@@ -172,6 +192,8 @@ pub struct DetailedSimulationResult {
     pub fhn: FhnResult,
     /// Full bilateral cortical result used by single-preset diagnostics.
     pub bilateral: BilateralResult,
+    /// Optional rendered stereo ear signal reserved for acoustic analysis.
+    pub acoustic_render: Option<RenderedStereoAudio>,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -228,41 +250,28 @@ pub(crate) fn spectral_brightness(audio: &[f32], sample_rate: f64) -> f64 {
 /// Evaluate a preset against a goal.
 ///
 /// This is the core function the optimizer calls for each candidate.
-pub fn evaluate_preset(preset: &Preset, goal: &Goal, config: &SimulationConfig) -> SimulationResult {
-    evaluate_preset_detailed(preset, goal, config).summary
-}
-
-/// Canonical detailed evaluation path used by the human-facing `evaluate`
-/// command. Returns the same scalar summary as `evaluate_preset()` plus the
-/// full neural results needed for diagnosis, without re-running a second
-/// shadow pipeline from `main.rs`.
-pub fn evaluate_preset_detailed(
+pub fn evaluate_preset(
     preset: &Preset,
     goal: &Goal,
     config: &SimulationConfig,
-) -> DetailedSimulationResult {
-    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
-        .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
+) -> SimulationResult {
+    evaluate_preset_detailed(preset, goal, config).summary
+}
 
-    let num_frames = (SAMPLE_RATE as f32 * config.duration_secs) as u32;
-    let sr = SAMPLE_RATE as f64;
+pub(crate) fn render_preset_stereo_dry(preset: &Preset, duration_secs: f32) -> RenderedStereoAudio {
+    if !duration_secs.is_finite() || duration_secs <= 0.0 {
+        panic!("invalid render duration: {duration_secs:.3}s");
+    }
 
-    // 1. Create engine and apply preset
+    let num_frames = (SAMPLE_RATE as f32 * duration_secs) as u32;
     let engine = NoiseEngine::new(SAMPLE_RATE, 0.8);
     preset.apply_to_engine(&engine);
 
-    // 2. Set up movement controller
     let mut movement = MovementController::from_preset(preset);
-
-    // 3. Render audio with movement updates.
-    //    When objects move, we render in small chunks (~50ms) and update
-    //    positions between chunks so the HRTF pipeline reflects motion.
-    //    For static presets we render in one shot for efficiency.
     let warmup_frames = (SAMPLE_RATE as f32 * 1.0) as u32;
-    let chunk_frames = (SAMPLE_RATE as f32 * 0.05) as u32; // 50ms chunks
+    let chunk_frames = (SAMPLE_RATE as f32 * 0.05) as u32;
 
     if movement.has_movement() {
-        // Warmup with movement ticking
         let warmup_chunks = warmup_frames / chunk_frames;
         let dt = chunk_frames as f64 / SAMPLE_RATE as f64;
         for _ in 0..warmup_chunks {
@@ -288,25 +297,51 @@ pub fn evaluate_preset_detailed(
         engine.render_audio(num_frames)
     };
 
-    // 3. Deinterleave to L/R
-    let (left_dry, right_dry) = deinterleave(&audio);
+    let (left, right) = deinterleave(&audio);
+    RenderedStereoAudio::new(SAMPLE_RATE, left, right)
+}
 
-    // 3b. Apply room impulse response (Priority 19).
-    //     Reverberation physically modifies the waveform at the ear before
-    //     it reaches the cochlea. The gammatone filterbank must see the
-    //     reverberant signal, not the dry signal.
-    //     Per Devore et al. (2009): auditory nerve encodes reverberant signal.
-    //     Per Fujihira & Shiraishi (2015): ASSR reduced under reverberation.
-    //     Environment 0 (AnechoicChamber) = passthrough (no computation).
+pub(crate) fn render_preset_ear_signals(
+    preset: &Preset,
+    duration_secs: f32,
+) -> RenderedStereoAudio {
+    let rendered = render_preset_stereo_dry(preset, duration_secs);
     let env_params = EnvironmentParams::from_index(preset.environment);
-    let (left, right) = if env_params.is_anechoic() {
-        (left_dry, right_dry)
+    if env_params.is_anechoic() {
+        rendered
     } else {
-        let rir = generate_rir(&env_params, SAMPLE_RATE);
-        let left_wet = apply_rir(&left_dry, &rir, env_params.wet_mix);
-        let right_wet = apply_rir(&right_dry, &rir, env_params.wet_mix);
-        (left_wet, right_wet)
-    };
+        let rir = generate_rir(&env_params, rendered.sample_rate_hz);
+        let left = apply_rir(&rendered.left, &rir, env_params.wet_mix);
+        let right = apply_rir(&rendered.right, &rir, env_params.wet_mix);
+        RenderedStereoAudio::new(rendered.sample_rate_hz, left, right)
+    }
+}
+
+/// Canonical detailed evaluation path used by the human-facing `evaluate`
+/// command. Returns the same scalar summary as `evaluate_preset()` plus the
+/// full neural results needed for diagnosis, without re-running a second
+/// shadow pipeline from `main.rs`.
+pub fn evaluate_preset_detailed(
+    preset: &Preset,
+    goal: &Goal,
+    config: &SimulationConfig,
+) -> DetailedSimulationResult {
+    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
+        .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
+    if config.acoustic_score_fusion_enabled && !config.acoustic_scoring_enabled {
+        panic!("invalid SimulationConfig: acoustic score fusion requires acoustic scoring");
+    }
+
+    let rendered_audio = render_preset_ear_signals(preset, config.duration_secs);
+    let sr = rendered_audio.sample_rate_hz as f64;
+    let mut acoustic_score = config
+        .acoustic_scoring_enabled
+        .then(|| extract_score_result_v1(&rendered_audio));
+    let acoustic_render = config
+        .acoustic_scoring_enabled
+        .then(|| rendered_audio.clone());
+    let left = rendered_audio.left;
+    let right = rendered_audio.right;
 
     // 4. Cochlear model: tonotopic band-grouped processing
     //    Groups 32 gammatone channels into 4 frequency bands, preserving
@@ -343,8 +378,16 @@ pub fn evaluate_preset_detailed(
         .map(|b| bands_r.signals[b].iter().cloned().fold(0.0_f64, f64::max))
         .fold(0.0_f64, f64::max);
 
-    let norm_l = if global_max_l > 1e-10 { 1.0 / global_max_l } else { 1.0 };
-    let norm_r = if global_max_r > 1e-10 { 1.0 / global_max_r } else { 1.0 };
+    let norm_l = if global_max_l > 1e-10 {
+        1.0 / global_max_l
+    } else {
+        1.0
+    };
+    let norm_r = if global_max_r > 1e-10 {
+        1.0 / global_max_r
+    } else {
+        1.0
+    };
 
     for b in 0..4 {
         left_bands[b] = bands_l.signals[b].iter().map(|x| x * norm_l).collect();
@@ -435,7 +478,9 @@ pub fn evaluate_preset_detailed(
             for bands in [&mut left_bands_dec, &mut right_bands_dec] {
                 for band in bands.iter_mut() {
                     let n = band.len();
-                    if n == 0 { continue; }
+                    if n == 0 {
+                        continue;
+                    }
                     let mean = band.iter().sum::<f64>() / n as f64;
                     for sample in band.iter_mut() {
                         let ac = *sample - mean;
@@ -469,7 +514,9 @@ pub fn evaluate_preset_detailed(
             let mut env = vec![0.0_f64; n_env];
             for b in 0..4 {
                 let w = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
-                if w < 1e-10 { continue; }
+                if w < 1e-10 {
+                    continue;
+                }
                 for i in 0..n_env {
                     env[i] += w * 0.5 * (slow_l[b][i] + slow_r[b][i]);
                 }
@@ -563,9 +610,21 @@ pub fn evaluate_preset_detailed(
         NEURAL_SR,
         &fast_inhib,
         neural_params.jansen_rit.v0,
-        if config.habituation_enabled { 0.0003 } else { 0.0 },
-        if config.habituation_enabled { 0.0001 } else { 0.0 },
-        if config.stochastic_jr_enabled { 15.0 } else { 0.0 },
+        if config.habituation_enabled {
+            0.0003
+        } else {
+            0.0
+        },
+        if config.habituation_enabled {
+            0.0001
+        } else {
+            0.0
+        },
+        if config.stochastic_jr_enabled {
+            15.0
+        } else {
+            0.0
+        },
         b_slow_gain,
         b_slow_rate,
         c_slow,
@@ -595,7 +654,11 @@ pub fn evaluate_preset_detailed(
         let p95_idx = (abs_values.len() as f64 * 0.95) as usize;
         let p95 = abs_values[p95_idx.min(abs_values.len() - 1)];
         let scale = if p95 > 1e-10 { 1.0 / p95 } else { 1.0 };
-        jr_result.eeg.iter().map(|x| (x * scale).clamp(-3.0, 3.0)).collect()
+        jr_result
+            .eeg
+            .iter()
+            .map(|x| (x * scale).clamp(-3.0, 3.0))
+            .collect()
     };
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
@@ -606,7 +669,9 @@ pub fn evaluate_preset_detailed(
     //    Recognizes both NeuralLfo (kind=4) and Isochronic (kind=5) as
     //    entrainment modulators. Isochronic tones produce stronger cortical
     //    FFR due to sharp transients (Chaieb et al. 2015).
-    let target_lfo_freq = preset.objects.iter()
+    let target_lfo_freq = preset
+        .objects
+        .iter()
         .filter(|obj| obj.active)
         .flat_map(|obj| {
             let vol = obj.volume as f64;
@@ -635,13 +700,30 @@ pub fn evaluate_preset_detailed(
     );
 
     // 9. Score: neural model + asymmetry penalty + carrier PLV bonus + envelope PLV bonus.
-    let score = goal.evaluate_full(
+    let neural_score = goal.evaluate_full(
         &fhn_result,
         jr_result,
         bi_result.alpha_asymmetry,
         performance.plv,
         performance.envelope_plv,
     );
+    let score = if config.acoustic_score_fusion_enabled {
+        if let Some(acoustic) = acoustic_score.as_mut() {
+            if let Some(fused) = goal.evaluate_with_acoustic_fusion(neural_score, acoustic) {
+                acoustic.acoustic_goal_score = Some(fused.acoustic_goal_score);
+                acoustic.comfort_score = Some(fused.comfort_score);
+                acoustic.legacy_nmm_score = Some(neural_score);
+                acoustic.fused_score_preview = Some(fused.fused_score);
+                fused.fused_score
+            } else {
+                neural_score
+            }
+        } else {
+            neural_score
+        }
+    } else {
+        neural_score
+    };
     let norm_bands = jr_result.band_powers.normalized();
 
     let summary = SimulationResult {
@@ -660,12 +742,14 @@ pub fn evaluate_preset_detailed(
         right_dominant_freq: bi_result.right_dominant_freq,
         alpha_asymmetry: bi_result.alpha_asymmetry,
         performance,
+        acoustic_score,
     };
 
     DetailedSimulationResult {
         summary,
         fhn: fhn_result,
         bilateral: bi_result,
+        acoustic_render,
     }
 }
 
@@ -694,7 +778,10 @@ mod tests {
         let dec = decimate(&signal, 48);
         assert_eq!(dec.len(), 10);
         for &v in &dec {
-            assert!((v - 3.0).abs() < 1e-12, "Constant signal should decimate to same value");
+            assert!(
+                (v - 3.0).abs() < 1e-12,
+                "Constant signal should decimate to same value"
+            );
         }
     }
 
@@ -774,6 +861,48 @@ mod tests {
         assert_eq!(right.len(), 100);
     }
 
+    fn simple_active_preset() -> crate::preset::Preset {
+        let mut preset = crate::preset::Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 1;
+        preset.objects[0].volume = 0.8;
+        preset.objects[0].x = 1.5;
+        preset.objects[0].z = 1.0;
+        preset
+    }
+
+    #[test]
+    fn render_preset_ear_signals_short_silence_is_finite() {
+        let rendered = render_preset_ear_signals(&crate::preset::Preset::default(), 0.25);
+        assert_eq!(rendered.sample_rate_hz, SAMPLE_RATE);
+        assert_eq!(rendered.frame_count(), (SAMPLE_RATE as f32 * 0.25) as usize);
+        assert!(rendered.is_finite());
+    }
+
+    #[test]
+    fn render_preset_ear_signals_normal_preset_is_finite() {
+        let rendered = render_preset_ear_signals(&simple_active_preset(), 0.5);
+        assert_eq!(rendered.sample_rate_hz, SAMPLE_RATE);
+        assert_eq!(rendered.frame_count(), (SAMPLE_RATE as f32 * 0.5) as usize);
+        assert!(rendered.is_finite());
+    }
+
+    #[test]
+    #[should_panic(expected = "acoustic score fusion requires acoustic scoring")]
+    fn acoustic_fusion_requires_acoustic_scoring() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            acoustic_scoring_enabled: false,
+            acoustic_score_fusion_enabled: true,
+            ..SimulationConfig::default()
+        };
+
+        let _ = evaluate_preset_detailed(&preset, &goal, &config);
+    }
+
     // ---------------------------------------------------------------
     // spectral_brightness
     // ---------------------------------------------------------------
@@ -787,7 +916,10 @@ mod tests {
             .map(|i| (2.0 * PI * 100.0 * i as f64 / sr).sin() as f32)
             .collect();
         let b = spectral_brightness(&audio, sr);
-        assert!(b < 0.15, "100 Hz sine should be dark, got brightness={b:.3}");
+        assert!(
+            b < 0.15,
+            "100 Hz sine should be dark, got brightness={b:.3}"
+        );
     }
 
     #[test]
@@ -799,7 +931,10 @@ mod tests {
             .map(|i| (2.0 * PI * 8000.0 * i as f64 / sr).sin() as f32)
             .collect();
         let b = spectral_brightness(&audio, sr);
-        assert!(b > 0.80, "8 kHz sine should be bright, got brightness={b:.3}");
+        assert!(
+            b > 0.80,
+            "8 kHz sine should be bright, got brightness={b:.3}"
+        );
     }
 
     #[test]
@@ -935,7 +1070,11 @@ mod tests {
         let global_max_l = (0..4)
             .map(|b| bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max))
             .fold(0.0_f64, f64::max);
-        let norm_l = if global_max_l > 1e-10 { 1.0 / global_max_l } else { 1.0 };
+        let norm_l = if global_max_l > 1e-10 {
+            1.0 / global_max_l
+        } else {
+            1.0
+        };
         let band0_norm: Vec<f64> = bands_l.signals[0].iter().map(|x| x * norm_l).collect();
 
         // Decimate + 2s warmup discard (matches evaluate_preset's trim closure)
@@ -965,10 +1104,26 @@ mod tests {
             z: 1.5,
             volume: 0.9,
             reverb_send: 0.05,
-            bass_mod: ModConfig { kind: 4, param_a: 5.0, param_b: 0.9, param_c: 0.0 },
-            satellite_mod: ModConfig { kind: 4, param_a: 5.0, param_b: 0.9, param_c: 0.0 },
+            spread: 0.0,
+            bass_mod: ModConfig {
+                kind: 4,
+                param_a: 5.0,
+                param_b: 0.9,
+                param_c: 0.0,
+            },
+            satellite_mod: ModConfig {
+                kind: 4,
+                param_a: 5.0,
+                param_b: 0.9,
+                param_c: 0.0,
+            },
             movement: Default::default(),
-            tint_freq: 0.0, tint_db: 0.0, source_kind: 0, tone_freq: 200.0, tone_amplitude: 0.0 };
+            tint_freq: 0.0,
+            tint_db: 0.0,
+            source_kind: 0,
+            tone_freq: 200.0,
+            tone_amplitude: 0.0,
+        };
         p
     }
 
@@ -977,7 +1132,11 @@ mod tests {
         let mean = signal.iter().sum::<f64>() / n;
         let total_power = signal.iter().map(|x| x * x).sum::<f64>() / n;
         let ac_power = signal.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
-        let ac_fraction = if total_power > 1e-30 { ac_power / total_power } else { 0.0 };
+        let ac_fraction = if total_power > 1e-30 {
+            ac_power / total_power
+        } else {
+            0.0
+        };
         (mean, total_power, ac_power, ac_fraction)
     }
 
@@ -1007,6 +1166,9 @@ mod tests {
         // The test never fails on the verdict — its job is to MEASURE.
         // It only fails if the pipeline produces nonsense.
         assert!(ac_fraction.is_finite(), "AC fraction must be finite");
-        assert!(total_power.is_finite() && total_power >= 0.0, "total power finite & nonneg");
+        assert!(
+            total_power.is_finite() && total_power >= 0.0,
+            "total power finite & nonneg"
+        );
     }
 }

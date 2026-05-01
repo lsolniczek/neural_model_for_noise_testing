@@ -16,7 +16,6 @@
 ///
 /// Target frequency is approximately:
 ///   f ≈ (1/2π) · √(w_ei·w_ie·S'_e·S'_i / (τ_e·τ_i))
-
 use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Wilson-Cowan model result (compatible with JR pipeline).
@@ -82,10 +81,10 @@ impl WilsonCowanModel {
         //
         // Coupling weights — strong enough for sustained oscillation,
         // balanced for clean sinusoidal output:
-        let w_ee = 16.0;   // Recurrent excitation
-        let w_ei = 15.0;   // Inhibition → excitation (main oscillation driver)
-        let w_ie = 15.0;   // Excitation → inhibition
-        let w_ii = 3.0;    // Recurrent inhibition (stabiliser)
+        let w_ee = 16.0; // Recurrent excitation
+        let w_ei = 15.0; // Inhibition → excitation (main oscillation driver)
+        let w_ie = 15.0; // Excitation → inhibition
+        let w_ii = 3.0; // Recurrent inhibition (stabiliser)
 
         // Sigmoid — steep enough for robust oscillation
         let sigmoid_a = 1.3;
@@ -98,20 +97,23 @@ impl WilsonCowanModel {
         let tau_e = tau_sum * 0.45;
         let tau_i = tau_sum * 0.55;
 
-        WilsonCowanModel::new(sample_rate, WilsonCowanParams {
-            tau_e,
-            tau_i,
-            w_ee,
-            w_ie,
-            w_ei,
-            w_ii,
-            h_e: 1.5,    // Drive into oscillatory regime
-            h_i: 0.0,
-            sigmoid_a,
-            sigmoid_theta,
-            input_scale,
-            input_offset: 1.0,
-        })
+        WilsonCowanModel::new(
+            sample_rate,
+            WilsonCowanParams {
+                tau_e,
+                tau_i,
+                w_ee,
+                w_ie,
+                w_ei,
+                w_ii,
+                h_e: 1.5, // Drive into oscillatory regime
+                h_i: 0.0,
+                sigmoid_a,
+                sigmoid_theta,
+                input_scale,
+                input_offset: 1.0,
+            },
+        )
     }
 
     /// Sigmoid activation function.
@@ -130,7 +132,7 @@ impl WilsonCowanModel {
         let mut inhib_trace = vec![0.0_f64; n];
 
         // State variables
-        let mut e = 0.1_f64;  // Excitatory firing rate
+        let mut e = 0.1_f64; // Excitatory firing rate
         let mut i = 0.05_f64; // Inhibitory firing rate
 
         let p = &self.params;
@@ -342,10 +344,7 @@ mod tests {
     fn sigmoid_at_threshold_equals_half() {
         let wc = WilsonCowanModel::for_frequency(SR, 25.0, 0.5);
         let s = wc.sigmoid(wc.params.sigmoid_theta);
-        assert!(
-            (s - 0.5).abs() < 1e-10,
-            "S(theta) should be 0.5, got {s}"
-        );
+        assert!((s - 0.5).abs() < 1e-10, "S(theta) should be 0.5, got {s}");
     }
 
     #[test]
@@ -354,7 +353,10 @@ mod tests {
         let s_low = wc.sigmoid(-100.0);
         let s_high = wc.sigmoid(100.0);
         assert!(s_low < 1e-6, "S(-100) should be ~0, got {s_low}");
-        assert!((s_high - 1.0).abs() < 1e-6, "S(100) should be ~1, got {s_high}");
+        assert!(
+            (s_high - 1.0).abs() < 1e-6,
+            "S(100) should be ~1, got {s_high}"
+        );
     }
 
     #[test]
@@ -451,9 +453,8 @@ mod tests {
         let result = wc.simulate(&input);
 
         let mean = result.eeg.iter().sum::<f64>() / result.eeg.len() as f64;
-        let var = result.eeg.iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / result.eeg.len() as f64;
+        let var =
+            result.eeg.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / result.eeg.len() as f64;
         assert!(
             var > 1e-6,
             "WC model should oscillate, EEG variance = {var}"
@@ -535,20 +536,23 @@ mod tests {
     fn drive_only_enters_e_equation() {
         // Verify structurally: with zero coupling (w_ie=0), changing the drive
         // should not affect I dynamics at all.
-        let wc = WilsonCowanModel::new(SR, WilsonCowanParams {
-            tau_e: 0.005,
-            tau_i: 0.005,
-            w_ee: 0.0,
-            w_ei: 0.0,
-            w_ie: 0.0, // E does not drive I
-            w_ii: 0.0,
-            h_e: 0.0,
-            h_i: 0.0,
-            sigmoid_a: 1.3,
-            sigmoid_theta: 4.0,
-            input_scale: 1.0,
-            input_offset: 0.0,
-        });
+        let wc = WilsonCowanModel::new(
+            SR,
+            WilsonCowanParams {
+                tau_e: 0.005,
+                tau_i: 0.005,
+                w_ee: 0.0,
+                w_ei: 0.0,
+                w_ie: 0.0, // E does not drive I
+                w_ii: 0.0,
+                h_e: 0.0,
+                h_i: 0.0,
+                sigmoid_a: 1.3,
+                sigmoid_theta: 4.0,
+                input_scale: 1.0,
+                input_offset: 0.0,
+            },
+        );
 
         let input_low = vec![0.0; 2000];
         let input_high = vec![1.0; 2000];

@@ -67,6 +67,7 @@ cargo run --release -- optimize [OPTIONS]
 | `--init-preset` | path | none | Seed population from an existing preset JSON |
 | `--cet` | flag | `true` | Enable Cortical Envelope Tracking (Priority 13). On by default in the optimize pipeline |
 | `--phys-gate` | flag | `false` | Enable physiological thalamic gate (Priority 9) |
+| `--acoustic-score-fusion` | flag | `false` | Enable the fused scalar objective for `shield` and `isolation` only. This implies acoustic analysis, keeps default optimize behavior unchanged when omitted, and is currently incompatible with `--surrogate` and `--log-evaluations` until those score/data contracts are updated |
 | `--surrogate` | flag | `false` | Enable surrogate-assisted pre-screening (Priority 14). Uses a trained MLP to rank DE trials before selective real-pipeline validation. Only validated real scores can replace population members. ~10x speedup |
 | `--surrogate-weights` | path | `surrogate_weights.bin` | Path to the trained surrogate weights file. The loader validates the input dimension against the compiled surrogate contract and rejects stale weight files with a retrain error |
 | `--surrogate-k` | int | `5` | Number of top-ranked surrogate candidates to validate per generation with the real pipeline (plus 1 deterministic exploration candidate) |
@@ -95,6 +96,10 @@ cargo run --release -- optimize --goal isolation --output presets/my_isolation_v
 # Optimize sleep with physiological gate + CET (best for relaxation goals)
 cargo run --release -- optimize --goal sleep --phys-gate --cet --generations 200 --population 50 --duration 12
 
+# Acoustic-aware optimization (currently Shield/Isolation only)
+cargo run --release -- optimize --goal shield --acoustic-score-fusion \
+  --generations 100 --population 30 --duration 3
+
 # Same but with surrogate pre-screening (~10x faster, requires trained weights)
 cargo run --release -- optimize --goal sleep --phys-gate --cet --surrogate \
   --surrogate-weights surrogate_weights.bin --surrogate-k 5 \
@@ -111,6 +116,25 @@ Surrogate mode semantics are strict:
 - the final reported/exported preset is re-evaluated with the real pipeline
 
 This export guarantee is regression-tested: the optimizer export path rebuilds the preset from the final genome, re-runs `evaluate_preset()`, and writes that real score into the JSON metadata.
+
+`--acoustic-score-fusion` is the first optimizer-facing Phase 6 rollout. The current contract is deliberately narrow:
+
+- supported goals: `shield`, `isolation`
+- unsupported goals: rejected up front rather than silently falling back
+- incompatible with `--surrogate`
+- incompatible with `--log-evaluations`
+
+Current fused objective:
+
+```text
+shield    = 0.82 * NMM + 0.18 * Acoustic
+isolation = 0.78 * NMM + 0.22 * Acoustic
+```
+
+The acoustic term currently uses the Phase 2/3 metrics only:
+- `speech_privacy`
+- `speech_band_ratio`
+- a lightweight comfort proxy from `sharpness_proxy` and `modulation_depth`
 
 #### Output
 
@@ -168,6 +192,8 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 | `--cet` | flag | `true` | Enable Cortical Envelope Tracking (Priority 13). Splits each band into a slow (≤10 Hz) path that bypasses ASSR and a fast (>10 Hz) path that gets ASSR, engages the slow GABA_B inhibitory population in JR, and adds envelope-phase PLV to scoring. On by default for `evaluate`; use `--no-cet` to disable. Refs: Doelling et al. 2014, Ding & Simon 2014, Moran & Friston 2011 |
 | `--no-cet` | flag | `false` | Disable CET while keeping the rest of the canonical evaluation path unchanged |
 | `--phys-gate` | flag | `false` | Enable the physiological thalamic gate (Priority 9). This replaces the fixed heuristic profile with a Hodgkin-Huxley TC cell where K⁺ leak conductance is the arousal knob. Ion-channel dynamics (T-type Ca²⁺, Bazhenov 2002 / Destexhe 1996) produce a sigmoidal burst↔tonic mode switch rather than a fixed ramp. Dramatically improves sleep/relaxation scores (+0.12 to +0.28); takes precedence over `--thalamic-gate` when both set. Off by default for `evaluate` |
+| `--acoustic-score` | flag | `false` | Print the Phase 2/3 acoustic analysis block during single goal / single brain `evaluate`. This exposes non-speech acoustic features plus intelligibility/privacy metrics, but does **not** change the scalar NMM score or matrix output |
+| `--acoustic-score-fusion` | flag | `false` | Enable the Phase 5 fused scalar score for `shield` and `isolation` during `evaluate` only. This implies acoustic analysis, leaves `optimize` and surrogate behavior unchanged, and keeps all other goals on the exact legacy NMM score path |
 
 #### Examples
 
@@ -200,6 +226,12 @@ cargo run --release -- evaluate presets/my_preset.json --goal sleep --cet
 # replaces the fixed heuristic profile. Sleep/relaxation presets gain +0.12 to +0.28.
 cargo run --release -- evaluate presets/my_preset.json --goal sleep --phys-gate
 
+# Show acoustic analysis metrics without changing the scalar NMM score
+cargo run --release -- evaluate presets/my_preset.json --goal shield --acoustic-score
+
+# Enable the first fused acoustic+NMM scalar score for Shield/Isolation only
+cargo run --release -- evaluate presets/my_preset.json --goal shield --acoustic-score-fusion
+
 # Longer evaluation for more stable results
 cargo run --release -- evaluate presets/my_preset.json --goal meditation --duration 20
 ```
@@ -207,6 +239,22 @@ cargo run --release -- evaluate presets/my_preset.json --goal meditation --durat
 Neural-analysis commands require `--duration > 2.0`, because the first 2.0 seconds are discarded as warm-up before scoring.
 
 `evaluate`, matrix mode, `optimize`, and `generate-data` all share the same simulation and scoring core in `src/pipeline.rs`. The CLI layer only resolves flags, selects goals/brain types, and formats output.
+
+`--acoustic-score` is currently inspect-only. It is available for single-goal, single-brain `evaluate` so users can compare the legacy NMM score against the acoustic submetrics directly. Matrix mode still reports only the scalar legacy score.
+
+`--acoustic-score-fusion` is evaluate-only in the current rollout. It activates a fused scalar score for `shield` and `isolation` only:
+
+```text
+shield    = 0.82 * NMM + 0.18 * Acoustic
+isolation = 0.78 * NMM + 0.22 * Acoustic
+```
+
+The acoustic branch currently uses:
+- `speech_privacy`
+- `speech_band_ratio`
+- a lightweight comfort proxy derived from `sharpness_proxy` and `modulation_depth`
+
+All other goals remain on the exact legacy NMM score path even when the flag is set.
 
 #### Output
 
@@ -627,6 +675,7 @@ Presets are JSON files with this structure:
       "z": 1.5,
       "volume": 0.75,
       "reverb_send": 0.2,
+      "spread": 0.35,
       "bass_mod": {
         "kind": 4,
         "param_a": 10.0,
@@ -665,6 +714,8 @@ Presets are JSON files with this structure:
 **Spatial modes** (`spatial_mode`): 0=Stereo, 1=Immersive
 
 **Environments** (`environment`): 0=AnechoicChamber, 1=FocusRoom, 2=OpenLounge, 3=VastSpace, 4=DeepSanctuary
+
+**Per-object spread** (`spread`): optional width control in `[0.0, 1.0]`. `0.0` = point source, `1.0` = maximum spread supported by the DSP object renderer. Legacy preset JSON without this field defaults to `0.0`. Spread is applied only at runtime/JSON load; it is intentionally not part of the optimizer genome or surrogate input contract yet.
 
 **Modulator kinds** (`bass_mod.kind`, `satellite_mod.kind`): 0=Flat, 1=SineLfo, 2=Breathing, 3=Stochastic, 4=NeuralLfo, 5=Isochronic, 6=RandomPulse
 

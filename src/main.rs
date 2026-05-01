@@ -1,3 +1,5 @@
+mod acoustic_score;
+mod analyze_preset;
 mod auditory;
 mod brain_type;
 mod disturb;
@@ -7,10 +9,9 @@ mod neural;
 mod optimizer;
 mod pipeline;
 mod preset;
+mod regression_tests;
 mod scoring;
 mod surrogate;
-mod analyze_preset;
-mod regression_tests;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -20,10 +21,7 @@ use std::time::Instant;
 use brain_type::BrainType;
 use optimizer::DifferentialEvolution;
 use pipeline::{
-    evaluate_preset,
-    evaluate_preset_detailed,
-    validate_analysis_window,
-    DetailedSimulationResult,
+    evaluate_preset, evaluate_preset_detailed, validate_analysis_window, DetailedSimulationResult,
     SimulationConfig,
 };
 use preset::Preset;
@@ -102,6 +100,13 @@ enum Commands {
         #[arg(long = "phys-gate", default_value_t = false)]
         phys_gate: bool,
 
+        /// Enable the Phase 5 fused scalar score during optimization.
+        /// Currently supported only for `shield` and `isolation`.
+        /// Implies acoustic analysis and is incompatible with surrogate
+        /// scoring and CSV logging until those score contracts are updated.
+        #[arg(long = "acoustic-score-fusion", default_value_t = false)]
+        acoustic_score_fusion: bool,
+
         /// Enable surrogate-assisted pre-screening (Priority 14).
         /// Uses a trained MLP to rank candidates before selective real evaluation.
         /// Only validated real-pipeline scores are allowed to replace DE parents.
@@ -155,7 +160,11 @@ enum Commands {
         thalamic_gate: bool,
 
         /// Disable thalamic gate (arousal-dependent filtering)
-        #[arg(long = "no-thalamic-gate", conflicts_with = "thalamic_gate", default_value_t = false)]
+        #[arg(
+            long = "no-thalamic-gate",
+            conflicts_with = "thalamic_gate",
+            default_value_t = false
+        )]
         no_thalamic_gate: bool,
 
         /// Enable Cortical Envelope Tracking (Priority 13).
@@ -177,6 +186,17 @@ enum Commands {
         /// dynamics. Takes precedence over --thalamic-gate when both set.
         #[arg(long = "phys-gate", default_value_t = false)]
         phys_gate: bool,
+
+        /// Print acoustic subscore metrics (Phase 4). Leaves the scalar NMM
+        /// score unchanged and is only shown for single goal/brain evaluation.
+        #[arg(long = "acoustic-score", default_value_t = false)]
+        acoustic_score: bool,
+
+        /// Enable Phase 5 acoustic/NMM score fusion for supported goals
+        /// (`shield`, `isolation`) during evaluation only. Implies acoustic
+        /// analysis and leaves optimize/surrogate behavior unchanged.
+        #[arg(long = "acoustic-score-fusion", default_value_t = false)]
+        acoustic_score_fusion: bool,
     },
 
     /// Run disturbance resilience test — inject acoustic spike and measure recovery.
@@ -277,7 +297,13 @@ fn resolve_evaluate_feature_flags(
     }
 }
 
-fn build_eval_config(duration: f32, brain_type: BrainType, flags: EvaluateFeatureFlags) -> SimulationConfig {
+fn build_eval_config(
+    duration: f32,
+    brain_type: BrainType,
+    flags: EvaluateFeatureFlags,
+    acoustic_scoring_enabled: bool,
+    acoustic_score_fusion_enabled: bool,
+) -> SimulationConfig {
     SimulationConfig {
         duration_secs: duration,
         brain_type,
@@ -285,15 +311,39 @@ fn build_eval_config(duration: f32, brain_type: BrainType, flags: EvaluateFeatur
         thalamic_gate_enabled: flags.thalamic_gate,
         cet_enabled: flags.cet,
         physiological_thalamic_gate_enabled: flags.phys_gate,
+        acoustic_scoring_enabled,
+        acoustic_score_fusion_enabled,
         ..SimulationConfig::default()
     }
 }
 
-fn build_generate_data_config(duration: f32, brain_type: BrainType, phys_gate: bool) -> SimulationConfig {
+fn build_generate_data_config(
+    duration: f32,
+    brain_type: BrainType,
+    phys_gate: bool,
+) -> SimulationConfig {
     SimulationConfig {
         duration_secs: duration,
         brain_type,
         physiological_thalamic_gate_enabled: phys_gate,
+        ..SimulationConfig::default()
+    }
+}
+
+fn build_optimize_config(
+    duration: f32,
+    brain_type: BrainType,
+    cet: bool,
+    phys_gate: bool,
+    acoustic_score_fusion_enabled: bool,
+) -> SimulationConfig {
+    SimulationConfig {
+        duration_secs: duration,
+        brain_type,
+        cet_enabled: cet,
+        physiological_thalamic_gate_enabled: phys_gate,
+        acoustic_scoring_enabled: acoustic_score_fusion_enabled,
+        acoustic_score_fusion_enabled,
         ..SimulationConfig::default()
     }
 }
@@ -308,7 +358,41 @@ fn ensure_analysis_window_or_exit(command_name: &str, duration: f32, warmup_disc
     }
 }
 
-fn surrogate_validation_mask(candidate_count: usize, surrogate_k: usize, generation: usize) -> Vec<bool> {
+fn validate_optimize_acoustic_mode(
+    goal: &Goal,
+    acoustic_score_fusion: bool,
+    use_surrogate: bool,
+    log_evaluations_path: Option<&Path>,
+) -> Result<(), String> {
+    if !acoustic_score_fusion {
+        return Ok(());
+    }
+    if !goal.supports_acoustic_fusion() {
+        return Err(format!(
+            "--acoustic-score-fusion is currently supported only for shield and isolation; got {}",
+            goal.kind()
+        ));
+    }
+    if use_surrogate {
+        return Err(
+            "--acoustic-score-fusion is incompatible with --surrogate until the surrogate score contract is updated"
+                .to_string(),
+        );
+    }
+    if log_evaluations_path.is_some() {
+        return Err(
+            "--acoustic-score-fusion is incompatible with --log-evaluations until the surrogate CSV contract records fused-score runs"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn surrogate_validation_mask(
+    candidate_count: usize,
+    surrogate_k: usize,
+    generation: usize,
+) -> Vec<bool> {
     let mut validate = vec![false; candidate_count];
     let k = surrogate_k.min(candidate_count);
 
@@ -325,7 +409,9 @@ fn surrogate_validation_mask(candidate_count: usize, surrogate_k: usize, generat
 }
 
 fn surrogate_csv_header() -> String {
-    let genome_cols: Vec<String> = (0..surrogate::GENOME_DIM).map(|i| format!("g{i}")).collect();
+    let genome_cols: Vec<String> = (0..surrogate::GENOME_DIM)
+        .map(|i| format!("g{i}"))
+        .collect();
     format!(
         "{},{}",
         genome_cols.join(","),
@@ -349,8 +435,14 @@ fn surrogate_csv_row(
     );
 
     let genome_str: Vec<String> = genome.iter().map(|v| format!("{v:.6}")).collect();
-    let goal_id = GoalKind::all().iter().position(|&g| g == goal_kind).unwrap_or(0);
-    let bt_id = BrainType::all().iter().position(|&b| b == brain_type).unwrap_or(0);
+    let goal_id = GoalKind::all()
+        .iter()
+        .position(|&g| g == goal_kind)
+        .unwrap_or(0);
+    let bt_id = BrainType::all()
+        .iter()
+        .position(|&b| b == brain_type)
+        .unwrap_or(0);
 
     format!(
         "{},{goal_id},{bt_id},{},{},{},{},{score:.6}",
@@ -358,7 +450,11 @@ fn surrogate_csv_row(
         if config.assr_enabled { 1 } else { 0 },
         if config.thalamic_gate_enabled { 1 } else { 0 },
         if config.cet_enabled { 1 } else { 0 },
-        if config.physiological_thalamic_gate_enabled { 1 } else { 0 },
+        if config.physiological_thalamic_gate_enabled {
+            1
+        } else {
+            0
+        },
     )
 }
 
@@ -366,8 +462,9 @@ fn reevaluate_best_preset(
     best_genome: &[f64],
     goal: &Goal,
     sim_config: &SimulationConfig,
+    spread_per_slot: &[f32; preset::MAX_OBJECTS],
 ) -> (Preset, pipeline::SimulationResult) {
-    let best_preset = Preset::from_genome(best_genome);
+    let best_preset = Preset::from_genome_with_spread(best_genome, spread_per_slot);
     let best_result = evaluate_preset(&best_preset, goal, sim_config);
     (best_preset, best_result)
 }
@@ -380,8 +477,10 @@ fn export_best_genome(
     generations: usize,
     duration_secs: f32,
     sim_config: &SimulationConfig,
+    spread_per_slot: &[f32; preset::MAX_OBJECTS],
 ) -> std::io::Result<(Preset, pipeline::SimulationResult)> {
-    let (best_preset, best_result) = reevaluate_best_preset(best_genome, goal, sim_config);
+    let (best_preset, best_result) =
+        reevaluate_best_preset(best_genome, goal, sim_config, spread_per_slot);
     export::export_preset(
         &best_preset,
         &best_result,
@@ -411,6 +510,7 @@ fn evaluate_score_matrix(
     brain_types: &[BrainType],
     duration: f32,
     flags: EvaluateFeatureFlags,
+    acoustic_score_fusion: bool,
 ) -> Vec<Vec<f64>> {
     brain_types
         .iter()
@@ -419,7 +519,13 @@ fn evaluate_score_matrix(
                 .iter()
                 .map(|goal_kind| {
                     let goal = Goal::new(*goal_kind);
-                    let sim_config = build_eval_config(duration, *bt, flags);
+                    let sim_config = build_eval_config(
+                        duration,
+                        *bt,
+                        flags,
+                        acoustic_score_fusion,
+                        acoustic_score_fusion,
+                    );
                     evaluate_preset(preset, &goal, &sim_config).score
                 })
                 .collect()
@@ -445,6 +551,7 @@ fn main() {
             init_preset,
             cet,
             phys_gate,
+            acoustic_score_fusion,
             log_evaluations,
             surrogate,
             surrogate_weights,
@@ -464,6 +571,7 @@ fn main() {
                 init_preset.as_deref(),
                 cet,
                 phys_gate,
+                acoustic_score_fusion,
                 surrogate,
                 &surrogate_weights,
                 surrogate_k,
@@ -482,6 +590,8 @@ fn main() {
             cet,
             no_cet,
             phys_gate,
+            acoustic_score,
+            acoustic_score_fusion,
         } => {
             let flags = resolve_evaluate_feature_flags(
                 assr,
@@ -492,7 +602,15 @@ fn main() {
                 no_cet,
                 phys_gate,
             );
-            run_evaluate(&preset, &goal, &brain_type, duration, flags);
+            run_evaluate(
+                &preset,
+                &goal,
+                &brain_type,
+                duration,
+                flags,
+                acoustic_score,
+                acoustic_score_fusion,
+            );
         }
         Commands::Disturb {
             preset,
@@ -502,7 +620,14 @@ fn main() {
             spike_gain,
             duration,
         } => {
-            run_disturb_cmd(&preset, &brain_type, spike_time, spike_duration, spike_gain, duration);
+            run_disturb_cmd(
+                &preset,
+                &brain_type,
+                spike_time,
+                spike_duration,
+                spike_gain,
+                duration,
+            );
         }
         Commands::Validate => {
             validate::run_all();
@@ -517,7 +642,16 @@ fn main() {
             phys_gate,
             seed,
         } => {
-            run_generate_data(&output, count, &goals, &brain_type, duration, threads, phys_gate, seed);
+            run_generate_data(
+                &output,
+                count,
+                &goals,
+                &brain_type,
+                duration,
+                threads,
+                phys_gate,
+                seed,
+            );
         }
     }
 }
@@ -538,12 +672,17 @@ fn run_optimize(
     init_preset: Option<&std::path::Path>,
     cet: bool,
     phys_gate: bool,
+    acoustic_score_fusion: bool,
     use_surrogate: bool,
     surrogate_weights_path: &Path,
     surrogate_k: usize,
     log_evaluations_path: Option<&Path>,
 ) {
-    ensure_analysis_window_or_exit("optimize", duration, SimulationConfig::default().warmup_discard_secs);
+    ensure_analysis_window_or_exit(
+        "optimize",
+        duration,
+        SimulationConfig::default().warmup_discard_secs,
+    );
 
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
@@ -553,6 +692,15 @@ fn run_optimize(
         std::process::exit(1);
     });
     let goal = Goal::new(goal_kind);
+    if let Err(message) = validate_optimize_acoustic_mode(
+        &goal,
+        acoustic_score_fusion,
+        use_surrogate,
+        log_evaluations_path,
+    ) {
+        eprintln!("Invalid optimize configuration: {message}");
+        std::process::exit(2);
+    }
 
     let bt = BrainType::from_str(brain_type_str).unwrap_or_else(|| {
         eprintln!(
@@ -562,13 +710,8 @@ fn run_optimize(
         std::process::exit(1);
     });
 
-    let sim_config = SimulationConfig {
-        duration_secs: duration,
-        brain_type: bt,
-        cet_enabled: cet,
-        physiological_thalamic_gate_enabled: phys_gate,
-        ..SimulationConfig::default()
-    };
+    let sim_config =
+        build_optimize_config(duration, bt, cet, phys_gate, acoustic_score_fusion);
 
     println!();
     println!("  Neural Preset Optimizer");
@@ -579,8 +722,15 @@ fn run_optimize(
     println!("  Max generations:{}", generations);
     println!("  Audio duration: {:.1}s per evaluation", duration);
     println!("  Seed:           {}", seed);
-    if cet { println!("  CET:            enabled"); }
-    if phys_gate { println!("  Phys gate:      enabled"); }
+    if cet {
+        println!("  CET:            enabled");
+    }
+    if phys_gate {
+        println!("  Phys gate:      enabled");
+    }
+    if acoustic_score_fusion {
+        println!("  Acoustic fusion: enabled ({goal_kind} objective)");
+    }
 
     // Set up evaluation logger for surrogate training data collection.
     // Appends every real-pipeline evaluation to a CSV file. The file is
@@ -613,7 +763,11 @@ fn run_optimize(
     let log_eval = |genome: &[f64], score: f64| {
         if let Some(ref logger) = eval_logger {
             let mut f = logger.lock().unwrap();
-            let _ = writeln!(f, "{}", surrogate_csv_row(genome, goal_kind, bt, &sim_config, score));
+            let _ = writeln!(
+                f,
+                "{}",
+                surrogate_csv_row(genome, goal_kind, bt, &sim_config, score)
+            );
         }
     };
 
@@ -638,9 +792,16 @@ fn run_optimize(
 
     let bounds = Preset::bounds();
     let discrete_dims = Preset::discrete_gene_indices();
-    let mut de = DifferentialEvolution::with_discrete(bounds, population, de_f, de_cr, seed, discrete_dims);
+    let mut de =
+        DifferentialEvolution::with_discrete(bounds, population, de_f, de_cr, seed, discrete_dims);
 
-    // Seed population from an existing preset if provided
+    // Seed population from an existing preset if provided. Spread is not part
+    // of the genome (the surrogate contract requires a stable 230-dim input),
+    // so we capture it as a per-slot side-channel here and re-apply it on every
+    // `from_genome` call below. Without this, seed presets that use spread
+    // would silently lose those values on the first round-trip and the
+    // optimizer would "improve" a structurally different preset.
+    let mut spread_per_slot = [0.0_f32; preset::MAX_OBJECTS];
     if let Some(path) = init_preset {
         let json = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("Failed to read init preset: {}", e);
@@ -650,9 +811,24 @@ fn run_optimize(
             eprintln!("Failed to parse init preset: {}", e);
             std::process::exit(1);
         });
+        for (i, obj) in preset.objects.iter().take(preset::MAX_OBJECTS).enumerate() {
+            spread_per_slot[i] = obj.spread.clamp(0.0, 1.0);
+        }
         let genome = preset.to_genome();
         de.seed_from_genome(&genome, 0.15);
         println!("  Init preset:    {}", path.display());
+        let nonzero_spread: Vec<String> = spread_per_slot
+            .iter()
+            .enumerate()
+            .filter(|(_, &s)| s > 0.0)
+            .map(|(i, &s)| format!("obj{i}={s:.2}"))
+            .collect();
+        if !nonzero_spread.is_empty() {
+            println!(
+                "  Spread (preserved from seed, not searched by DE): {}",
+                nonzero_spread.join(", ")
+            );
+        }
     }
 
     let start = Instant::now();
@@ -661,7 +837,7 @@ fn run_optimize(
     println!("  Evaluating initial population...");
     let pending = de.pending_evaluations();
     for (idx, genome) in &pending {
-        let preset = Preset::from_genome(genome);
+        let preset = Preset::from_genome_with_spread(genome, &spread_per_slot);
         let result = evaluate_preset(&preset, &goal, &sim_config);
         log_eval(genome, result.score);
         de.report_fitness(*idx, result.score);
@@ -692,7 +868,9 @@ fn run_optimize(
                 .iter()
                 .map(|(idx, genome)| {
                     let input = surrogate::SurrogateModel::build_input(
-                        genome, goal_kind, bt,
+                        genome,
+                        goal_kind,
+                        bt,
                         sim_config.assr_enabled,
                         sim_config.thalamic_gate_enabled,
                         sim_config.cet_enabled,
@@ -712,7 +890,7 @@ fn run_optimize(
             for (rank, &(target_idx, ref trial_genome, surr_score)) in scored.iter().enumerate() {
                 if validate_mask[rank] {
                     // Validate with real pipeline
-                    let preset = Preset::from_genome(trial_genome);
+                    let preset = Preset::from_genome_with_spread(trial_genome, &spread_per_slot);
                     let result = evaluate_preset(&preset, &goal, &sim_config);
                     log_eval(trial_genome, result.score);
                     de.report_trial_result(target_idx, trial_genome.clone(), result.score);
@@ -723,7 +901,7 @@ fn run_optimize(
         } else {
             // Standard mode: evaluate ALL trials with real pipeline
             for (target_idx, trial_genome) in trials {
-                let preset = Preset::from_genome(&trial_genome);
+                let preset = Preset::from_genome_with_spread(&trial_genome, &spread_per_slot);
                 let result = evaluate_preset(&preset, &goal, &sim_config);
                 log_eval(&trial_genome, result.score);
                 de.report_trial_result(target_idx, trial_genome, result.score);
@@ -778,7 +956,8 @@ fn run_optimize(
 
     // ── Final evaluation of best preset ─────────────────────────────────────
     let best_genome = de.best().genome.clone();
-    let (best_preset, best_result) = reevaluate_best_preset(&best_genome, &goal, &sim_config);
+    let (best_preset, best_result) =
+        reevaluate_best_preset(&best_genome, &goal, &sim_config, &spread_per_slot);
 
     println!();
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
@@ -786,7 +965,11 @@ fn run_optimize(
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
     println!("  Goal:            {}", goal_kind);
     println!("  Brain type:      {}", bt);
-    println!("  Score:           {:.4}", best_result.score);
+    if acoustic_score_fusion {
+        println!("  Score:           {:.4} (fused)", best_result.score);
+    } else {
+        println!("  Score:           {:.4}", best_result.score);
+    }
     println!("  Generations:     {}", de.generation());
     println!("  Time:            {:.1}s", elapsed.as_secs_f64());
     println!();
@@ -829,7 +1012,10 @@ fn run_optimize(
     }
     println!();
     println!("  Performance Vector:");
-    println!("    Spectral centroid:  {:.1} Hz", best_result.performance.spectral_centroid);
+    println!(
+        "    Spectral centroid:  {:.1} Hz",
+        best_result.performance.spectral_centroid
+    );
     if let Some(er) = best_result.performance.entrainment_ratio {
         println!("    Entrainment ratio:  {:.3}", er);
     } else {
@@ -841,6 +1027,12 @@ fn run_optimize(
         println!("    E/I stability:      N/A (G=0)");
     }
     println!();
+
+    if acoustic_score_fusion {
+        if let Some(acoustic) = &best_result.acoustic_score {
+            print_acoustic_score_summary(acoustic);
+        }
+    }
 
     // Preset summary
     print_preset_summary(&best_preset);
@@ -859,6 +1051,7 @@ fn run_optimize(
         de.generation(),
         duration,
         &sim_config,
+        &spread_per_slot,
     ) {
         Ok(_) => {
             println!();
@@ -880,12 +1073,22 @@ fn run_evaluate(
     brain_type_str: &str,
     duration: f32,
     flags: EvaluateFeatureFlags,
+    acoustic_score: bool,
+    acoustic_score_fusion: bool,
 ) {
-    ensure_analysis_window_or_exit("evaluate", duration, SimulationConfig::default().warmup_discard_secs);
+    ensure_analysis_window_or_exit(
+        "evaluate",
+        duration,
+        SimulationConfig::default().warmup_discard_secs,
+    );
 
     // Load preset from JSON
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
+        eprintln!(
+            "Failed to read preset file '{}': {}",
+            preset_path.display(),
+            e
+        );
         std::process::exit(1);
     });
 
@@ -944,24 +1147,64 @@ fn run_evaluate(
         "  Features: assr={}  thalamic_gate={}  cet={}  phys_gate={}",
         flags.assr, flags.thalamic_gate, flags.cet, flags.phys_gate
     );
+    if acoustic_score {
+        println!("  Acoustic score: enabled (evaluate-only)");
+    }
+    if acoustic_score_fusion {
+        println!("  Acoustic fusion: enabled for shield/isolation only");
+    }
     println!();
 
     if is_matrix {
         // ── Matrix mode ─────────────────────────────────────────────────────
-        print_comparison_matrix(&preset, &goals, &brain_types, duration, flags);
+        print_comparison_matrix(
+            &preset,
+            &goals,
+            &brain_types,
+            duration,
+            flags,
+            acoustic_score_fusion,
+        );
+        if acoustic_score {
+            println!("  Note: acoustic metrics are shown only for single goal/brain evaluate.");
+            println!();
+        }
+        if acoustic_score_fusion {
+            println!("  Note: acoustic fusion affects only shield/isolation cells in the matrix.");
+            println!();
+        }
     } else {
         // ── Single evaluation with full diagnosis ───────────────────────────
         let bt = brain_types[0];
         let goal_kind = goals[0];
         let goal = Goal::new(goal_kind);
-        let sim_config = build_eval_config(duration, bt, flags);
+        let show_acoustic = acoustic_score || acoustic_score_fusion;
+        let sim_config = build_eval_config(
+            duration,
+            bt,
+            flags,
+            show_acoustic,
+            acoustic_score_fusion,
+        );
         let detailed = evaluate_preset_detailed(&preset, &goal, &sim_config);
         let result = &detailed.summary;
         let diagnosis = diagnose_detailed_result(&goal, &detailed);
+        let fusion_applied = result
+            .acoustic_score
+            .as_ref()
+            .and_then(|acoustic| acoustic.fused_score_preview)
+            .is_some();
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
-        println!("  Score:      {:.4}", result.score);
+        if fusion_applied {
+            println!("  Score:      {:.4} (fused)", result.score);
+        } else {
+            println!("  Score:      {:.4}", result.score);
+        }
+        if acoustic_score_fusion && !goal.supports_acoustic_fusion() {
+            println!("  Acoustic fusion: requested, but this goal still uses legacy NMM scoring.");
+        }
         println!();
 
         // Tonotopic Band Energies
@@ -977,25 +1220,44 @@ fn run_evaluate(
 
         // EEG Band Powers
         println!("  EEG Band Powers:");
-        println!("    {:<8} {:<8} {:<8} {:<6} {}", "Band", "Target", "Actual", "Status", "");
+        println!(
+            "    {:<8} {:<8} {:<8} {:<6} {}",
+            "Band", "Target", "Actual", "Status", ""
+        );
         println!("    {}", "\u{2500}".repeat(50));
         for band in &diagnosis.bands {
             let detail = match band.expectation {
                 scoring::BandExpectation::Range(min, ideal, max) => {
-                    if band.actual < min { "below range" }
-                    else if band.actual > max { "above range" }
-                    else if (band.actual - ideal).abs() <= (max - min) * 0.25 { "in range" }
-                    else { "within range" }
+                    if band.actual < min {
+                        "below range"
+                    } else if band.actual > max {
+                        "above range"
+                    } else if (band.actual - ideal).abs() <= (max - min) * 0.25 {
+                        "in range"
+                    } else {
+                        "within range"
+                    }
                 }
                 scoring::BandExpectation::Flat(_) => {
-                    if (band.actual - 0.2).abs() < 0.05 { "near uniform" }
-                    else { "deviates from uniform" }
+                    if (band.actual - 0.2).abs() < 0.05 {
+                        "near uniform"
+                    } else {
+                        "deviates from uniform"
+                    }
                 }
                 scoring::BandExpectation::High => {
-                    if band.actual >= 0.25 { "in range" } else { "below range" }
+                    if band.actual >= 0.25 {
+                        "in range"
+                    } else {
+                        "below range"
+                    }
                 }
                 scoring::BandExpectation::Low => {
-                    if band.actual <= 0.15 { "in range" } else { "above range" }
+                    if band.actual <= 0.15 {
+                        "in range"
+                    } else {
+                        "above range"
+                    }
                 }
                 scoring::BandExpectation::Neutral => "neutral",
             };
@@ -1013,7 +1275,10 @@ fn run_evaluate(
 
         // FHN Neuron Response
         println!("  FHN Neuron Response:");
-        println!("    {:<18} {:<16} {:<10} {}", "Metric", "Target", "Actual", "Status");
+        println!(
+            "    {:<18} {:<16} {:<10} {}",
+            "Metric", "Target", "Actual", "Status"
+        );
         println!("    {}", "\u{2500}".repeat(55));
 
         let rate_range = format!(
@@ -1090,28 +1355,36 @@ fn run_evaluate(
             coupling.contralateral_ratio * 100.0,
         );
         println!();
-        println!("    {:<8} {:<20} {:<20} {:<20}",
-            "Band", "Left (fast α/β)", "Right (slow δ/θ)", "Combined");
+        println!(
+            "    {:<8} {:<20} {:<20} {:<20}",
+            "Band", "Left (fast α/β)", "Right (slow δ/θ)", "Combined"
+        );
         println!("    {}", "\u{2500}".repeat(72));
         let cb = &bi.combined.band_powers.normalized();
         let bands = [
             ("Delta", lh_bp.delta, rh_bp.delta, cb.delta),
             ("Theta", lh_bp.theta, rh_bp.theta, cb.theta),
             ("Alpha", lh_bp.alpha, rh_bp.alpha, cb.alpha),
-            ("Beta",  lh_bp.beta,  rh_bp.beta,  cb.beta),
+            ("Beta", lh_bp.beta, rh_bp.beta, cb.beta),
             ("Gamma", lh_bp.gamma, rh_bp.gamma, cb.gamma),
         ];
         for (name, lv, rv, cv) in &bands {
-            println!("    {:<8} {:>5.1}%  {}   {:>5.1}%  {}   {:>5.1}%  {}",
+            println!(
+                "    {:<8} {:>5.1}%  {}   {:>5.1}%  {}   {:>5.1}%  {}",
                 name,
-                lv * 100.0, bar(*lv, 10),
-                rv * 100.0, bar(*rv, 10),
-                cv * 100.0, bar(*cv, 10),
+                lv * 100.0,
+                bar(*lv, 10),
+                rv * 100.0,
+                bar(*rv, 10),
+                cv * 100.0,
+                bar(*cv, 10),
             );
         }
         println!();
-        println!("    Dominant freq:  Left {:.2} Hz   Right {:.2} Hz   Combined {:.2} Hz",
-            bi.left_dominant_freq, bi.right_dominant_freq, bi.combined.dominant_freq);
+        println!(
+            "    Dominant freq:  Left {:.2} Hz   Right {:.2} Hz   Combined {:.2} Hz",
+            bi.left_dominant_freq, bi.right_dominant_freq, bi.combined.dominant_freq
+        );
         let asym_label = if bi.alpha_asymmetry.abs() < 0.05 {
             "balanced"
         } else if bi.alpha_asymmetry > 0.0 {
@@ -1119,11 +1392,17 @@ fn run_evaluate(
         } else {
             "right-dominant"
         };
-        println!("    Alpha asymmetry: {:+.3} ({})", bi.alpha_asymmetry, asym_label);
+        println!(
+            "    Alpha asymmetry: {:+.3} ({})",
+            bi.alpha_asymmetry, asym_label
+        );
         println!();
 
         println!("  Performance Vector:");
-        println!("    Spectral centroid:  {:.1} Hz", result.performance.spectral_centroid);
+        println!(
+            "    Spectral centroid:  {:.1} Hz",
+            result.performance.spectral_centroid
+        );
         if let Some(er) = result.performance.entrainment_ratio {
             println!("    Entrainment ratio:  {:.3}", er);
         } else {
@@ -1151,13 +1430,25 @@ fn run_evaluate(
         );
         println!();
 
+        if show_acoustic {
+            if let Some(acoustic) = &result.acoustic_score {
+                print_acoustic_score_summary(acoustic);
+            } else {
+                println!("  Acoustic subscore: unavailable");
+                println!();
+            }
+        }
+
         // Verdict
         let verdict_detail = match diagnosis.verdict {
             scoring::Verdict::Good => "neural rhythms align well with goal",
             scoring::Verdict::Ok => "partial alignment, some metrics off-target",
             scoring::Verdict::Poor => "poor alignment, most metrics off-target",
         };
-        println!("  Verdict: {} \u{2014} {}", diagnosis.verdict, verdict_detail);
+        println!(
+            "  Verdict: {} \u{2014} {}",
+            diagnosis.verdict, verdict_detail
+        );
         println!();
 
         // Preset summary
@@ -1173,8 +1464,16 @@ fn print_comparison_matrix(
     brain_types: &[BrainType],
     duration: f32,
     flags: EvaluateFeatureFlags,
+    acoustic_score_fusion: bool,
 ) {
-    let scores = evaluate_score_matrix(preset, goals, brain_types, duration, flags);
+    let scores = evaluate_score_matrix(
+        preset,
+        goals,
+        brain_types,
+        duration,
+        flags,
+        acoustic_score_fusion,
+    );
 
     // Header
     print!("  {:<12}", "Brain Type");
@@ -1212,8 +1511,52 @@ fn print_comparison_matrix(
     println!();
 }
 
+fn print_acoustic_score_summary(acoustic: &crate::acoustic_score::AcousticScoreResult) {
+    let features = &acoustic.features;
+    println!("  Acoustic Subscore:");
+    println!("    {:<24} {:<10}", "Metric", "Value");
+    println!("    {}", "\u{2500}".repeat(38));
+    if let Some(level_db) = features.broadband_level_db {
+        println!("    {:<24} {:>8.2} dB", "Broadband level", level_db);
+    }
+    if let Some(ratio) = features.speech_band_ratio {
+        println!("    {:<24} {:>8.3}", "Speech-band ratio", ratio);
+    }
+    if let Some(depth) = features.modulation_depth {
+        println!("    {:<24} {:>8.3}", "Modulation depth", depth);
+    }
+    if let Some(sharpness) = features.sharpness_proxy {
+        println!("    {:<24} {:>8.3}", "Sharpness proxy", sharpness);
+    }
+    if let Some(intelligibility) = acoustic.intelligibility_proxy {
+        println!("    {:<24} {:>8.3}", "Intelligibility", intelligibility);
+    }
+    if let Some(privacy) = acoustic.speech_privacy {
+        println!("    {:<24} {:>8.3}", "Speech privacy", privacy);
+    }
+    if let Some(comfort) = acoustic.comfort_score {
+        println!("    {:<24} {:>8.3}", "Comfort score", comfort);
+    }
+    if let Some(acoustic_goal_score) = acoustic.acoustic_goal_score {
+        println!(
+            "    {:<24} {:>8.3}",
+            "Acoustic goal score",
+            acoustic_goal_score
+        );
+    }
+    if let Some(legacy_nmm_score) = acoustic.legacy_nmm_score {
+        println!("    {:<24} {:>8.3}", "Legacy NMM score", legacy_nmm_score);
+    }
+    if let Some(fused_score) = acoustic.fused_score_preview {
+        println!("    {:<24} {:>8.3}", "Fused score", fused_score);
+    }
+    println!();
+}
+
 fn print_preset_summary(preset: &Preset) {
-    let color_names = ["White", "Pink", "Brown", "Green", "Grey", "Black", "SSN", "Blue"];
+    let color_names = [
+        "White", "Pink", "Brown", "Green", "Grey", "Black", "SSN", "Blue",
+    ];
     let env_names = [
         "AnechoicChamber",
         "FocusRoom",
@@ -1221,7 +1564,15 @@ fn print_preset_summary(preset: &Preset) {
         "VastSpace",
         "DeepSanctuary",
     ];
-    let mod_kind_names = ["Flat", "SineLfo", "Breathing", "Stochastic", "NeuralLfo", "Isochronic", "RandomPulse"];
+    let mod_kind_names = [
+        "Flat",
+        "SineLfo",
+        "Breathing",
+        "Stochastic",
+        "NeuralLfo",
+        "Isochronic",
+        "RandomPulse",
+    ];
 
     println!("  Preset Configuration:");
     println!("    Master gain:    {:.2}", preset.master_gain);
@@ -1236,8 +1587,7 @@ fn print_preset_summary(preset: &Preset) {
     );
     println!(
         "    Anchor:         {} @ {:.2}",
-        color_names[preset.anchor_color as usize],
-        preset.anchor_volume
+        color_names[preset.anchor_color as usize], preset.anchor_volume
     );
     println!(
         "    Environment:    {}",
@@ -1251,14 +1601,11 @@ fn print_preset_summary(preset: &Preset) {
         }
         println!(
             "    Object {}: {} @ ({:+.1}, {:+.1}, {:+.1})  vol={:.2}  reverb={:.2}",
-            i,
-            color_names[obj.color as usize],
-            obj.x,
-            obj.y,
-            obj.z,
-            obj.volume,
-            obj.reverb_send,
+            i, color_names[obj.color as usize], obj.x, obj.y, obj.z, obj.volume, obj.reverb_send,
         );
+        if obj.spread > 0.01 {
+            println!("      Spread:    {:.2}", obj.spread);
+        }
         if obj.bass_mod.kind > 0 {
             println!(
                 "      Bass:      {} (a={:.2}, b={:.2}, c={:.2})",
@@ -1284,14 +1631,21 @@ fn print_preset_summary(preset: &Preset) {
                 movement::MovementPattern::DepthBreathing => {
                     println!(
                         "      Movement:  {} (speed={:.2}, z={:.1}–{:.1}, reverb={:.2}–{:.2})",
-                        pattern.label(), mv.speed, mv.depth_min, mv.depth_max,
-                        mv.reverb_min, mv.reverb_max,
+                        pattern.label(),
+                        mv.speed,
+                        mv.depth_min,
+                        mv.depth_max,
+                        mv.reverb_min,
+                        mv.reverb_max,
                     );
                 }
                 _ => {
                     println!(
                         "      Movement:  {} (radius={:.2}, speed={:.2}, phase={:.2})",
-                        pattern.label(), mv.radius, mv.speed, mv.phase,
+                        pattern.label(),
+                        mv.radius,
+                        mv.speed,
+                        mv.phase,
                     );
                 }
             }
@@ -1317,7 +1671,11 @@ fn run_disturb_cmd(
 
     // Load preset
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read preset file '{}': {}", preset_path.display(), e);
+        eprintln!(
+            "Failed to read preset file '{}': {}",
+            preset_path.display(),
+            e
+        );
         std::process::exit(1);
     });
     let exported: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
@@ -1363,6 +1721,7 @@ fn run_disturb_cmd(
         warmup_discard_secs: 2.0,
         window_s: 0.5,
         hop_s: 0.05,
+        acoustic_scoring_enabled: false,
     };
 
     let start = Instant::now();
@@ -1374,19 +1733,33 @@ fn run_disturb_cmd(
     println!("  \u{2550}\u{2550}\u{2550} Disturbance Resilience Test \u{2550}\u{2550}\u{2550}");
     println!();
     println!("  Brain type:      {}", bt);
-    println!("  Spike:           {:.0}ms white noise burst at t={:.1}s, gain={:.2}",
-        spike_duration * 1000.0, spike_time, spike_gain);
+    println!(
+        "  Spike:           {:.0}ms white noise burst at t={:.1}s, gain={:.2}",
+        spike_duration * 1000.0,
+        spike_time,
+        spike_gain
+    );
     if let Some(tf) = result.target_freq {
         println!("  Target LFO:      {:.1} Hz", tf);
     }
     println!("  Brightness:      {:.2}", result.brightness);
-    println!("  Duration:        {:.1}s ({:.2}s elapsed)", duration, elapsed.as_secs_f64());
+    println!(
+        "  Duration:        {:.1}s ({:.2}s elapsed)",
+        duration,
+        elapsed.as_secs_f64()
+    );
     println!();
 
     // Baseline
     println!("  \u{2500}\u{2500} Baseline (0 \u{2013} {:.1}s) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", spike_time);
-    println!("    Dominant freq:       {:.2} Hz", result.baseline_dominant_freq);
-    println!("    Spectral centroid:   {:.2} Hz", result.baseline_centroid);
+    println!(
+        "    Dominant freq:       {:.2} Hz",
+        result.baseline_dominant_freq
+    );
+    println!(
+        "    Spectral centroid:   {:.2} Hz",
+        result.baseline_centroid
+    );
     if let Some(ent) = result.baseline_entrainment {
         println!("    Entrainment ratio:   {:.3}", ent);
     }
@@ -1400,45 +1773,66 @@ fn run_disturb_cmd(
         } else {
             0.0
         };
-        println!("    Entrainment nadir:   {:.3} ({:.0}% drop at t={:.2}s)", nadir, drop_pct, result.nadir_time);
+        println!(
+            "    Entrainment nadir:   {:.3} ({:.0}% drop at t={:.2}s)",
+            nadir, drop_pct, result.nadir_time
+        );
     }
-    println!("    Peak freq deviation: \u{00b1}{:.2} Hz", result.peak_freq_deviation);
+    println!(
+        "    Peak freq deviation: \u{00b1}{:.2} Hz",
+        result.peak_freq_deviation
+    );
     println!();
 
     // Recovery
     println!("  \u{2500}\u{2500} Recovery \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     match result.recovery_50_ms {
         Some(ms) => println!("    50% recovery:        {:.0} ms", ms),
-        None     => println!("    50% recovery:        NOT RECOVERED"),
+        None => println!("    50% recovery:        NOT RECOVERED"),
     }
     match result.recovery_90_ms {
         Some(ms) => println!("    90% recovery:        {:.0} ms", ms),
-        None     => println!("    90% recovery:        NOT RECOVERED"),
+        None => println!("    90% recovery:        NOT RECOVERED"),
     }
 
     // Final state (last 2s)
-    let final_windows: Vec<&disturb::WindowMetrics> = result.windows.iter()
+    let final_windows: Vec<&disturb::WindowMetrics> = result
+        .windows
+        .iter()
         .filter(|w| w.time_s > (duration as f64 - 2.0 - 2.0)) // last 2s of analysis
         .collect();
     if !final_windows.is_empty() {
         let final_ent: Option<f64> = {
-            let vals: Vec<f64> = final_windows.iter()
+            let vals: Vec<f64> = final_windows
+                .iter()
                 .filter_map(|w| w.entrainment_ratio)
                 .collect();
-            if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) }
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.iter().sum::<f64>() / vals.len() as f64)
+            }
         };
-        let final_freq = final_windows.iter().map(|w| w.dominant_freq).sum::<f64>() / final_windows.len() as f64;
+        let final_freq =
+            final_windows.iter().map(|w| w.dominant_freq).sum::<f64>() / final_windows.len() as f64;
 
         println!();
-        println!("    Final entrainment:   {}", match final_ent {
-            Some(e) => format!("{:.3}", e),
-            None    => "N/A".to_string(),
-        });
+        println!(
+            "    Final entrainment:   {}",
+            match final_ent {
+                Some(e) => format!("{:.3}", e),
+                None => "N/A".to_string(),
+            }
+        );
         println!("    Final dominant freq: {:.2} Hz", final_freq);
 
         // Entrainment resilience (original, requires LFO target)
         if let (Some(base), Some(fin)) = (result.baseline_entrainment, final_ent) {
-            let preservation = if base > 1e-10 { (fin / base).min(1.0) } else { 0.0 };
+            let preservation = if base > 1e-10 {
+                (fin / base).min(1.0)
+            } else {
+                0.0
+            };
             let speed_score = match result.recovery_90_ms {
                 Some(ms) if ms < 5000.0 => 1.0 - (ms / 5000.0),
                 Some(_) => 0.0,
@@ -1446,8 +1840,14 @@ fn run_disturb_cmd(
             };
             let resilience = 0.6 * preservation + 0.4 * speed_score;
             println!();
-            println!("    \u{2550}\u{2550} Entrainment Resilience: {:.2} \u{2550}\u{2550}", resilience);
-            println!("       (preservation={:.2}, speed={:.2})", preservation, speed_score);
+            println!(
+                "    \u{2550}\u{2550} Entrainment Resilience: {:.2} \u{2550}\u{2550}",
+                resilience
+            );
+            println!(
+                "       (preservation={:.2}, speed={:.2})",
+                preservation, speed_score
+            );
         }
     }
 
@@ -1455,18 +1855,28 @@ fn run_disturb_cmd(
     println!();
     println!("  \u{2500}\u{2500} Spectral Resilience (Priority 15) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     println!("    BPPR (band preservation):  {:.3}", result.bppr);
-    println!("    Spectral recovery 50%:     {}", match result.spectral_recovery_50_ms {
-        Some(ms) => format!("{:.0} ms", ms),
-        None => "NOT RECOVERED".to_string(),
-    });
-    println!("    Spectral recovery 90%:     {}", match result.spectral_recovery_90_ms {
-        Some(ms) => format!("{:.0} ms", ms),
-        None => "NOT RECOVERED".to_string(),
-    });
+    println!(
+        "    Spectral recovery 50%:     {}",
+        match result.spectral_recovery_50_ms {
+            Some(ms) => format!("{:.0} ms", ms),
+            None => "NOT RECOVERED".to_string(),
+        }
+    );
+    println!(
+        "    Spectral recovery 90%:     {}",
+        match result.spectral_recovery_90_ms {
+            Some(ms) => format!("{:.0} ms", ms),
+            None => "NOT RECOVERED".to_string(),
+        }
+    );
     println!("    SCDI (centroid deviation):  {:.2} Hz", result.scdi_hz);
     println!();
-    println!("    \u{2550}\u{2550} Spectral Resilience Score: {:.2} \u{2550}\u{2550}", result.spectral_resilience);
-    println!("       (BPPR={:.2}, SRT={}, SCDI={:.2}Hz)",
+    println!(
+        "    \u{2550}\u{2550} Spectral Resilience Score: {:.2} \u{2550}\u{2550}",
+        result.spectral_resilience
+    );
+    println!(
+        "       (BPPR={:.2}, SRT={}, SCDI={:.2}Hz)",
         result.bppr,
         match result.spectral_recovery_90_ms {
             Some(ms) => format!("{:.0}ms", ms),
@@ -1478,12 +1888,17 @@ fn run_disturb_cmd(
     // Timeline (sampled every ~0.5s for compact output)
     println!();
     println!("  \u{2500}\u{2500} Timeline \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
-    println!("    {:>6}  {:>8}  {:>8}  {:>8}  {}", "Time", "Entrain", "DomFreq", "Centroid", "");
+    println!(
+        "    {:>6}  {:>8}  {:>8}  {:>8}  {}",
+        "Time", "Entrain", "DomFreq", "Centroid", ""
+    );
 
     let step = (0.5 / config.hop_s) as usize; // print every ~0.5s
     let step = step.max(1);
     for (i, w) in result.windows.iter().enumerate() {
-        if i % step != 0 { continue; }
+        if i % step != 0 {
+            continue;
+        }
         let marker = if (w.time_s - spike_time).abs() < config.hop_s * 2.0 {
             " \u{25c0} SPIKE"
         } else if (w.time_s - result.nadir_time).abs() < config.hop_s * 2.0 {
@@ -1493,9 +1908,12 @@ fn run_disturb_cmd(
         };
         let ent_str = match w.entrainment_ratio {
             Some(e) => format!("{:.3}", e),
-            None    => "  N/A".to_string(),
+            None => "  N/A".to_string(),
         };
-        println!("    {:>5.1}s  {:>8}  {:>7.1} Hz  {:>6.1} Hz{}", w.time_s, ent_str, w.dominant_freq, w.spectral_centroid, marker);
+        println!(
+            "    {:>5.1}s  {:>8}  {:>7.1} Hz  {:>6.1} Hz{}",
+            w.time_s, ent_str, w.dominant_freq, w.spectral_centroid, marker
+        );
     }
 
     println!();
@@ -1516,7 +1934,11 @@ fn run_generate_data(
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    ensure_analysis_window_or_exit("generate-data", duration, SimulationConfig::default().warmup_discard_secs);
+    ensure_analysis_window_or_exit(
+        "generate-data",
+        duration,
+        SimulationConfig::default().warmup_discard_secs,
+    );
 
     let goals: Vec<GoalKind> = if goals_str.to_lowercase() == "all" {
         GoalKind::all().to_vec()
@@ -1549,12 +1971,23 @@ fn run_generate_data(
     println!("  Surrogate Training Data Generator");
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
     println!("  Presets:        {count}");
-    println!("  Goals:          {} ({} total)", goals.len(), goals.iter().map(|g| format!("{g}")).collect::<Vec<_>>().join(", "));
+    println!(
+        "  Goals:          {} ({} total)",
+        goals.len(),
+        goals
+            .iter()
+            .map(|g| format!("{g}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("  Brain types:    {}", brain_types.len());
     println!("  Total evals:    {total_evals}");
     println!("  Duration:       {duration:.1}s per eval");
     println!("  Threads:        {threads}");
-    println!("  Phys gate:      {}", if phys_gate { "enabled" } else { "disabled" });
+    println!(
+        "  Phys gate:      {}",
+        if phys_gate { "enabled" } else { "disabled" }
+    );
     println!("  Output:         {}", output.display());
     println!();
 
@@ -1581,7 +2014,8 @@ fn run_generate_data(
     }
 
     // Build work items: (preset_idx, genome, goal, brain_type)
-    let mut work_items: Vec<(usize, Vec<f64>, GoalKind, BrainType)> = Vec::with_capacity(total_evals);
+    let mut work_items: Vec<(usize, Vec<f64>, GoalKind, BrainType)> =
+        Vec::with_capacity(total_evals);
     for (idx, genome) in genomes.iter().enumerate() {
         for &goal in &goals {
             for &bt in &brain_types {
@@ -1626,8 +2060,10 @@ fn run_generate_data(
 
                     let done = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if done % 100 == 0 || done == total_evals {
-                        eprint!("\r  Progress: {done}/{total_evals} ({:.1}%)",
-                            100.0 * done as f64 / total_evals as f64);
+                        eprint!(
+                            "\r  Progress: {done}/{total_evals} ({:.1}%)",
+                            100.0 * done as f64 / total_evals as f64
+                        );
                     }
                 }
             });
@@ -1656,7 +2092,12 @@ fn run_generate_data(
 
     // Data rows
     for (_, genome, goal_kind, bt, config, score) in &results {
-        writeln!(file, "{}", surrogate_csv_row(genome, *goal_kind, *bt, config, *score)).unwrap();
+        writeln!(
+            file,
+            "{}",
+            surrogate_csv_row(genome, *goal_kind, *bt, config, *score)
+        )
+        .unwrap();
     }
 
     println!("  Wrote {} rows to {}", results.len(), output.display());
@@ -1669,15 +2110,7 @@ mod tests {
 
     #[test]
     fn evaluate_disable_flags_override_enabled_defaults() {
-        let flags = resolve_evaluate_feature_flags(
-            true,
-            true,
-            true,
-            true,
-            true,
-            true,
-            false,
-        );
+        let flags = resolve_evaluate_feature_flags(true, true, true, true, true, true, false);
 
         assert_eq!(
             flags,
@@ -1699,13 +2132,15 @@ mod tests {
             phys_gate: true,
         };
 
-        let config = build_eval_config(7.5, BrainType::Aging, flags);
+        let config = build_eval_config(7.5, BrainType::Aging, flags, true, true);
         assert!((config.duration_secs - 7.5).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Aging);
         assert!(!config.assr_enabled);
         assert!(config.thalamic_gate_enabled);
         assert!(!config.cet_enabled);
         assert!(config.physiological_thalamic_gate_enabled);
+        assert!(config.acoustic_scoring_enabled);
+        assert!(config.acoustic_score_fusion_enabled);
     }
 
     #[test]
@@ -1717,6 +2152,60 @@ mod tests {
         assert!(config.thalamic_gate_enabled);
         assert!(config.cet_enabled);
         assert!(config.physiological_thalamic_gate_enabled);
+        assert!(!config.acoustic_scoring_enabled);
+    }
+
+    #[test]
+    fn build_optimize_config_enables_fusion_implies_acoustic_scoring() {
+        let config = build_optimize_config(4.0, BrainType::Anxious, true, true, true);
+        assert!((config.duration_secs - 4.0).abs() < 1e-12);
+        assert_eq!(config.brain_type, BrainType::Anxious);
+        assert!(config.cet_enabled);
+        assert!(config.physiological_thalamic_gate_enabled);
+        assert!(config.acoustic_scoring_enabled);
+        assert!(config.acoustic_score_fusion_enabled);
+    }
+
+    #[test]
+    fn acoustic_scaffolding_defaults_are_disabled() {
+        assert!(!crate::acoustic_score::AcousticScoreConfig::default().enabled);
+        assert!(!crate::acoustic_score::AcousticScoreConfig::default().fusion_enabled);
+        assert!(!SimulationConfig::default().acoustic_scoring_enabled);
+        assert!(!SimulationConfig::default().acoustic_score_fusion_enabled);
+        assert!(!disturb::DisturbConfig::default().acoustic_scoring_enabled);
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_accepts_supported_goal_without_sidecars() {
+        let goal = Goal::new(GoalKind::Shield);
+        assert!(validate_optimize_acoustic_mode(&goal, true, false, None).is_ok());
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_rejects_unsupported_goal() {
+        let goal = Goal::new(GoalKind::Focus);
+        let err = validate_optimize_acoustic_mode(&goal, true, false, None).unwrap_err();
+        assert!(err.contains("supported only for shield and isolation"));
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_rejects_surrogate_mix() {
+        let goal = Goal::new(GoalKind::Shield);
+        let err = validate_optimize_acoustic_mode(&goal, true, true, None).unwrap_err();
+        assert!(err.contains("--surrogate"));
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_rejects_logging_mix() {
+        let goal = Goal::new(GoalKind::Isolation);
+        let err = validate_optimize_acoustic_mode(
+            &goal,
+            true,
+            false,
+            Some(Path::new("/tmp/fused_optimize.csv")),
+        )
+        .unwrap_err();
+        assert!(err.contains("--log-evaluations"));
     }
 
     #[test]
@@ -1759,7 +2248,10 @@ mod tests {
             surrogate::GENOME_DIM + surrogate::CSV_METADATA_COLUMNS.len()
         );
         assert_eq!(cols[0], "g0");
-        assert_eq!(cols[surrogate::GENOME_DIM - 1], format!("g{}", surrogate::GENOME_DIM - 1));
+        assert_eq!(
+            cols[surrogate::GENOME_DIM - 1],
+            format!("g{}", surrogate::GENOME_DIM - 1)
+        );
         assert_eq!(
             &cols[surrogate::GENOME_DIM..],
             &surrogate::CSV_METADATA_COLUMNS
@@ -1817,6 +2309,7 @@ mod tests {
         let output_path = std::env::temp_dir().join("test_export_best_genome_uses_real_score.json");
         let _ = std::fs::remove_file(&output_path);
 
+        let zero_spread = [0.0_f32; preset::MAX_OBJECTS];
         let (_preset, exported_result) = export_best_genome(
             &output_path,
             &best_genome,
@@ -1825,6 +2318,7 @@ mod tests {
             7,
             config.duration_secs,
             &config,
+            &zero_spread,
         )
         .expect("best-genome export should succeed");
 
@@ -1847,6 +2341,57 @@ mod tests {
     }
 
     #[test]
+    fn export_best_genome_uses_re_evaluated_fused_score() {
+        let best_genome = Preset::default().to_genome();
+        let goal_kind = GoalKind::Shield;
+        let goal = Goal::new(goal_kind);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            brain_type: BrainType::Normal,
+            acoustic_scoring_enabled: true,
+            acoustic_score_fusion_enabled: true,
+            ..SimulationConfig::default()
+        };
+        let direct = evaluate_preset(&Preset::from_genome(&best_genome), &goal, &config);
+        let output_path =
+            std::env::temp_dir().join("test_export_best_genome_uses_re_evaluated_fused_score.json");
+        let _ = std::fs::remove_file(&output_path);
+
+        let zero_spread = [0.0_f32; preset::MAX_OBJECTS];
+        let (_preset, exported_result) = export_best_genome(
+            &output_path,
+            &best_genome,
+            &goal,
+            goal_kind,
+            3,
+            config.duration_secs,
+            &config,
+            &zero_spread,
+        )
+        .expect("fused best-genome export should succeed");
+
+        let json = std::fs::read_to_string(&output_path).expect("exported JSON should exist");
+        let exported: serde_json::Value =
+            serde_json::from_str(&json).expect("exported JSON should parse");
+        let exported_score = exported["meta"]["score"]
+            .as_f64()
+            .expect("meta.score should be f64");
+
+        assert!((exported_result.score - direct.score).abs() < 1e-12);
+        assert!((exported_score - direct.score).abs() < 1e-12);
+        assert!(
+            exported_result
+                .acoustic_score
+                .as_ref()
+                .and_then(|acoustic| acoustic.fused_score_preview)
+                .is_some(),
+            "fused optimize export should preserve the fused-score payload"
+        );
+
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
     fn matrix_single_cell_score_matches_scalar_evaluate() {
         let preset = Preset::default();
         let flags = EvaluateFeatureFlags {
@@ -1859,10 +2404,17 @@ mod tests {
         let goal_kind = GoalKind::Meditation;
         let brain_type = BrainType::Anxious;
         let goal = Goal::new(goal_kind);
-        let config = build_eval_config(duration, brain_type, flags);
+        let config = build_eval_config(duration, brain_type, flags, false, false);
 
         let direct = evaluate_preset(&preset, &goal, &config);
-        let matrix = evaluate_score_matrix(&preset, &[goal_kind], &[brain_type], duration, flags);
+        let matrix = evaluate_score_matrix(
+            &preset,
+            &[goal_kind],
+            &[brain_type],
+            duration,
+            flags,
+            false,
+        );
 
         assert_eq!(matrix.len(), 1);
         assert_eq!(matrix[0].len(), 1);

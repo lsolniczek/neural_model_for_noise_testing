@@ -17,7 +17,7 @@
 /// - Lomas et al. 2015: EEG during meditation
 /// - Katahira et al. 2018: EEG correlates of flow state
 /// - Engel & Fries 2010: Beta-band oscillations and active maintenance
-
+use crate::acoustic_score::AcousticScoreResult;
 use crate::neural::{BandPowers, FhnResult, JansenRitResult, PerformanceVector};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -138,7 +138,7 @@ struct BandTargets {
     delta: BandTarget,
     theta: BandTarget,
     alpha: BandTarget,
-    beta:  BandTarget,
+    beta: BandTarget,
     gamma: BandTarget,
 }
 
@@ -151,6 +151,15 @@ struct FhnTargets {
     target_isi_cv: Option<f64>,
     /// Weight of the FHN component in the total score.
     weight: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcousticFusionOutcome {
+    pub acoustic_goal_score: f64,
+    pub comfort_score: f64,
+    pub fused_score: f64,
+    pub nmm_weight: f64,
+    pub acoustic_weight: f64,
 }
 
 pub struct Goal {
@@ -171,11 +180,31 @@ impl Goal {
             GoalKind::DeepRelaxation => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.05, ideal: 0.22, max: 0.40 },
-                    theta: BandTarget { min: 0.18, ideal: 0.35, max: 0.52 },
-                    alpha: BandTarget { min: 0.20, ideal: 0.36, max: 0.52 },
-                    beta:  BandTarget { min: 0.00, ideal: 0.03, max: 0.14 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.01, max: 0.06 },
+                    delta: BandTarget {
+                        min: 0.05,
+                        ideal: 0.22,
+                        max: 0.40,
+                    },
+                    theta: BandTarget {
+                        min: 0.18,
+                        ideal: 0.35,
+                        max: 0.52,
+                    },
+                    alpha: BandTarget {
+                        min: 0.20,
+                        ideal: 0.36,
+                        max: 0.52,
+                    },
+                    beta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.03,
+                        max: 0.14,
+                    },
+                    gamma: BandTarget {
+                        min: 0.00,
+                        ideal: 0.01,
+                        max: 0.06,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (1.0, 6.0),
@@ -193,14 +222,34 @@ impl Goal {
             GoalKind::Focus => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.00, ideal: 0.01, max: 0.08 },
-                    theta: BandTarget { min: 0.08, ideal: 0.18, max: 0.32 },
-                    alpha: BandTarget { min: 0.18, ideal: 0.33, max: 0.50 },
-                    beta:  BandTarget { min: 0.25, ideal: 0.42, max: 0.60 },
+                    delta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.01,
+                        max: 0.08,
+                    },
+                    theta: BandTarget {
+                        min: 0.08,
+                        ideal: 0.18,
+                        max: 0.32,
+                    },
+                    alpha: BandTarget {
+                        min: 0.18,
+                        ideal: 0.33,
+                        max: 0.50,
+                    },
+                    beta: BandTarget {
+                        min: 0.25,
+                        ideal: 0.42,
+                        max: 0.60,
+                    },
                     // NOTE: The Jansen-Rit model cannot produce >17 Hz oscillations,
                     // so gamma power (30-50 Hz) comes from the WilsonCowan oscillators
                     // in tonotopic bands 2-3 (see BandModelType::WilsonCowan in brain_type.rs).
-                    gamma: BandTarget { min: 0.02, ideal: 0.06, max: 0.15 },
+                    gamma: BandTarget {
+                        min: 0.02,
+                        ideal: 0.06,
+                        max: 0.15,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (8.0, 20.0),
@@ -219,11 +268,31 @@ impl Goal {
             GoalKind::Sleep => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.08, ideal: 0.30, max: 0.50 },
-                    theta: BandTarget { min: 0.28, ideal: 0.48, max: 0.68 },
-                    alpha: BandTarget { min: 0.00, ideal: 0.12, max: 0.25 },
-                    beta:  BandTarget { min: 0.00, ideal: 0.02, max: 0.08 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.02, max: 0.06 },
+                    delta: BandTarget {
+                        min: 0.08,
+                        ideal: 0.30,
+                        max: 0.50,
+                    },
+                    theta: BandTarget {
+                        min: 0.28,
+                        ideal: 0.48,
+                        max: 0.68,
+                    },
+                    alpha: BandTarget {
+                        min: 0.00,
+                        ideal: 0.12,
+                        max: 0.25,
+                    },
+                    beta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.02,
+                        max: 0.08,
+                    },
+                    gamma: BandTarget {
+                        min: 0.00,
+                        ideal: 0.02,
+                        max: 0.06,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (0.5, 4.0),
@@ -239,11 +308,31 @@ impl Goal {
             GoalKind::Isolation => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.10, ideal: 0.20, max: 0.30 },
-                    theta: BandTarget { min: 0.10, ideal: 0.20, max: 0.30 },
-                    alpha: BandTarget { min: 0.10, ideal: 0.20, max: 0.30 },
-                    beta:  BandTarget { min: 0.10, ideal: 0.20, max: 0.30 },
-                    gamma: BandTarget { min: 0.10, ideal: 0.20, max: 0.30 },
+                    delta: BandTarget {
+                        min: 0.10,
+                        ideal: 0.20,
+                        max: 0.30,
+                    },
+                    theta: BandTarget {
+                        min: 0.10,
+                        ideal: 0.20,
+                        max: 0.30,
+                    },
+                    alpha: BandTarget {
+                        min: 0.10,
+                        ideal: 0.20,
+                        max: 0.30,
+                    },
+                    beta: BandTarget {
+                        min: 0.10,
+                        ideal: 0.20,
+                        max: 0.30,
+                    },
+                    gamma: BandTarget {
+                        min: 0.10,
+                        ideal: 0.20,
+                        max: 0.30,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (2.0, 10.0),
@@ -261,11 +350,31 @@ impl Goal {
             GoalKind::Meditation => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.02, ideal: 0.08, max: 0.22 },
-                    theta: BandTarget { min: 0.25, ideal: 0.40, max: 0.56 },
-                    alpha: BandTarget { min: 0.25, ideal: 0.40, max: 0.56 },
-                    beta:  BandTarget { min: 0.00, ideal: 0.03, max: 0.12 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.02, max: 0.08 },
+                    delta: BandTarget {
+                        min: 0.02,
+                        ideal: 0.08,
+                        max: 0.22,
+                    },
+                    theta: BandTarget {
+                        min: 0.25,
+                        ideal: 0.40,
+                        max: 0.56,
+                    },
+                    alpha: BandTarget {
+                        min: 0.25,
+                        ideal: 0.40,
+                        max: 0.56,
+                    },
+                    beta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.03,
+                        max: 0.12,
+                    },
+                    gamma: BandTarget {
+                        min: 0.00,
+                        ideal: 0.02,
+                        max: 0.08,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (1.0, 6.0),
@@ -286,11 +395,31 @@ impl Goal {
             GoalKind::DeepWork => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.00, ideal: 0.01, max: 0.06 },
-                    theta: BandTarget { min: 0.15, ideal: 0.30, max: 0.46 },
-                    alpha: BandTarget { min: 0.35, ideal: 0.52, max: 0.70 }, // dominant
-                    beta:  BandTarget { min: 0.02, ideal: 0.10, max: 0.24 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.02, max: 0.08 },
+                    delta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.01,
+                        max: 0.06,
+                    },
+                    theta: BandTarget {
+                        min: 0.15,
+                        ideal: 0.30,
+                        max: 0.46,
+                    },
+                    alpha: BandTarget {
+                        min: 0.35,
+                        ideal: 0.52,
+                        max: 0.70,
+                    }, // dominant
+                    beta: BandTarget {
+                        min: 0.02,
+                        ideal: 0.10,
+                        max: 0.24,
+                    },
+                    gamma: BandTarget {
+                        min: 0.00,
+                        ideal: 0.02,
+                        max: 0.08,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (4.0, 12.0),
@@ -320,11 +449,31 @@ impl Goal {
             GoalKind::Shield => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.00, ideal: 0.03, max: 0.08 },
-                    theta: BandTarget { min: 0.00, ideal: 0.05, max: 0.12 },
-                    alpha: BandTarget { min: 0.35, ideal: 0.50, max: 0.65 },
-                    beta:  BandTarget { min: 0.20, ideal: 0.30, max: 0.40 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.03, max: 0.08 },
+                    delta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.03,
+                        max: 0.08,
+                    },
+                    theta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.05,
+                        max: 0.12,
+                    },
+                    alpha: BandTarget {
+                        min: 0.35,
+                        ideal: 0.50,
+                        max: 0.65,
+                    },
+                    beta: BandTarget {
+                        min: 0.20,
+                        ideal: 0.30,
+                        max: 0.40,
+                    },
+                    gamma: BandTarget {
+                        min: 0.00,
+                        ideal: 0.03,
+                        max: 0.08,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (5.0, 12.0),
@@ -343,11 +492,31 @@ impl Goal {
             GoalKind::Flow => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.00, ideal: 0.05, max: 0.15 },
-                    theta: BandTarget { min: 0.05, ideal: 0.15, max: 0.30 },
-                    alpha: BandTarget { min: 0.30, ideal: 0.45, max: 0.60 },
-                    beta:  BandTarget { min: 0.15, ideal: 0.30, max: 0.45 },
-                    gamma: BandTarget { min: 0.00, ideal: 0.02, max: 0.08 },
+                    delta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.05,
+                        max: 0.15,
+                    },
+                    theta: BandTarget {
+                        min: 0.05,
+                        ideal: 0.15,
+                        max: 0.30,
+                    },
+                    alpha: BandTarget {
+                        min: 0.30,
+                        ideal: 0.45,
+                        max: 0.60,
+                    },
+                    beta: BandTarget {
+                        min: 0.15,
+                        ideal: 0.30,
+                        max: 0.45,
+                    },
+                    gamma: BandTarget {
+                        min: 0.00,
+                        ideal: 0.02,
+                        max: 0.08,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (3.0, 12.0),
@@ -371,11 +540,31 @@ impl Goal {
             GoalKind::Ignition => Goal {
                 kind,
                 band_targets: BandTargets {
-                    delta: BandTarget { min: 0.00, ideal: 0.02, max: 0.05 },
-                    theta: BandTarget { min: 0.00, ideal: 0.10, max: 0.25 },
-                    alpha: BandTarget { min: 0.10, ideal: 0.20, max: 0.35 },
-                    beta:  BandTarget { min: 0.35, ideal: 0.50, max: 0.65 },
-                    gamma: BandTarget { min: 0.05, ideal: 0.15, max: 0.35 },
+                    delta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.02,
+                        max: 0.05,
+                    },
+                    theta: BandTarget {
+                        min: 0.00,
+                        ideal: 0.10,
+                        max: 0.25,
+                    },
+                    alpha: BandTarget {
+                        min: 0.10,
+                        ideal: 0.20,
+                        max: 0.35,
+                    },
+                    beta: BandTarget {
+                        min: 0.35,
+                        ideal: 0.50,
+                        max: 0.65,
+                    },
+                    gamma: BandTarget {
+                        min: 0.05,
+                        ideal: 0.15,
+                        max: 0.35,
+                    },
                 },
                 fhn_targets: FhnTargets {
                     firing_rate_range: (12.0, 25.0),
@@ -487,6 +676,30 @@ impl Goal {
         };
 
         (base_score + plv_bonus + env_plv_bonus).clamp(0.0, 1.0)
+    }
+
+    pub fn supports_acoustic_fusion(&self) -> bool {
+        matches!(self.kind, GoalKind::Shield | GoalKind::Isolation)
+    }
+
+    pub fn evaluate_with_acoustic_fusion(
+        &self,
+        neural_score: f64,
+        acoustic: &AcousticScoreResult,
+    ) -> Option<AcousticFusionOutcome> {
+        let (nmm_weight, acoustic_weight) = self.acoustic_fusion_weights()?;
+        let acoustic_goal_score = self.acoustic_goal_score(acoustic)?;
+        let comfort_score = self.acoustic_comfort_score(acoustic)?;
+        let fused_score =
+            (nmm_weight * neural_score + acoustic_weight * acoustic_goal_score).clamp(0.0, 1.0);
+
+        Some(AcousticFusionOutcome {
+            acoustic_goal_score,
+            comfort_score,
+            fused_score,
+            nmm_weight,
+            acoustic_weight,
+        })
     }
 
     /// CET 13c — How much this goal values envelope-phase tracking (slow
@@ -605,6 +818,38 @@ impl Goal {
         }
     }
 
+    fn acoustic_fusion_weights(&self) -> Option<(f64, f64)> {
+        match self.kind {
+            GoalKind::Shield => Some((0.82, 0.18)),
+            GoalKind::Isolation => Some((0.78, 0.22)),
+            _ => None,
+        }
+    }
+
+    fn acoustic_goal_score(&self, acoustic: &AcousticScoreResult) -> Option<f64> {
+        let speech_privacy = acoustic.speech_privacy?;
+        let speech_band_ratio = acoustic.features.speech_band_ratio?;
+        let comfort_score = self.acoustic_comfort_score(acoustic)?;
+
+        let score = match self.kind {
+            GoalKind::Shield => {
+                0.60 * speech_privacy + 0.20 * speech_band_ratio + 0.20 * comfort_score
+            }
+            GoalKind::Isolation => {
+                0.65 * speech_privacy + 0.15 * speech_band_ratio + 0.20 * comfort_score
+            }
+            _ => return None,
+        };
+
+        Some(score.clamp(0.0, 1.0))
+    }
+
+    fn acoustic_comfort_score(&self, acoustic: &AcousticScoreResult) -> Option<f64> {
+        let sharpness = acoustic.features.sharpness_proxy?;
+        let modulation_depth = acoustic.features.modulation_depth?;
+        Some((1.0 - (0.75 * sharpness + 0.25 * modulation_depth)).clamp(0.0, 1.0))
+    }
+
     /// Score EEG band powers against targets using Gaussian scoring.
     fn score_bands(&self, powers: &BandPowers) -> f64 {
         let norm = powers.normalized();
@@ -617,7 +862,7 @@ impl Goal {
                 - ((norm.delta - uniform).abs()
                     + (norm.theta - uniform).abs()
                     + (norm.alpha - uniform).abs()
-                    + (norm.beta  - uniform).abs()
+                    + (norm.beta - uniform).abs()
                     + (norm.gamma - uniform).abs())
                     / 2.0;
             return flatness.clamp(0.0, 1.0);
@@ -636,33 +881,94 @@ impl Goal {
     }
 
     /// Produce a detailed diagnostic breakdown of how a result matches this goal.
-    pub fn diagnose(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult, brightness: f64, alpha_asymmetry: f64, plv: Option<f64>, envelope_plv: Option<f64>, performance: Option<PerformanceVector>) -> Diagnosis {
+    pub fn diagnose(
+        &self,
+        fhn: &FhnResult,
+        jansen_rit: &JansenRitResult,
+        brightness: f64,
+        alpha_asymmetry: f64,
+        plv: Option<f64>,
+        envelope_plv: Option<f64>,
+        performance: Option<PerformanceVector>,
+    ) -> Diagnosis {
         let norm = jansen_rit.band_powers.normalized();
         let t = &self.band_targets;
 
         let band_diagnoses = if self.kind == GoalKind::Isolation {
             let uniform = 0.2;
             vec![
-                BandDiagnosis { name: "Delta", actual: norm.delta, expectation: BandExpectation::Flat(uniform), status: flat_status(norm.delta, uniform) },
-                BandDiagnosis { name: "Theta", actual: norm.theta, expectation: BandExpectation::Flat(uniform), status: flat_status(norm.theta, uniform) },
-                BandDiagnosis { name: "Alpha", actual: norm.alpha, expectation: BandExpectation::Flat(uniform), status: flat_status(norm.alpha, uniform) },
-                BandDiagnosis { name: "Beta",  actual: norm.beta,  expectation: BandExpectation::Flat(uniform), status: flat_status(norm.beta,  uniform) },
-                BandDiagnosis { name: "Gamma", actual: norm.gamma, expectation: BandExpectation::Flat(uniform), status: flat_status(norm.gamma, uniform) },
+                BandDiagnosis {
+                    name: "Delta",
+                    actual: norm.delta,
+                    expectation: BandExpectation::Flat(uniform),
+                    status: flat_status(norm.delta, uniform),
+                },
+                BandDiagnosis {
+                    name: "Theta",
+                    actual: norm.theta,
+                    expectation: BandExpectation::Flat(uniform),
+                    status: flat_status(norm.theta, uniform),
+                },
+                BandDiagnosis {
+                    name: "Alpha",
+                    actual: norm.alpha,
+                    expectation: BandExpectation::Flat(uniform),
+                    status: flat_status(norm.alpha, uniform),
+                },
+                BandDiagnosis {
+                    name: "Beta",
+                    actual: norm.beta,
+                    expectation: BandExpectation::Flat(uniform),
+                    status: flat_status(norm.beta, uniform),
+                },
+                BandDiagnosis {
+                    name: "Gamma",
+                    actual: norm.gamma,
+                    expectation: BandExpectation::Flat(uniform),
+                    status: flat_status(norm.gamma, uniform),
+                },
             ]
         } else {
             vec![
-                BandDiagnosis { name: "Delta", actual: norm.delta, expectation: t.delta.expectation(), status: t.delta.status(norm.delta) },
-                BandDiagnosis { name: "Theta", actual: norm.theta, expectation: t.theta.expectation(), status: t.theta.status(norm.theta) },
-                BandDiagnosis { name: "Alpha", actual: norm.alpha, expectation: t.alpha.expectation(), status: t.alpha.status(norm.alpha) },
-                BandDiagnosis { name: "Beta",  actual: norm.beta,  expectation: t.beta.expectation(),  status: t.beta.status(norm.beta)  },
-                BandDiagnosis { name: "Gamma", actual: norm.gamma, expectation: t.gamma.expectation(), status: t.gamma.status(norm.gamma) },
+                BandDiagnosis {
+                    name: "Delta",
+                    actual: norm.delta,
+                    expectation: t.delta.expectation(),
+                    status: t.delta.status(norm.delta),
+                },
+                BandDiagnosis {
+                    name: "Theta",
+                    actual: norm.theta,
+                    expectation: t.theta.expectation(),
+                    status: t.theta.status(norm.theta),
+                },
+                BandDiagnosis {
+                    name: "Alpha",
+                    actual: norm.alpha,
+                    expectation: t.alpha.expectation(),
+                    status: t.alpha.status(norm.alpha),
+                },
+                BandDiagnosis {
+                    name: "Beta",
+                    actual: norm.beta,
+                    expectation: t.beta.expectation(),
+                    status: t.beta.status(norm.beta),
+                },
+                BandDiagnosis {
+                    name: "Gamma",
+                    actual: norm.gamma,
+                    expectation: t.gamma.expectation(),
+                    status: t.gamma.status(norm.gamma),
+                },
             ]
         };
 
         let (min_rate, max_rate) = self.fhn_targets.firing_rate_range;
         let firing_rate_status = if fhn.firing_rate >= min_rate && fhn.firing_rate <= max_rate {
             MetricStatus::Pass
-        } else if (fhn.firing_rate - min_rate).abs() < 2.0 || (fhn.firing_rate - max_rate).abs() < 2.0 {
+        } else if (fhn.firing_rate - min_rate).abs() < 2.0
+            || (fhn.firing_rate - max_rate).abs() < 2.0
+        {
             MetricStatus::Warn
         } else {
             MetricStatus::Fail
@@ -751,9 +1057,13 @@ impl Goal {
 
 fn flat_status(actual: f64, target: f64) -> MetricStatus {
     let diff = (actual - target).abs();
-    if diff < 0.05 { MetricStatus::Pass }
-    else if diff < 0.10 { MetricStatus::Warn }
-    else { MetricStatus::Fail }
+    if diff < 0.05 {
+        MetricStatus::Pass
+    } else if diff < 0.10 {
+        MetricStatus::Warn
+    } else {
+        MetricStatus::Fail
+    }
 }
 
 // ── Diagnosis types ──────────────────────────────────────────────────────────
@@ -818,7 +1128,7 @@ impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Verdict::Good => write!(f, "GOOD"),
-            Verdict::Ok  => write!(f, "OK"),
+            Verdict::Ok => write!(f, "OK"),
             Verdict::Poor => write!(f, "POOR"),
         }
     }
@@ -842,17 +1152,24 @@ impl Diagnosis {
     /// Which EEG band the dominant frequency falls into.
     pub fn dominant_band_name(&self) -> &'static str {
         let f = self.dominant_freq;
-        if f < 4.0 { "Delta" }
-        else if f < 8.0 { "Theta" }
-        else if f < 13.0 { "Alpha" }
-        else if f < 30.0 { "Beta" }
-        else { "Gamma" }
+        if f < 4.0 {
+            "Delta"
+        } else if f < 8.0 {
+            "Theta"
+        } else if f < 13.0 {
+            "Alpha"
+        } else if f < 30.0 {
+            "Beta"
+        } else {
+            "Gamma"
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acoustic_score::{AcousticFeatureVector, AcousticScoreResult};
     use crate::neural::{BandPowers, FhnResult, JansenRitResult};
 
     /// Build a synthetic FhnResult with given firing_rate and isi_cv.
@@ -872,9 +1189,34 @@ mod tests {
     fn make_jr(delta: f64, theta: f64, alpha: f64, beta: f64, gamma: f64) -> JansenRitResult {
         JansenRitResult {
             eeg: vec![0.0; 100],
-            band_powers: BandPowers { delta, theta, alpha, beta, gamma },
+            band_powers: BandPowers {
+                delta,
+                theta,
+                alpha,
+                beta,
+                gamma,
+            },
             dominant_freq: 10.0,
             fast_inhib_trace: vec![],
+        }
+    }
+
+    fn make_acoustic_result(
+        speech_privacy: f64,
+        speech_band_ratio: f64,
+        modulation_depth: f64,
+        sharpness_proxy: f64,
+    ) -> AcousticScoreResult {
+        AcousticScoreResult {
+            features: AcousticFeatureVector {
+                broadband_level_db: Some(-18.0),
+                speech_band_ratio: Some(speech_band_ratio),
+                modulation_depth: Some(modulation_depth),
+                sharpness_proxy: Some(sharpness_proxy),
+            },
+            intelligibility_proxy: Some(1.0 - speech_privacy),
+            speech_privacy: Some(speech_privacy),
+            ..AcousticScoreResult::default()
         }
     }
 
@@ -884,15 +1226,26 @@ mod tests {
 
     #[test]
     fn band_score_at_ideal_is_one() {
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         let s = t.score(0.30);
-        assert!((s - 1.0).abs() < 1e-10, "Score at ideal should be 1.0, got {s}");
+        assert!(
+            (s - 1.0).abs() < 1e-10,
+            "Score at ideal should be 1.0, got {s}"
+        );
     }
 
     #[test]
     fn band_score_at_boundaries_near_005() {
         // Centered ideal: boundaries should give ≈ 0.05
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         let s_min = t.score(0.10);
         let s_max = t.score(0.50);
         assert!(
@@ -907,7 +1260,11 @@ mod tests {
 
     #[test]
     fn band_score_symmetric_around_ideal() {
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         let above = t.score(0.35);
         let below = t.score(0.25);
         assert!(
@@ -918,22 +1275,40 @@ mod tests {
 
     #[test]
     fn band_score_decreases_away_from_ideal() {
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         let close = t.score(0.28);
         let far = t.score(0.15);
-        assert!(close > far, "Closer to ideal should score higher: {close} vs {far}");
+        assert!(
+            close > far,
+            "Closer to ideal should score higher: {close} vs {far}"
+        );
     }
 
     #[test]
     fn band_score_beyond_boundaries_near_zero() {
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         let beyond = t.score(0.70); // well beyond max
-        assert!(beyond < 0.01, "Score well beyond boundary should be ~0, got {beyond}");
+        assert!(
+            beyond < 0.01,
+            "Score well beyond boundary should be ~0, got {beyond}"
+        );
     }
 
     #[test]
     fn band_score_zero_half_width_returns_zero() {
-        let t = BandTarget { min: 0.30, ideal: 0.30, max: 0.30 };
+        let t = BandTarget {
+            min: 0.30,
+            ideal: 0.30,
+            max: 0.30,
+        };
         let s = t.score(0.30);
         assert_eq!(s, 0.0, "Zero-width target should return 0.0");
     }
@@ -963,8 +1338,7 @@ mod tests {
         for &kind in GoalKind::all() {
             let goal = Goal::new(kind);
             let t = &goal.band_targets;
-            let sum = t.delta.ideal + t.theta.ideal + t.alpha.ideal
-                + t.beta.ideal + t.gamma.ideal;
+            let sum = t.delta.ideal + t.theta.ideal + t.alpha.ideal + t.beta.ideal + t.gamma.ideal;
             assert!(
                 sum >= 0.90 && sum <= 1.10,
                 "{kind}: ideal sum = {sum:.3} (expected 0.90–1.10 for achievable max score)"
@@ -1010,6 +1384,34 @@ mod tests {
             let s2 = goal.evaluate_with_brightness(&fhn_high, &jr_high, 1.0);
             assert!(s2 >= 0.0 && s2 <= 1.0, "{kind} extreme: {s2}");
         }
+    }
+
+    #[test]
+    fn shield_acoustic_fusion_prefers_private_comfortable_masking() {
+        let goal = Goal::new(GoalKind::Shield);
+        let weak = make_acoustic_result(0.20, 0.10, 0.80, 0.90);
+        let strong = make_acoustic_result(0.85, 0.75, 0.15, 0.20);
+
+        let weak_fused = goal
+            .evaluate_with_acoustic_fusion(0.42, &weak)
+            .expect("shield should support acoustic fusion");
+        let strong_fused = goal
+            .evaluate_with_acoustic_fusion(0.42, &strong)
+            .expect("shield should support acoustic fusion");
+
+        assert!(strong_fused.acoustic_goal_score > weak_fused.acoustic_goal_score);
+        assert!(strong_fused.comfort_score > weak_fused.comfort_score);
+        assert!(strong_fused.fused_score > weak_fused.fused_score);
+        assert!((0.0..=1.0).contains(&strong_fused.fused_score));
+    }
+
+    #[test]
+    fn non_shield_goals_do_not_apply_acoustic_fusion_yet() {
+        let goal = Goal::new(GoalKind::Focus);
+        let acoustic = make_acoustic_result(0.80, 0.60, 0.20, 0.20);
+
+        assert!(!goal.supports_acoustic_fusion());
+        assert!(goal.evaluate_with_acoustic_fusion(0.50, &acoustic).is_none());
     }
 
     // ---------------------------------------------------------------
@@ -1074,7 +1476,10 @@ mod tests {
         let goal = Goal::new(GoalKind::Sleep);
         let dark = goal.brightness_modifier(0.1);
         let bright = goal.brightness_modifier(0.9);
-        assert!(dark > bright, "Sleep should prefer dark: {dark:.3} vs {bright:.3}");
+        assert!(
+            dark > bright,
+            "Sleep should prefer dark: {dark:.3} vs {bright:.3}"
+        );
     }
 
     #[test]
@@ -1082,7 +1487,10 @@ mod tests {
         let goal = Goal::new(GoalKind::Isolation);
         let dark = goal.brightness_modifier(0.1);
         let bright = goal.brightness_modifier(0.9);
-        assert!(bright > dark, "Isolation should prefer bright: {bright:.3} vs {dark:.3}");
+        assert!(
+            bright > dark,
+            "Isolation should prefer bright: {bright:.3} vs {dark:.3}"
+        );
     }
 
     #[test]
@@ -1120,7 +1528,10 @@ mod tests {
 
         let good = goal.score_fhn(&fhn_good);
         let bad = goal.score_fhn(&fhn_bad);
-        assert!(good > bad, "In-range FHN ({good:.3}) should beat out-of-range ({bad:.3})");
+        assert!(
+            good > bad,
+            "In-range FHN ({good:.3}) should beat out-of-range ({bad:.3})"
+        );
     }
 
     #[test]
@@ -1138,7 +1549,10 @@ mod tests {
             "Good CV ({s_good:.3}) should beat NaN CV ({s_nan:.3})"
         );
         // But rate component still scores well
-        assert!(s_nan > 0.3, "NaN CV with good rate should still score > 0.3, got {s_nan:.3}");
+        assert!(
+            s_nan > 0.3,
+            "NaN CV with good rate should still score > 0.3, got {s_nan:.3}"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1186,7 +1600,8 @@ mod tests {
         assert!(
             matches!(diag.verdict, Verdict::Good),
             "Focus with ideal inputs should get Good verdict, got {:?} (score={:.3})",
-            diag.verdict, diag.score
+            diag.verdict,
+            diag.score
         );
     }
 
@@ -1196,13 +1611,21 @@ mod tests {
 
     #[test]
     fn band_status_pass_near_ideal() {
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         assert!(matches!(t.status(0.30), MetricStatus::Pass));
     }
 
     #[test]
     fn band_status_fail_outside_range() {
-        let t = BandTarget { min: 0.10, ideal: 0.30, max: 0.50 };
+        let t = BandTarget {
+            min: 0.10,
+            ideal: 0.30,
+            max: 0.50,
+        };
         assert!(matches!(t.status(0.05), MetricStatus::Fail));
         assert!(matches!(t.status(0.60), MetricStatus::Fail));
     }

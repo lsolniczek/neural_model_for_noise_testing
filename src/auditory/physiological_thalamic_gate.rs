@@ -70,7 +70,6 @@
 /// - Steriade M, McCormick DA, Sejnowski TJ (1993). "Thalamocortical
 ///   oscillations in the sleeping and aroused brain." *Science*
 ///   262(5134):679-685. — frequency-selective burst-mode proportions.
-
 use crate::preset::Preset;
 
 // ── Cell parameters from Bazhenov 2002 (mS/cm² and mV) ─────────────────────
@@ -80,16 +79,16 @@ use crate::preset::Preset;
 //   E_L(TC) = -70 mV, E_KL = -95 mV
 //   Wake state: g_KL = 0; Sleep state: g_KL ∈ [0, 0.03]
 
-const C_M: f64 = 1.0;          // membrane capacitance, µF/cm²
-const G_NA: f64 = 90.0;        // Na⁺ max conductance, mS/cm²
-const G_K: f64 = 10.0;         // K⁺ delayed-rectifier conductance, mS/cm²
-const G_T: f64 = 2.2;          // T-type Ca²⁺ conductance, mS/cm²
-const G_L: f64 = 0.05;         // passive leak conductance, mS/cm²
-const E_NA: f64 = 50.0;        // mV (standard HH)
-const E_K: f64 = -95.0;        // mV (matches E_KL by design — Bazhenov uses both)
-const E_CA: f64 = 120.0;       // mV (standard HH)
-const E_L: f64 = -70.0;        // mV (Bazhenov 2002 TC cell)
-const E_KL: f64 = -95.0;       // mV (Bazhenov 2002 K⁺ leak)
+const C_M: f64 = 1.0; // membrane capacitance, µF/cm²
+const G_NA: f64 = 90.0; // Na⁺ max conductance, mS/cm²
+const G_K: f64 = 10.0; // K⁺ delayed-rectifier conductance, mS/cm²
+const G_T: f64 = 2.2; // T-type Ca²⁺ conductance, mS/cm²
+const G_L: f64 = 0.05; // passive leak conductance, mS/cm²
+const E_NA: f64 = 50.0; // mV (standard HH)
+const E_K: f64 = -95.0; // mV (matches E_KL by design — Bazhenov uses both)
+const E_CA: f64 = 120.0; // mV (standard HH)
+const E_L: f64 = -70.0; // mV (Bazhenov 2002 TC cell)
+const E_KL: f64 = -95.0; // mV (Bazhenov 2002 K⁺ leak)
 
 /// Maximum K⁺ leak conductance at deep sleep (mS/cm²). Bazhenov 2002 reports
 /// g_KL_TC sweeps from 0 (wake) to ~0.03 (deep sleep) for the TC cell.
@@ -378,17 +377,10 @@ fn simulate_tc_cell(g_kl: f64) -> TcFiringStats {
 
     // ISI CV — useful for distinguishing tonic (low CV) from bursting (high CV).
     let isi_cv = if n_spikes >= 3 {
-        let isis: Vec<f64> = spike_times_ms
-            .windows(2)
-            .map(|w| w[1] - w[0])
-            .collect();
+        let isis: Vec<f64> = spike_times_ms.windows(2).map(|w| w[1] - w[0]).collect();
         let mean_isi = isis.iter().sum::<f64>() / isis.len() as f64;
         if mean_isi > 0.0 {
-            let var = isis
-                .iter()
-                .map(|x| (x - mean_isi).powi(2))
-                .sum::<f64>()
-                / isis.len() as f64;
+            let var = isis.iter().map(|x| (x - mean_isi).powi(2)).sum::<f64>() / isis.len() as f64;
             var.sqrt() / mean_isi
         } else {
             0.0
@@ -450,10 +442,10 @@ impl PhysiologicalThalamicGate {
         // bands stay tonic the longest.
         let base = -MAX_OFFSET_REDUCTION * stats.burstiness;
         let cached_shifts = [
-            base * 1.0,  // Band 0: full
-            base * 0.7,  // Band 1
-            base * 0.2,  // Band 2
-            base * 0.0,  // Band 3: never shifts (always tonic)
+            base * 1.0, // Band 0: full
+            base * 0.7, // Band 1
+            base * 0.2, // Band 2
+            base * 0.0, // Band 3: never shifts (always tonic)
         ];
 
         PhysiologicalThalamicGate {
@@ -580,17 +572,28 @@ mod tests {
         let a = na_alpha_m(-54.0);
         let b = na_beta_m(-27.0);
         let n = k_alpha_n(-52.0);
-        assert!(a.is_finite() && b.is_finite() && n.is_finite(),
-            "HH singular limits broken: alpha_m={a}, beta_m={b}, alpha_n={n}");
+        assert!(
+            a.is_finite() && b.is_finite() && n.is_finite(),
+            "HH singular limits broken: alpha_m={a}, beta_m={b}, alpha_n={n}"
+        );
     }
 
     #[test]
     fn hh_steady_state_gates_in_zero_one() {
         for v_int in -100..=20 {
             let v = v_int as f64;
-            assert!((0.0..=1.0).contains(&na_m_inf(v)), "na_m_inf({v}) out of [0,1]");
-            assert!((0.0..=1.0).contains(&na_h_inf(v)), "na_h_inf({v}) out of [0,1]");
-            assert!((0.0..=1.0).contains(&k_n_inf(v)), "k_n_inf({v}) out of [0,1]");
+            assert!(
+                (0.0..=1.0).contains(&na_m_inf(v)),
+                "na_m_inf({v}) out of [0,1]"
+            );
+            assert!(
+                (0.0..=1.0).contains(&na_h_inf(v)),
+                "na_h_inf({v}) out of [0,1]"
+            );
+            assert!(
+                (0.0..=1.0).contains(&k_n_inf(v)),
+                "k_n_inf({v}) out of [0,1]"
+            );
         }
     }
 
@@ -605,13 +608,19 @@ mod tests {
         for _ in 0..5000 {
             state = tc_step_rk4(&state, 0.0, 0.02);
             assert!(state.v.is_finite(), "V went non-finite: {state:?}");
-            assert!(state.v.abs() < 200.0, "V escaped physiological range: {state:?}");
+            assert!(
+                state.v.abs() < 200.0,
+                "V escaped physiological range: {state:?}"
+            );
         }
         // Same at deep sleep (max g_KL)
         let mut state = TcState::resting();
         for _ in 0..5000 {
             state = tc_step_rk4(&state, G_KL_MAX, 0.02);
-            assert!(state.v.is_finite(), "V went non-finite at sleep g_KL: {state:?}");
+            assert!(
+                state.v.is_finite(),
+                "V went non-finite at sleep g_KL: {state:?}"
+            );
             assert!(state.v.abs() < 200.0, "V escaped: {state:?}");
         }
     }

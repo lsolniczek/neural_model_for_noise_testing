@@ -1,13 +1,13 @@
-pub mod gammatone;
 pub mod assr;
-pub mod thalamic_gate;
-pub mod physiological_thalamic_gate;
 pub mod crossover;
+pub mod gammatone;
+pub mod physiological_thalamic_gate;
 pub mod room_impulse;
+pub mod thalamic_gate;
 
-pub use gammatone::{GammatoneFilterbank, BandGroupOutput, BAND_LABELS};
 pub use assr::AssrTransfer;
-pub use thalamic_gate::ThalamicGate;
-pub use physiological_thalamic_gate::PhysiologicalThalamicGate;
 pub use crossover::{ButterworthCrossover, DEFAULT_CET_CUTOFF_HZ};
-pub use room_impulse::{EnvironmentParams, generate_rir, apply_rir};
+pub use gammatone::{BandGroupOutput, GammatoneFilterbank, BAND_LABELS};
+pub use physiological_thalamic_gate::PhysiologicalThalamicGate;
+pub use room_impulse::{apply_rir, generate_rir, EnvironmentParams};
+pub use thalamic_gate::ThalamicGate;

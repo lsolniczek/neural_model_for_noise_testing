@@ -46,7 +46,6 @@
 /// - Ghitza O (2011). "Linking speech perception and neurophysiology: speech
 ///   decoding guided by cascaded oscillators locked to the input rhythm."
 ///   *Front Psychol* 2:130. — cascaded slow/fast envelope architecture.
-
 use std::f64::consts::PI;
 
 /// Default crossover cutoff in Hz. Per Doelling et al. (2014), envelope
@@ -76,10 +75,7 @@ impl ButterworthCrossover {
         assert!(cutoff_hz > 0.0, "cutoff must be positive");
         assert!(sample_rate_hz > 0.0, "sample rate must be positive");
         let alpha = 1.0 - (-2.0 * PI * cutoff_hz / sample_rate_hz).exp();
-        ButterworthCrossover {
-            alpha,
-            y_prev: 0.0,
-        }
+        ButterworthCrossover { alpha, y_prev: 0.0 }
     }
 
     /// Build with the default 10 Hz CET cutoff for `sample_rate_hz`.
@@ -200,8 +196,14 @@ mod tests {
         // 1st-order LP at f_c=10 gives |H(5)| ≈ 0.894. The HP magnitude at
         // f = f_c/2 is sqrt(1 - |H|²) = sqrt(1 - 0.8) ≈ 0.447 (the 6 dB/oct
         // slope is gentle on purpose — see module docstring).
-        assert!(slow_ratio > 0.85, "5 Hz slow ratio={slow_ratio} (expected >0.85)");
-        assert!(fast_ratio < 0.50, "5 Hz fast ratio={fast_ratio} (expected <0.50)");
+        assert!(
+            slow_ratio > 0.85,
+            "5 Hz slow ratio={slow_ratio} (expected >0.85)"
+        );
+        assert!(
+            fast_ratio < 0.50,
+            "5 Hz fast ratio={fast_ratio} (expected <0.50)"
+        );
         // The slow path must dominate at 5 Hz (key CET requirement).
         assert!(
             slow_ratio > fast_ratio,
@@ -223,8 +225,14 @@ mod tests {
         let slow_ratio = slow_rms / in_rms;
         let fast_ratio = fast_rms / in_rms;
         eprintln!("40 Hz: slow={slow_ratio:.3} fast={fast_ratio:.3}");
-        assert!(fast_ratio > 0.90, "40 Hz fast ratio={fast_ratio} (expected >0.90)");
-        assert!(slow_ratio < 0.30, "40 Hz slow ratio={slow_ratio} (expected <0.30)");
+        assert!(
+            fast_ratio > 0.90,
+            "40 Hz fast ratio={fast_ratio} (expected >0.90)"
+        );
+        assert!(
+            slow_ratio < 0.30,
+            "40 Hz slow ratio={slow_ratio} (expected <0.30)"
+        );
         assert!(
             fast_ratio > slow_ratio,
             "fast ({fast_ratio}) must dominate slow ({slow_ratio}) at 40 Hz"
@@ -308,7 +316,9 @@ mod tests {
     #[test]
     fn reset_clears_state() {
         let mut xover = ButterworthCrossover::cet_default(SR);
-        let pulse: Vec<f64> = std::iter::once(1.0).chain(std::iter::repeat(0.0).take(99)).collect();
+        let pulse: Vec<f64> = std::iter::once(1.0)
+            .chain(std::iter::repeat(0.0).take(99))
+            .collect();
         let (slow1, _) = xover.process_signal(&pulse);
         // After processing, internal state is non-zero unless we reset.
         // process_signal already resets at start, so two consecutive runs

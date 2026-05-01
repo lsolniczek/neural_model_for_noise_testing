@@ -4,18 +4,14 @@
 /// into the decimated tonotopic signals at a specified time, then tracks
 /// entrainment ratio and dominant frequency through sliding-window analysis
 /// to measure perturbation impact and recovery dynamics.
-
 use crate::auditory::GammatoneFilterbank;
 use crate::brain_type::BrainType;
-use crate::movement::MovementController;
-use crate::neural::{FastInhibParams, simulate_bilateral, BilateralResult};
+use crate::neural::{simulate_bilateral, BilateralResult, FastInhibParams};
 use crate::pipeline::{
-    SAMPLE_RATE, DECIMATION_FACTOR, NEURAL_SR, DEFAULT_WARMUP_DISCARD_SECS,
-    decimate, deinterleave, spectral_brightness,
-    validate_analysis_window,
+    decimate, render_preset_stereo_dry, spectral_brightness, validate_analysis_window,
+    DECIMATION_FACTOR, DEFAULT_WARMUP_DISCARD_SECS, NEURAL_SR, SAMPLE_RATE,
 };
 use crate::preset::Preset;
-use noise_generator_core::NoiseEngine;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 // ── Sliding-window metrics ──────────────────────────────────────────────────
@@ -64,7 +60,6 @@ pub struct DisturbResult {
     //
     // These work for ALL preset types including binaural beats and
     // static noise, unlike the entrainment-based metrics above.
-
     /// Band Power Preservation Ratio (BPPR) ∈ [0, 1].
     /// Per Pfurtscheller & Lopes da Silva (1999): worst-case fractional
     /// preservation of the dominant band power after the spike.
@@ -102,6 +97,7 @@ pub struct DisturbConfig {
     pub warmup_discard_secs: f32,
     pub window_s: f64,
     pub hop_s: f64,
+    pub acoustic_scoring_enabled: bool,
 }
 
 impl Default for DisturbConfig {
@@ -115,6 +111,7 @@ impl Default for DisturbConfig {
             warmup_discard_secs: DEFAULT_WARMUP_DISCARD_SECS,
             window_s: 0.5,
             hop_s: 0.05,
+            acoustic_scoring_enabled: false,
         }
     }
 }
@@ -135,46 +132,10 @@ fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOut
     validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
         .unwrap_or_else(|message| panic!("invalid DisturbConfig: {message}"));
 
-    let num_frames = (SAMPLE_RATE as f32 * config.duration_secs) as u32;
     let sr = SAMPLE_RATE as f64;
-
-    // 1. Create engine and apply preset
-    let engine = NoiseEngine::new(SAMPLE_RATE, 0.8);
-    preset.apply_to_engine(&engine);
-
-    // 2. Movement
-    let mut movement = MovementController::from_preset(preset);
-    let warmup_frames = (SAMPLE_RATE as f32 * 1.0) as u32;
-    let chunk_frames = (SAMPLE_RATE as f32 * 0.05) as u32;
-
-    if movement.has_movement() {
-        let warmup_chunks = warmup_frames / chunk_frames;
-        let dt = chunk_frames as f64 / SAMPLE_RATE as f64;
-        for _ in 0..warmup_chunks {
-            movement.tick(dt, &engine);
-            let _ = engine.render_audio(chunk_frames);
-        }
-    } else {
-        let _ = engine.render_audio(warmup_frames);
-    }
-
-    let audio = if movement.has_movement() {
-        let dt = chunk_frames as f64 / SAMPLE_RATE as f64;
-        let mut all_audio = Vec::with_capacity((num_frames * 2) as usize);
-        let mut rendered = 0_u32;
-        while rendered < num_frames {
-            let this_chunk = chunk_frames.min(num_frames - rendered);
-            movement.tick(dt, &engine);
-            all_audio.extend_from_slice(&engine.render_audio(this_chunk));
-            rendered += this_chunk;
-        }
-        all_audio
-    } else {
-        engine.render_audio(num_frames)
-    };
-
-    // 3. Deinterleave
-    let (left, right) = deinterleave(&audio);
+    let rendered = render_preset_stereo_dry(preset, config.duration_secs);
+    let left = rendered.left;
+    let right = rendered.right;
 
     // 4. Gammatone filterbank
     let mut filterbank_l = GammatoneFilterbank::new(sr);
@@ -232,7 +193,9 @@ fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOut
     // Extract target LFO frequency from preset.
     // Scans for NeuralLfo (kind=4), Isochronic (kind=5) — both drive entrainment.
     // Bug fix (Priority 15): previously only detected kind==4, missing isochronic.
-    let target_lfo_freq = preset.objects.iter()
+    let target_lfo_freq = preset
+        .objects
+        .iter()
         .filter(|obj| obj.active)
         .flat_map(|obj| {
             let vol = obj.volume as f64;
@@ -373,11 +336,25 @@ fn analyze_window(
         }
 
         // Accumulate per-band power
-        if freq < 4.0 { band_power[0] += power; }       // delta 0.5-4
-        else if freq < 8.0 { band_power[1] += power; }   // theta 4-8
-        else if freq < 13.0 { band_power[2] += power; }  // alpha 8-13
-        else if freq < 30.0 { band_power[3] += power; }  // beta 13-30
-        else { band_power[4] += power; }                  // gamma 30-50
+        if freq < 4.0 {
+            band_power[0] += power;
+        }
+        // delta 0.5-4
+        else if freq < 8.0 {
+            band_power[1] += power;
+        }
+        // theta 4-8
+        else if freq < 13.0 {
+            band_power[2] += power;
+        }
+        // alpha 8-13
+        else if freq < 30.0 {
+            band_power[3] += power;
+        }
+        // beta 13-30
+        else {
+            band_power[4] += power;
+        } // gamma 30-50
     }
 
     let spectral_centroid = if total_power > 1e-30 {
@@ -395,7 +372,9 @@ fn analyze_window(
     // Normalize band powers to fractions summing to 1.0
     let bp_sum: f64 = band_power.iter().sum();
     if bp_sum > 1e-30 {
-        for p in &mut band_power { *p /= bp_sum; }
+        for p in &mut band_power {
+            *p /= bp_sum;
+        }
     } else {
         band_power = [0.2; 5]; // uniform fallback
     }
@@ -491,7 +470,14 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         neural_params.jansen_rit.input_scale,
         NEURAL_SR,
         &fast_inhib,
-        neural_params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+        neural_params.jansen_rit.v0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.5,
     );
 
     // Phase 4: Sliding-window analysis
@@ -507,27 +493,41 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
     let spike_window_time = config.spike_time_s;
 
     // Baseline: windows before spike
-    let baseline_windows: Vec<&WindowMetrics> = windows.iter()
+    let baseline_windows: Vec<&WindowMetrics> = windows
+        .iter()
         .filter(|w| w.time_s + config.window_s * 0.5 < spike_window_time)
         .collect();
 
     let baseline_entrainment = if !baseline_windows.is_empty() {
-        let vals: Vec<f64> = baseline_windows.iter()
+        let vals: Vec<f64> = baseline_windows
+            .iter()
             .filter_map(|w| w.entrainment_ratio)
             .collect();
-        if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) }
+        if vals.is_empty() {
+            None
+        } else {
+            Some(vals.iter().sum::<f64>() / vals.len() as f64)
+        }
     } else {
         None
     };
 
     let baseline_dominant_freq = if !baseline_windows.is_empty() {
-        baseline_windows.iter().map(|w| w.dominant_freq).sum::<f64>() / baseline_windows.len() as f64
+        baseline_windows
+            .iter()
+            .map(|w| w.dominant_freq)
+            .sum::<f64>()
+            / baseline_windows.len() as f64
     } else {
         0.0
     };
 
     let baseline_centroid = if !baseline_windows.is_empty() {
-        baseline_windows.iter().map(|w| w.spectral_centroid).sum::<f64>() / baseline_windows.len() as f64
+        baseline_windows
+            .iter()
+            .map(|w| w.spectral_centroid)
+            .sum::<f64>()
+            / baseline_windows.len() as f64
     } else {
         10.0
     };
@@ -536,7 +536,8 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
     let baseline_band_powers = mean_band_powers(&baseline_windows);
 
     // Post-spike windows
-    let post_spike_windows: Vec<&WindowMetrics> = windows.iter()
+    let post_spike_windows: Vec<&WindowMetrics> = windows
+        .iter()
         .filter(|w| w.time_s > spike_window_time)
         .collect();
 
@@ -558,28 +559,48 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
     };
 
     // Peak frequency deviation
-    let peak_freq_deviation = post_spike_windows.iter()
+    let peak_freq_deviation = post_spike_windows
+        .iter()
         .map(|w| (w.dominant_freq - baseline_dominant_freq).abs())
         .fold(0.0_f64, f64::max);
 
     // Entrainment recovery times (original metrics — kept for backward compat)
     let recovery_50_ms = compute_recovery_time(
-        &post_spike_windows, baseline_entrainment, 0.50, spike_window_time,
+        &post_spike_windows,
+        baseline_entrainment,
+        0.50,
+        spike_window_time,
     );
     let recovery_90_ms = compute_recovery_time(
-        &post_spike_windows, baseline_entrainment, 0.90, spike_window_time,
+        &post_spike_windows,
+        baseline_entrainment,
+        0.90,
+        spike_window_time,
     );
 
     // ── Spectral resilience metrics (Priority 15) ──────────────────
     let bppr = compute_bppr(&baseline_band_powers, &post_spike_windows);
     let spectral_recovery_50_ms = compute_spectral_recovery(
-        &baseline_band_powers, &baseline_windows, &post_spike_windows, 0.50, spike_window_time,
+        &baseline_band_powers,
+        &baseline_windows,
+        &post_spike_windows,
+        0.50,
+        spike_window_time,
     );
     let spectral_recovery_90_ms = compute_spectral_recovery(
-        &baseline_band_powers, &baseline_windows, &post_spike_windows, 0.90, spike_window_time,
+        &baseline_band_powers,
+        &baseline_windows,
+        &post_spike_windows,
+        0.90,
+        spike_window_time,
     );
     let scdi_hz = compute_scdi(baseline_centroid, &post_spike_windows);
-    let spectral_resilience = compute_spectral_resilience(bppr, spectral_recovery_50_ms, spectral_recovery_90_ms, scdi_hz);
+    let spectral_resilience = compute_spectral_resilience(
+        bppr,
+        spectral_recovery_50_ms,
+        spectral_recovery_90_ms,
+        scdi_hz,
+    );
 
     DisturbResult {
         windows,
@@ -637,10 +658,14 @@ fn mean_band_powers(windows: &[&WindowMetrics]) -> [f64; 5] {
     }
     let mut sum = [0.0_f64; 5];
     for w in windows {
-        for b in 0..5 { sum[b] += w.band_powers[b]; }
+        for b in 0..5 {
+            sum[b] += w.band_powers[b];
+        }
     }
     let n = windows.len() as f64;
-    for b in 0..5 { sum[b] /= n; }
+    for b in 0..5 {
+        sum[b] /= n;
+    }
     sum
 }
 
@@ -651,10 +676,7 @@ fn mean_band_powers(windows: &[&WindowMetrics]) -> [f64; 5] {
 /// matter equally" approach (goal-specific weighting can be added later).
 ///
 /// BPPR = min over post-spike windows of (Σ_b min(P_b(t)/P_b_baseline, 1.0)) / 5
-fn compute_bppr(
-    baseline_bp: &[f64; 5],
-    post_spike: &[&WindowMetrics],
-) -> f64 {
+fn compute_bppr(baseline_bp: &[f64; 5], post_spike: &[&WindowMetrics]) -> f64 {
     if post_spike.is_empty() {
         return 1.0;
     }
@@ -667,8 +689,8 @@ fn compute_bppr(
         for b in 0..5 {
             if baseline_bp[b] > 1e-6 {
                 let ratio = (w.band_powers[b] / baseline_bp[b]).min(2.0); // cap at 2x to avoid overshoot weighting
-                // ERD: ratio < 1.0 means desynchronization
-                // ERS: ratio > 1.0 means rebound — treat as preserved
+                                                                          // ERD: ratio < 1.0 means desynchronization
+                                                                          // ERS: ratio > 1.0 means rebound — treat as preserved
                 window_preservation += ratio.min(1.0);
                 count += 1;
             }
@@ -719,16 +741,19 @@ fn compute_spectral_recovery(
     let baseline_std = if pre_spike_windows.len() > 2 {
         let baseline_devs: Vec<f64> = pre_spike_windows.iter().map(|w| deviation_of(w)).collect();
         let mean_dev = baseline_devs.iter().sum::<f64>() / baseline_devs.len() as f64;
-        let variance = baseline_devs.iter()
+        let variance = baseline_devs
+            .iter()
             .map(|d| (d - mean_dev).powi(2))
-            .sum::<f64>() / baseline_devs.len() as f64;
+            .sum::<f64>()
+            / baseline_devs.len() as f64;
         variance.sqrt()
     } else {
         0.0
     };
 
     // Post-spike deviations
-    let deviations: Vec<(f64, f64)> = post_spike.iter()
+    let deviations: Vec<(f64, f64)> = post_spike
+        .iter()
         .map(|w| (w.time_s, deviation_of(w)))
         .collect();
 
@@ -744,7 +769,8 @@ fn compute_spectral_recovery(
     let excess = (max_dev - baseline_std).max(0.0);
     let threshold = baseline_std + excess * (1.0 - fraction);
 
-    let nadir_time = deviations.iter()
+    let nadir_time = deviations
+        .iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .map(|(t, _)| *t)
         .unwrap_or(spike_time);
@@ -761,14 +787,12 @@ fn compute_spectral_recovery(
 ///
 /// Mean absolute centroid deviation from baseline across post-spike windows.
 /// Lower is better. 0.0 = no spectral displacement.
-fn compute_scdi(
-    baseline_centroid: f64,
-    post_spike: &[&WindowMetrics],
-) -> f64 {
+fn compute_scdi(baseline_centroid: f64, post_spike: &[&WindowMetrics]) -> f64 {
     if post_spike.is_empty() {
         return 0.0;
     }
-    let sum: f64 = post_spike.iter()
+    let sum: f64 = post_spike
+        .iter()
         .map(|w| (w.spectral_centroid - baseline_centroid).abs())
         .sum();
     sum / post_spike.len() as f64
@@ -827,7 +851,10 @@ mod tests {
         let w = make_window(5.5, baseline, 10.0);
         let post = vec![&w];
         let bppr = compute_bppr(&baseline, &post);
-        assert!((bppr - 1.0).abs() < 1e-6, "No change → BPPR=1.0, got {bppr}");
+        assert!(
+            (bppr - 1.0).abs() < 1e-6,
+            "No change → BPPR=1.0, got {bppr}"
+        );
     }
 
     #[test]
@@ -892,7 +919,10 @@ mod tests {
     fn scdi_zero_when_no_deviation() {
         let w = make_window(5.5, [0.2; 5], 10.0);
         let scdi = compute_scdi(10.0, &[&w]);
-        assert!((scdi - 0.0).abs() < 1e-6, "No deviation → SCDI=0, got {scdi}");
+        assert!(
+            (scdi - 0.0).abs() < 1e-6,
+            "No deviation → SCDI=0, got {scdi}"
+        );
     }
 
     #[test]
@@ -901,7 +931,10 @@ mod tests {
         let w2 = make_window(6.0, [0.2; 5], 12.0); // partially recovered
         let scdi = compute_scdi(10.0, &[&w1, &w2]);
         assert!(scdi > 0.0, "Centroid shift → SCDI > 0, got {scdi}");
-        assert!((scdi - 3.5).abs() < 0.01, "SCDI should be (5+2)/2=3.5, got {scdi}");
+        assert!(
+            (scdi - 3.5).abs() < 0.01,
+            "SCDI should be (5+2)/2=3.5, got {scdi}"
+        );
     }
 
     // ═══ Composite resilience tests ═══
@@ -923,12 +956,17 @@ mod tests {
         // SRT 90% not recovered but SRT 50% is — should get partial credit
         let r_with_90 = compute_spectral_resilience(0.5, Some(500.0), Some(500.0), 1.0);
         let r_only_50 = compute_spectral_resilience(0.5, Some(500.0), None, 1.0);
-        assert!(r_only_50 > 0.0, "Should get partial credit with SRT 50% fallback");
+        assert!(
+            r_only_50 > 0.0,
+            "Should get partial credit with SRT 50% fallback"
+        );
         // Fallback gives norm_srt = 0.5 + 0.5*(500/10000) = 0.525
         // With 90%: norm_srt = 500/2000 = 0.25
         // So fallback scores lower (higher norm_srt → lower score)
-        assert!(r_only_50 < r_with_90,
-            "Fallback ({r_only_50:.3}) should score lower than full recovery ({r_with_90:.3})");
+        assert!(
+            r_only_50 < r_with_90,
+            "Fallback ({r_only_50:.3}) should score lower than full recovery ({r_with_90:.3})"
+        );
     }
 
     #[test]

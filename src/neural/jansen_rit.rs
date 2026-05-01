@@ -19,7 +19,6 @@
 ///
 /// When g_fast_gain = 0, the model degenerates to the classic JR 1995
 /// 6-state system (y3 stays at zero, EEG = y1 - y2).
-
 use crate::brain_type::{BandModelType, BilateralParams, TonotopicParams};
 use crate::neural::wilson_cowan::WilsonCowanModel;
 use rustfft::{num_complex::Complex, FftPlanner};
@@ -27,22 +26,22 @@ use std::f64::consts::PI;
 
 // ── Standard Jansen-Rit parameters ──────────────────────────────────────────
 
-const A: f64 = 3.25;     // Excitatory synaptic gain (mV)
-const B: f64 = 22.0;     // Inhibitory synaptic gain (mV)
+const A: f64 = 3.25; // Excitatory synaptic gain (mV)
+const B: f64 = 22.0; // Inhibitory synaptic gain (mV)
 const A_RATE: f64 = 100.0; // Excitatory time constant (1/s)
-const B_RATE: f64 = 50.0;  // Inhibitory time constant (1/s)
+const B_RATE: f64 = 50.0; // Inhibitory time constant (1/s)
 
 // Sigmoid parameters
-const V_MAX: f64 = 5.0;  // Max firing rate (1/s)
-const V0: f64 = 6.0;     // Firing threshold (mV)
-const R: f64 = 0.62;     // Sigmoid steepness (1/mV) — Universal sweet spot (0.56→0.65→0.62)
+const V_MAX: f64 = 5.0; // Max firing rate (1/s)
+const V0: f64 = 6.0; // Firing threshold (mV)
+const R: f64 = 0.62; // Sigmoid steepness (1/mV) — Universal sweet spot (0.56→0.65→0.62)
 
 // Connectivity constants (from Jansen & Rit 1995)
 const C: f64 = 135.0;
 const C1: f64 = C;
 const C2: f64 = 0.8 * C;
-const C3: f64 = 0.20 * C;    // Universal: loosen GABA-B for beta access (0.25→0.225→0.20)
-const C4: f64 = 0.20 * C;    // Universal: allow fast loop to drive SMR/beta
+const C3: f64 = 0.20 * C; // Universal: loosen GABA-B for beta access (0.25→0.225→0.20)
+const C4: f64 = 0.20 * C; // Universal: allow fast loop to drive SMR/beta
 
 /// Frequency bands for EEG analysis (Hz).
 pub struct BandPowers {
@@ -382,7 +381,13 @@ impl JansenRitModel {
     /// This models presynaptic GABA_B receptor activation reducing glutamate
     /// release, per Bhatt et al. and the DCM gain-modulation formulation.
     #[inline]
-    fn derivatives_with_habituation(&self, y: &[f64; 8], p: f64, c_scale: f64, a_mod: f64) -> [f64; 8] {
+    fn derivatives_with_habituation(
+        &self,
+        y: &[f64; 8],
+        p: f64,
+        c_scale: f64,
+        a_mod: f64,
+    ) -> [f64; 8] {
         let v_pyr = y[1] - y[2] - y[3];
         let sig_vpyr = self.sigmoid(v_pyr);
         let sig_c1_y0 = self.sigmoid(self.c1 * c_scale * y[0]);
@@ -511,7 +516,11 @@ impl JansenRitModel {
         let mut y3_trace = vec![0.0_f64; n];
 
         let mut y = [0.001_f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let sub_steps = if self.g_fast_rate > 200.0 { 3_usize } else { 2_usize };
+        let sub_steps = if self.g_fast_rate > 200.0 {
+            3_usize
+        } else {
+            2_usize
+        };
 
         let h = self.dt / sub_steps as f64;
 
@@ -527,11 +536,17 @@ impl JansenRitModel {
             for _ in 0..sub_steps {
                 let k1 = self.derivatives(&y, warmup_p);
                 let mut y_tmp = [0.0; 8];
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k1[j];
+                }
                 let k2 = self.derivatives(&y_tmp, warmup_p);
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k2[j];
+                }
                 let k3 = self.derivatives(&y_tmp, warmup_p);
-                for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + h * k3[j];
+                }
                 let k4 = self.derivatives(&y_tmp, warmup_p);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
@@ -539,11 +554,17 @@ impl JansenRitModel {
                 if slow_enabled {
                     let s1 = self.slow_inhib_derivatives(&y, &y_slow);
                     let s2 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]],
+                    );
                     let s3 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]],
+                    );
                     let s4 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                        &y,
+                        &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]],
+                    );
                     y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
                     y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
@@ -597,11 +618,17 @@ impl JansenRitModel {
             for _ in 0..sub_steps {
                 let k1 = self.derivatives_with_habituation(&y, p, c_scale, a_mod);
                 let mut y_tmp = [0.0; 8];
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k1[j];
+                }
                 let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k2[j];
+                }
                 let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
-                for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + h * k3[j];
+                }
                 let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
@@ -615,11 +642,17 @@ impl JansenRitModel {
                 if slow_enabled {
                     let s1 = self.slow_inhib_derivatives(&y, &y_slow);
                     let s2 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]],
+                    );
                     let s3 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]],
+                    );
                     let s4 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                        &y,
+                        &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]],
+                    );
                     y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
                     y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
@@ -645,7 +678,15 @@ impl JansenRitModel {
         let band_powers = self.compute_band_powers(&eeg_detrended);
         let dominant_freq = self.find_dominant_frequency(&eeg_detrended);
 
-        (JansenRitResult { eeg, band_powers, dominant_freq, fast_inhib_trace: y3_trace.clone() }, y3_trace)
+        (
+            JansenRitResult {
+                eeg,
+                band_powers,
+                dominant_freq,
+                fast_inhib_trace: y3_trace.clone(),
+            },
+            y3_trace,
+        )
     }
 
     /// Simulate the Wendling/JR model with external input.
@@ -655,7 +696,11 @@ impl JansenRitModel {
         let n = input.len();
         let mut eeg = vec![0.0_f64; n];
         let has_fast_inhib = self.g_fast_gain > 0.0;
-        let mut y3_trace = if has_fast_inhib { vec![0.0_f64; n] } else { Vec::new() };
+        let mut y3_trace = if has_fast_inhib {
+            vec![0.0_f64; n]
+        } else {
+            Vec::new()
+        };
 
         // State: [y0, y1, y2, y3, y4, y5, y6, y7]
         // y3/y7 = fast inhibitory (GABA-A), zero-initialised → JR95 compat
@@ -668,7 +713,11 @@ impl JansenRitModel {
         let slow_enabled = self.b_slow_gain > 0.0;
 
         // Use more sub-steps when fast inhibitory is active (g_rate up to 500)
-        let sub_steps = if self.g_fast_rate > 200.0 { 3_usize } else { 2_usize };
+        let sub_steps = if self.g_fast_rate > 200.0 {
+            3_usize
+        } else {
+            2_usize
+        };
         let h = self.dt / sub_steps as f64;
 
         // Warmup: run model for 1 second on the first input sample
@@ -679,11 +728,17 @@ impl JansenRitModel {
             for _ in 0..sub_steps {
                 let k1 = self.derivatives(&y, warmup_p);
                 let mut y_tmp = [0.0; 8];
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k1[j];
+                }
                 let k2 = self.derivatives(&y_tmp, warmup_p);
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k2[j];
+                }
                 let k3 = self.derivatives(&y_tmp, warmup_p);
-                for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + h * k3[j];
+                }
                 let k4 = self.derivatives(&y_tmp, warmup_p);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
@@ -691,11 +746,17 @@ impl JansenRitModel {
                 if slow_enabled {
                     let s1 = self.slow_inhib_derivatives(&y, &y_slow);
                     let s2 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]],
+                    );
                     let s3 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]],
+                    );
                     let s4 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                        &y,
+                        &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]],
+                    );
                     y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
                     y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
@@ -743,11 +804,17 @@ impl JansenRitModel {
             for _ in 0..sub_steps {
                 let k1 = self.derivatives_with_habituation(&y, p, c_scale, a_mod);
                 let mut y_tmp = [0.0; 8];
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k1[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k1[j];
+                }
                 let k2 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
-                for j in 0..8 { y_tmp[j] = y[j] + 0.5 * h * k2[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + 0.5 * h * k2[j];
+                }
                 let k3 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
-                for j in 0..8 { y_tmp[j] = y[j] + h * k3[j]; }
+                for j in 0..8 {
+                    y_tmp[j] = y[j] + h * k3[j];
+                }
                 let k4 = self.derivatives_with_habituation(&y_tmp, p, c_scale, a_mod);
                 for j in 0..8 {
                     y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
@@ -761,11 +828,17 @@ impl JansenRitModel {
                 if slow_enabled {
                     let s1 = self.slow_inhib_derivatives(&y, &y_slow);
                     let s2 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]],
+                    );
                     let s3 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]]);
+                        &y,
+                        &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]],
+                    );
                     let s4 = self.slow_inhib_derivatives(
-                        &y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                        &y,
+                        &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]],
+                    );
                     y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
                     y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
                 }
@@ -934,7 +1007,11 @@ pub fn simulate_tonotopic(
     let n = band_signals[0].len();
     let mut combined_eeg = vec![0.0_f64; n];
     let has_fast_inhib = fast_inhib.g_fast_gain > 0.0;
-    let mut combined_y3 = if has_fast_inhib { vec![0.0_f64; n] } else { Vec::new() };
+    let mut combined_y3 = if has_fast_inhib {
+        vec![0.0_f64; n]
+    } else {
+        Vec::new()
+    };
 
     // Run 4 independent Wendling/JR models, sqrt-compress each band's RMS,
     // then mix by energy fraction. Sqrt-compression (norm = 1/√rms rather
@@ -947,7 +1024,10 @@ pub fn simulate_tonotopic(
         let input_signal = if (gain - 1.0).abs() < 1e-6 {
             band_signals[b].clone()
         } else {
-            band_signals[b].iter().map(|&x| (x * gain).min(1.0)).collect()
+            band_signals[b]
+                .iter()
+                .map(|&x| (x * gain).min(1.0))
+                .collect()
         };
 
         // Dispatch: JansenRit or WilsonCowan per band
@@ -966,9 +1046,18 @@ pub fn simulate_tonotopic(
                     c7: tono.band_c7[b],
                 };
                 let mut jr = JansenRitModel::with_wendling_params(
-                    sample_rate, a_gain, b_gain, a_rate, b_rate,
-                    c, tono.band_offsets[b], input_scale,
-                    &band_fi, band_slow_inhib, band_v0, band_r,
+                    sample_rate,
+                    a_gain,
+                    b_gain,
+                    a_rate,
+                    b_rate,
+                    c,
+                    tono.band_offsets[b],
+                    input_scale,
+                    &band_fi,
+                    band_slow_inhib,
+                    band_v0,
+                    band_r,
                 );
                 let c1c2_scale = tono.band_c1c2_scale[b];
                 if (c1c2_scale - 1.0).abs() > 1e-6 {
@@ -982,8 +1071,11 @@ pub fn simulate_tonotopic(
                 // WC shifts natural frequency toward input's dominant modulation
                 // if within ±5 Hz Arnold tongue.
                 let wc = WilsonCowanModel::for_frequency_adaptive(
-                    sample_rate, target_hz, input_scale as f64 * 0.01,
-                    &input_signal, 5.0,
+                    sample_rate,
+                    target_hz,
+                    input_scale as f64 * 0.01,
+                    &input_signal,
+                    5.0,
                 );
                 let result = wc.simulate(&input_signal);
                 (result.eeg, result.inhib_trace)
@@ -1086,12 +1178,8 @@ pub fn simulate_bilateral(
     // Mix input for each hemisphere:
     // Right hemisphere ← 65% left ear (contra) + 35% right ear (ipsi)
     // Left hemisphere  ← 65% right ear (contra) + 35% left ear (ipsi)
-    let mut rh_bands: [Vec<f64>; 4] = [
-        vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n],
-    ];
-    let mut lh_bands: [Vec<f64>; 4] = [
-        vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n],
-    ];
+    let mut rh_bands: [Vec<f64>; 4] = [vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+    let mut lh_bands: [Vec<f64>; 4] = [vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]];
     let mut rh_energy = [0.0_f64; 4];
     let mut lh_energy = [0.0_f64; 4];
 
@@ -1107,20 +1195,52 @@ pub fn simulate_bilateral(
     // Normalise energy fractions
     let rh_sum: f64 = rh_energy.iter().sum();
     let lh_sum: f64 = lh_energy.iter().sum();
-    if rh_sum > 1e-30 { for e in &mut rh_energy { *e /= rh_sum; } }
-    if lh_sum > 1e-30 { for e in &mut lh_energy { *e /= lh_sum; } }
+    if rh_sum > 1e-30 {
+        for e in &mut rh_energy {
+            *e /= rh_sum;
+        }
+    }
+    if lh_sum > 1e-30 {
+        for e in &mut lh_energy {
+            *e /= lh_sum;
+        }
+    }
 
     // Phase 1: Run each hemisphere's tonotopic model independently.
     // This gives us the base per-hemisphere EEG and y[3] traces.
     let (rh_eeg, rh_y3) = run_hemisphere_tonotopic(
-        &rh_bands, &rh_energy, &bilateral.right, c, input_scale, sample_rate, fast_inhib,
-        v0, habituation_rate, habituation_recovery, stochastic_sigma,
-        b_slow_gain, b_slow_rate, c_slow, arousal,
+        &rh_bands,
+        &rh_energy,
+        &bilateral.right,
+        c,
+        input_scale,
+        sample_rate,
+        fast_inhib,
+        v0,
+        habituation_rate,
+        habituation_recovery,
+        stochastic_sigma,
+        b_slow_gain,
+        b_slow_rate,
+        c_slow,
+        arousal,
     );
     let (lh_eeg, lh_y3) = run_hemisphere_tonotopic(
-        &lh_bands, &lh_energy, &bilateral.left, c, input_scale, sample_rate, fast_inhib,
-        v0, habituation_rate, habituation_recovery, stochastic_sigma,
-        b_slow_gain, b_slow_rate, c_slow, arousal,
+        &lh_bands,
+        &lh_energy,
+        &bilateral.left,
+        c,
+        input_scale,
+        sample_rate,
+        fast_inhib,
+        v0,
+        habituation_rate,
+        habituation_recovery,
+        stochastic_sigma,
+        b_slow_gain,
+        b_slow_rate,
+        c_slow,
+        arousal,
     );
 
     // Phase 2: Apply callosal coupling (INHIBITORY).
@@ -1143,8 +1263,16 @@ pub fn simulate_bilateral(
     let mut lh_coupled = vec![0.0_f64; n];
 
     for i in 0..n {
-        let delayed_lh = if i >= delay_samples { lh_eeg[i - delay_samples] } else { 0.0 };
-        let delayed_rh = if i >= delay_samples { rh_eeg[i - delay_samples] } else { 0.0 };
+        let delayed_lh = if i >= delay_samples {
+            lh_eeg[i - delay_samples]
+        } else {
+            0.0
+        };
+        let delayed_rh = if i >= delay_samples {
+            rh_eeg[i - delay_samples]
+        } else {
+            0.0
+        };
 
         // Inhibitory coupling: subtract contralateral signal
         rh_coupled[i] = rh_eeg[i] - k * delayed_lh;
@@ -1230,7 +1358,11 @@ fn run_hemisphere_tonotopic(
     let n = bands[0].len();
     let mut eeg = vec![0.0_f64; n];
     let has_fast_inhib = fast_inhib.g_fast_gain > 0.0;
-    let mut y3 = if has_fast_inhib { vec![0.0_f64; n] } else { Vec::new() };
+    let mut y3 = if has_fast_inhib {
+        vec![0.0_f64; n]
+    } else {
+        Vec::new()
+    };
 
     for b in 0..4 {
         // Apply per-band input gain scaling
@@ -1258,9 +1390,18 @@ fn run_hemisphere_tonotopic(
                 };
 
                 let mut jr = JansenRitModel::with_wendling_params(
-                    sample_rate, a_gain, b_gain, a_rate, b_rate,
-                    c, params.band_offsets[b], input_scale, &band_fi,
-                    band_slow_inhib, band_v0, band_r,
+                    sample_rate,
+                    a_gain,
+                    b_gain,
+                    a_rate,
+                    b_rate,
+                    c,
+                    params.band_offsets[b],
+                    input_scale,
+                    &band_fi,
+                    band_slow_inhib,
+                    band_v0,
+                    band_r,
                 );
                 jr.habituation_rate = habituation_rate;
                 jr.habituation_recovery = habituation_recovery;
@@ -1281,8 +1422,11 @@ fn run_hemisphere_tonotopic(
                 // WC shifts natural frequency toward input's dominant modulation
                 // if within ±5 Hz Arnold tongue.
                 let wc = WilsonCowanModel::for_frequency_adaptive(
-                    sample_rate, target_hz, input_scale as f64 * 0.01,
-                    &input_signal, 5.0,
+                    sample_rate,
+                    target_hz,
+                    input_scale as f64 * 0.01,
+                    &input_signal,
+                    5.0,
                 );
                 let result = wc.simulate(&input_signal);
                 (result.eeg, result.inhib_trace)
@@ -1342,10 +1486,7 @@ mod tests {
         );
         // Large negative → 0
         let s_low = jr.sigmoid(-100.0);
-        assert!(
-            s_low.abs() < 1e-6,
-            "S(-100) should be ~0, got {s_low}"
-        );
+        assert!(s_low.abs() < 1e-6, "S(-100) should be ~0, got {s_low}");
     }
 
     #[test]
@@ -1440,7 +1581,7 @@ mod tests {
     #[test]
     fn jr95_derivatives_y3_y7_are_zero() {
         let mut jr = JansenRitModel::new(SR); // g_fast_gain = 0
-        // State with non-zero y0..y2, but y3=y7=0
+                                              // State with non-zero y0..y2, but y3=y7=0
         let y = [1.0, 2.0, 1.5, 0.0, 0.1, 0.2, -0.1, 0.0];
         let dy = jr.derivatives(&y, 200.0);
 
@@ -1464,8 +1605,7 @@ mod tests {
             c7: 108.0,
         };
         let mut jr = JansenRitModel::with_wendling_params(
-            SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0,
-            &fi, 0.20, V0, R,
+            SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0, &fi, 0.20, V0, R,
         );
         let input = vec![0.5; 3000];
         let result = jr.simulate(&input);
@@ -1474,7 +1614,11 @@ mod tests {
             !result.fast_inhib_trace.is_empty(),
             "Wendling mode should record fast inhibitory trace"
         );
-        let y3_max = result.fast_inhib_trace.iter().cloned().fold(0.0_f64, f64::max);
+        let y3_max = result
+            .fast_inhib_trace
+            .iter()
+            .cloned()
+            .fold(0.0_f64, f64::max);
         assert!(
             y3_max.abs() > 1e-6,
             "Fast inhibitory trace should be non-zero, max |y3| = {y3_max}"
@@ -1637,8 +1781,7 @@ mod tests {
             c7: 108.0,
         };
         let mut jr = JansenRitModel::with_wendling_params(
-            SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0,
-            &fi, 0.20, V0, R,
+            SR, A, B, A_RATE, B_RATE, C, 200.0, 100.0, &fi, 0.20, V0, R,
         );
         let input = vec![0.5; 2000];
 
@@ -1652,7 +1795,10 @@ mod tests {
 
         // y3 should be non-trivially active
         let y3_rms = (y3_trace.iter().map(|x| x * x).sum::<f64>() / y3_trace.len() as f64).sqrt();
-        assert!(y3_rms > 1e-6, "y3 should be active in Wendling mode, rms = {y3_rms}");
+        assert!(
+            y3_rms > 1e-6,
+            "y3 should be active in Wendling mode, rms = {y3_rms}"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1673,8 +1819,8 @@ mod tests {
     fn with_wendling_slow_inhib_ratio_applied() {
         let fi = FastInhibParams::default();
         let mut jr = JansenRitModel::with_wendling_params(
-            SR, A, B, A_RATE, B_RATE, 135.0, 200.0, 100.0,
-            &fi, 0.15, V0, R, // slow_inhib_ratio = 0.15
+            SR, A, B, A_RATE, B_RATE, 135.0, 200.0, 100.0, &fi, 0.15, V0,
+            R, // slow_inhib_ratio = 0.15
         );
         assert_eq!(jr.c3, 0.15 * 135.0);
         assert_eq!(jr.c4, 0.15 * 135.0);
@@ -1740,7 +1886,8 @@ mod tests {
         let result = jr.simulate(&input);
 
         let mean = result.eeg.iter().sum::<f64>() / result.eeg.len() as f64;
-        let var = result.eeg.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / result.eeg.len() as f64;
+        let var =
+            result.eeg.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / result.eeg.len() as f64;
         assert!(
             var > 1e-6,
             "Wendling model with varying input should oscillate, var = {var}"
@@ -1956,26 +2103,46 @@ mod tests {
 
         let half = n / 2;
         let std_off = {
-            let m: f64 = r_off.eeg[half..].iter().sum::<f64>() / (n-half) as f64;
-            (r_off.eeg[half..].iter().map(|x| (x-m).powi(2)).sum::<f64>() / (n-half) as f64).sqrt()
+            let m: f64 = r_off.eeg[half..].iter().sum::<f64>() / (n - half) as f64;
+            (r_off.eeg[half..]
+                .iter()
+                .map(|x| (x - m).powi(2))
+                .sum::<f64>()
+                / (n - half) as f64)
+                .sqrt()
         };
         let std_on = {
-            let m: f64 = r_on.eeg[half..].iter().sum::<f64>() / (n-half) as f64;
-            (r_on.eeg[half..].iter().map(|x| (x-m).powi(2)).sum::<f64>() / (n-half) as f64).sqrt()
+            let m: f64 = r_on.eeg[half..].iter().sum::<f64>() / (n - half) as f64;
+            (r_on.eeg[half..]
+                .iter()
+                .map(|x| (x - m).powi(2))
+                .sum::<f64>()
+                / (n - half) as f64)
+                .sqrt()
         };
 
         let bp_off = jr_off.compute_band_powers(&r_off.eeg[half..]);
         let bp_on = jr_on.compute_band_powers(&r_on.eeg[half..]);
 
         eprintln!("=== GABA_B GAIN MODULATION DIAGNOSTIC ===");
-        eprintln!("Baseline:  EEG std={:.4}  α={:.3}  θ={:.3}  δ={:.3}",
-            std_off, bp_off.alpha, bp_off.theta, bp_off.delta);
-        eprintln!("GABA_B on: EEG std={:.4}  α={:.3}  θ={:.3}  δ={:.3}",
-            std_on, bp_on.alpha, bp_on.theta, bp_on.delta);
-        eprintln!("Circuit alive: {}", if std_on > 0.01 { "YES" } else { "NO" });
+        eprintln!(
+            "Baseline:  EEG std={:.4}  α={:.3}  θ={:.3}  δ={:.3}",
+            std_off, bp_off.alpha, bp_off.theta, bp_off.delta
+        );
+        eprintln!(
+            "GABA_B on: EEG std={:.4}  α={:.3}  θ={:.3}  δ={:.3}",
+            std_on, bp_on.alpha, bp_on.theta, bp_on.delta
+        );
+        eprintln!(
+            "Circuit alive: {}",
+            if std_on > 0.01 { "YES" } else { "NO" }
+        );
 
-        assert!(std_on > 0.01,
-            "GABA_B gain modulation must not kill circuit: EEG std={:.6}", std_on);
+        assert!(
+            std_on > 0.01,
+            "GABA_B gain modulation must not kill circuit: EEG std={:.6}",
+            std_on
+        );
     }
 
     // Old diagnostic test removed — replaced by gaba_b_diagnostic_gain_modulation
@@ -2002,19 +2169,35 @@ mod tests {
         for _ in 0..(2 * SR as usize) {
             for _ in 0..sub_steps {
                 let k1 = jr.derivatives(&y, warmup_p);
-                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y[j]+0.5*h*k1[j]; }
+                let mut yt = [0.0; 8];
+                for j in 0..8 {
+                    yt[j] = y[j] + 0.5 * h * k1[j];
+                }
                 let k2 = jr.derivatives(&yt, warmup_p);
-                for j in 0..8 { yt[j] = y[j]+0.5*h*k2[j]; }
+                for j in 0..8 {
+                    yt[j] = y[j] + 0.5 * h * k2[j];
+                }
                 let k3 = jr.derivatives(&yt, warmup_p);
-                for j in 0..8 { yt[j] = y[j]+h*k3[j]; }
+                for j in 0..8 {
+                    yt[j] = y[j] + h * k3[j];
+                }
                 let k4 = jr.derivatives(&yt, warmup_p);
-                for j in 0..8 { y[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                for j in 0..8 {
+                    y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
                 let s1 = jr.slow_inhib_derivatives(&y, &y_slow);
-                let s2 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s1[0], y_slow[1]+0.5*h*s1[1]]);
-                let s3 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s2[0], y_slow[1]+0.5*h*s2[1]]);
-                let s4 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+h*s3[0], y_slow[1]+h*s3[1]]);
-                y_slow[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
-                y_slow[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+                let s2 = jr.slow_inhib_derivatives(
+                    &y,
+                    &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]],
+                );
+                let s3 = jr.slow_inhib_derivatives(
+                    &y,
+                    &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]],
+                );
+                let s4 =
+                    jr.slow_inhib_derivatives(&y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
             }
         }
 
@@ -2028,19 +2211,35 @@ mod tests {
             let p = warmup_p;
             for _ in 0..sub_steps {
                 let k1 = jr.derivatives(&y, p);
-                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y[j]+0.5*h*k1[j]; }
+                let mut yt = [0.0; 8];
+                for j in 0..8 {
+                    yt[j] = y[j] + 0.5 * h * k1[j];
+                }
                 let k2 = jr.derivatives(&yt, p);
-                for j in 0..8 { yt[j] = y[j]+0.5*h*k2[j]; }
+                for j in 0..8 {
+                    yt[j] = y[j] + 0.5 * h * k2[j];
+                }
                 let k3 = jr.derivatives(&yt, p);
-                for j in 0..8 { yt[j] = y[j]+h*k3[j]; }
+                for j in 0..8 {
+                    yt[j] = y[j] + h * k3[j];
+                }
                 let k4 = jr.derivatives(&yt, p);
-                for j in 0..8 { y[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                for j in 0..8 {
+                    y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
                 let s1 = jr.slow_inhib_derivatives(&y, &y_slow);
-                let s2 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s1[0], y_slow[1]+0.5*h*s1[1]]);
-                let s3 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+0.5*h*s2[0], y_slow[1]+0.5*h*s2[1]]);
-                let s4 = jr.slow_inhib_derivatives(&y, &[y_slow[0]+h*s3[0], y_slow[1]+h*s3[1]]);
-                y_slow[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
-                y_slow[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+                let s2 = jr.slow_inhib_derivatives(
+                    &y,
+                    &[y_slow[0] + 0.5 * h * s1[0], y_slow[1] + 0.5 * h * s1[1]],
+                );
+                let s3 = jr.slow_inhib_derivatives(
+                    &y,
+                    &[y_slow[0] + 0.5 * h * s2[0], y_slow[1] + 0.5 * h * s2[1]],
+                );
+                let s4 =
+                    jr.slow_inhib_derivatives(&y, &[y_slow[0] + h * s3[0], y_slow[1] + h * s3[1]]);
+                y_slow[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                y_slow[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
             }
             let vpyr = y[1] - y[2] - y[3] - y_slow[0];
             vpyr_vals.push(vpyr);
@@ -2050,14 +2249,19 @@ mod tests {
         }
 
         let yslow_mean: f64 = yslow_vals.iter().sum::<f64>() / n as f64;
-        let yslow_std: f64 = (yslow_vals.iter().map(|x| (x-yslow_mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        let yslow_std: f64 = (yslow_vals
+            .iter()
+            .map(|x| (x - yslow_mean).powi(2))
+            .sum::<f64>()
+            / n as f64)
+            .sqrt();
         let eeg_main_std: f64 = {
             let m: f64 = eeg_main.iter().sum::<f64>() / n as f64;
-            (eeg_main.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+            (eeg_main.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64).sqrt()
         };
         let eeg_full_std: f64 = {
             let m: f64 = eeg_full.iter().sum::<f64>() / n as f64;
-            (eeg_full.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+            (eeg_full.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64).sqrt()
         };
 
         // Test corrected params (C_slow=2, b_slow=10)
@@ -2080,19 +2284,35 @@ mod tests {
         for _ in 0..(2 * SR as usize) {
             for _ in 0..sub_steps {
                 let k1 = jr2.derivatives(&y2, warmup_p2);
-                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y2[j]+0.5*h*k1[j]; }
+                let mut yt = [0.0; 8];
+                for j in 0..8 {
+                    yt[j] = y2[j] + 0.5 * h * k1[j];
+                }
                 let k2 = jr2.derivatives(&yt, warmup_p2);
-                for j in 0..8 { yt[j] = y2[j]+0.5*h*k2[j]; }
+                for j in 0..8 {
+                    yt[j] = y2[j] + 0.5 * h * k2[j];
+                }
                 let k3 = jr2.derivatives(&yt, warmup_p2);
-                for j in 0..8 { yt[j] = y2[j]+h*k3[j]; }
+                for j in 0..8 {
+                    yt[j] = y2[j] + h * k3[j];
+                }
                 let k4 = jr2.derivatives(&yt, warmup_p2);
-                for j in 0..8 { y2[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                for j in 0..8 {
+                    y2[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
                 let s1 = jr2.slow_inhib_derivatives(&y2, &y_slow2);
-                let s2 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s1[0], y_slow2[1]+0.5*h*s1[1]]);
-                let s3 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s2[0], y_slow2[1]+0.5*h*s2[1]]);
-                let s4 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+h*s3[0], y_slow2[1]+h*s3[1]]);
-                y_slow2[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
-                y_slow2[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+                let s2 = jr2.slow_inhib_derivatives(
+                    &y2,
+                    &[y_slow2[0] + 0.5 * h * s1[0], y_slow2[1] + 0.5 * h * s1[1]],
+                );
+                let s3 = jr2.slow_inhib_derivatives(
+                    &y2,
+                    &[y_slow2[0] + 0.5 * h * s2[0], y_slow2[1] + 0.5 * h * s2[1]],
+                );
+                let s4 = jr2
+                    .slow_inhib_derivatives(&y2, &[y_slow2[0] + h * s3[0], y_slow2[1] + h * s3[1]]);
+                y_slow2[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                y_slow2[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
             }
         }
         let mut yslow2_vals = Vec::with_capacity(n);
@@ -2101,62 +2321,107 @@ mod tests {
         for _ in 0..n {
             for _ in 0..sub_steps {
                 let k1 = jr2.derivatives(&y2, warmup_p2);
-                let mut yt = [0.0; 8]; for j in 0..8 { yt[j] = y2[j]+0.5*h*k1[j]; }
+                let mut yt = [0.0; 8];
+                for j in 0..8 {
+                    yt[j] = y2[j] + 0.5 * h * k1[j];
+                }
                 let k2 = jr2.derivatives(&yt, warmup_p2);
-                for j in 0..8 { yt[j] = y2[j]+0.5*h*k2[j]; }
+                for j in 0..8 {
+                    yt[j] = y2[j] + 0.5 * h * k2[j];
+                }
                 let k3 = jr2.derivatives(&yt, warmup_p2);
-                for j in 0..8 { yt[j] = y2[j]+h*k3[j]; }
+                for j in 0..8 {
+                    yt[j] = y2[j] + h * k3[j];
+                }
                 let k4 = jr2.derivatives(&yt, warmup_p2);
-                for j in 0..8 { y2[j] += h/6.0*(k1[j]+2.0*k2[j]+2.0*k3[j]+k4[j]); }
+                for j in 0..8 {
+                    y2[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+                }
                 let s1 = jr2.slow_inhib_derivatives(&y2, &y_slow2);
-                let s2 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s1[0], y_slow2[1]+0.5*h*s1[1]]);
-                let s3 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+0.5*h*s2[0], y_slow2[1]+0.5*h*s2[1]]);
-                let s4 = jr2.slow_inhib_derivatives(&y2, &[y_slow2[0]+h*s3[0], y_slow2[1]+h*s3[1]]);
-                y_slow2[0] += h/6.0*(s1[0]+2.0*s2[0]+2.0*s3[0]+s4[0]);
-                y_slow2[1] += h/6.0*(s1[1]+2.0*s2[1]+2.0*s3[1]+s4[1]);
+                let s2 = jr2.slow_inhib_derivatives(
+                    &y2,
+                    &[y_slow2[0] + 0.5 * h * s1[0], y_slow2[1] + 0.5 * h * s1[1]],
+                );
+                let s3 = jr2.slow_inhib_derivatives(
+                    &y2,
+                    &[y_slow2[0] + 0.5 * h * s2[0], y_slow2[1] + 0.5 * h * s2[1]],
+                );
+                let s4 = jr2
+                    .slow_inhib_derivatives(&y2, &[y_slow2[0] + h * s3[0], y_slow2[1] + h * s3[1]]);
+                y_slow2[0] += h / 6.0 * (s1[0] + 2.0 * s2[0] + 2.0 * s3[0] + s4[0]);
+                y_slow2[1] += h / 6.0 * (s1[1] + 2.0 * s2[1] + 2.0 * s3[1] + s4[1]);
             }
             yslow2_vals.push(y_slow2[0]);
             eeg2_main.push(y2[1] - y2[2] - y2[3]);
             eeg2_full.push(y2[1] - y2[2] - y2[3] - y_slow2[0]);
         }
         let yslow2_mean: f64 = yslow2_vals.iter().sum::<f64>() / n as f64;
-        let yslow2_std: f64 = (yslow2_vals.iter().map(|x| (x-yslow2_mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        let yslow2_std: f64 = (yslow2_vals
+            .iter()
+            .map(|x| (x - yslow2_mean).powi(2))
+            .sum::<f64>()
+            / n as f64)
+            .sqrt();
         let eeg2_main_std: f64 = {
             let m: f64 = eeg2_main.iter().sum::<f64>() / n as f64;
-            (eeg2_main.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+            (eeg2_main.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64).sqrt()
         };
         let eeg2_full_std: f64 = {
             let m: f64 = eeg2_full.iter().sum::<f64>() / n as f64;
-            (eeg2_full.iter().map(|x| (x-m).powi(2)).sum::<f64>() / n as f64).sqrt()
+            (eeg2_full.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64).sqrt()
         };
 
         eprintln!("=== GABA_B DIAGNOSTIC (b_slow=5, B_slow=10, C_slow=30) — BROKEN ===");
-        eprintln!("y_slow[0]: mean={:.4} std={:.6} min={:.4} max={:.4}",
-            yslow_mean, yslow_std,
+        eprintln!(
+            "y_slow[0]: mean={:.4} std={:.6} min={:.4} max={:.4}",
+            yslow_mean,
+            yslow_std,
             yslow_vals.iter().cloned().fold(f64::INFINITY, f64::min),
-            yslow_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            yslow_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        );
         eprintln!("EEG without slow: std={:.4}", eeg_main_std);
         eprintln!("EEG with slow:    std={:.4}", eeg_full_std);
-        eprintln!("y_slow amplitude / EEG amplitude: {:.6}", yslow_std / eeg_main_std.max(1e-10));
-        eprintln!("y_slow DC / EEG std: {:.4}", yslow_mean.abs() / eeg_main_std.max(1e-10));
+        eprintln!(
+            "y_slow amplitude / EEG amplitude: {:.6}",
+            yslow_std / eeg_main_std.max(1e-10)
+        );
+        eprintln!(
+            "y_slow DC / EEG std: {:.4}",
+            yslow_mean.abs() / eeg_main_std.max(1e-10)
+        );
 
         eprintln!("");
         eprintln!("=== GABA_B DIAGNOSTIC (b_slow=10, B_slow=10, C_slow=2) — CORRECTED ===");
-        eprintln!("y_slow[0]: mean={:.4} std={:.6} min={:.4} max={:.4}",
-            yslow2_mean, yslow2_std,
+        eprintln!(
+            "y_slow[0]: mean={:.4} std={:.6} min={:.4} max={:.4}",
+            yslow2_mean,
+            yslow2_std,
             yslow2_vals.iter().cloned().fold(f64::INFINITY, f64::min),
-            yslow2_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            yslow2_vals
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max)
+        );
         eprintln!("EEG without slow: std={:.4}", eeg2_main_std);
         eprintln!("EEG with slow:    std={:.4}", eeg2_full_std);
-        eprintln!("y_slow DC / EEG std: {:.4}", yslow2_mean.abs() / eeg2_main_std.max(1e-10));
+        eprintln!(
+            "y_slow DC / EEG std: {:.4}",
+            yslow2_mean.abs() / eeg2_main_std.max(1e-10)
+        );
         let ratio2 = yslow2_std / eeg2_main_std.max(1e-10);
-        eprintln!(">>> GABA_B oscillation amplitude is {:.2}% of EEG amplitude", ratio2 * 100.0);
+        eprintln!(
+            ">>> GABA_B oscillation amplitude is {:.2}% of EEG amplitude",
+            ratio2 * 100.0
+        );
         eprintln!(">>> Circuit alive: EEG std = {:.4} mV", eeg2_full_std);
 
         assert!(yslow_mean.is_finite());
         // The corrected params should keep the circuit alive
-        assert!(eeg2_main_std > 0.01,
-            "Corrected GABA_B should not kill the circuit: EEG std={:.6}", eeg2_main_std);
+        assert!(
+            eeg2_main_std > 0.01,
+            "Corrected GABA_B should not kill the circuit: EEG std={:.6}",
+            eeg2_main_std
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2176,12 +2441,14 @@ mod tests {
         // Both should have lower dominant freq than the baseline (no GABA_B).
         // The b_slow=25 version should show more theta-band power.
         let n = 10000; // 10 seconds at 1 kHz
-        // Use modulated input — constant input lets the slow population
-        // settle to a fixed offset, which doesn't change spectral content.
-        // The slow loop needs temporal variation to produce resonance effects.
+                       // Use modulated input — constant input lets the slow population
+                       // settle to a fixed offset, which doesn't change spectral content.
+                       // The slow loop needs temporal variation to produce resonance effects.
         let input: Vec<f64> = (0..n)
-            .map(|i| 0.5 + 0.3 * (2.0 * PI * 5.0 * i as f64 / SR).sin()
-                     + 0.1 * (2.0 * PI * 0.5 * i as f64 / SR).sin())
+            .map(|i| {
+                0.5 + 0.3 * (2.0 * PI * 5.0 * i as f64 / SR).sin()
+                    + 0.1 * (2.0 * PI * 0.5 * i as f64 / SR).sin()
+            })
             .collect();
 
         // Baseline: no GABA_B
@@ -2206,8 +2473,10 @@ mod tests {
 
         // All outputs must be finite
         for bp in [&bp_off, &bp_slow5, &bp_slow25] {
-            assert!(bp.alpha.is_finite() && bp.theta.is_finite(),
-                "Band powers must be finite");
+            assert!(
+                bp.alpha.is_finite() && bp.theta.is_finite(),
+                "Band powers must be finite"
+            );
         }
 
         // The two GABA_B settings should produce DIFFERENT spectral profiles.
@@ -2220,10 +2489,14 @@ mod tests {
         // BALANCED theta-alpha coexistence, not the most theta.
         let theta_alpha_ratio_slow5 = if bp_slow5.alpha > 1e-10 {
             bp_slow5.theta / bp_slow5.alpha
-        } else { f64::INFINITY };
+        } else {
+            f64::INFINITY
+        };
         let theta_alpha_ratio_slow25 = if bp_slow25.alpha > 1e-10 {
             bp_slow25.theta / bp_slow25.alpha
-        } else { f64::INFINITY };
+        } else {
+            f64::INFINITY
+        };
 
         // b_slow=25 should produce a MORE BALANCED ratio (closer to 1.0)
         // than b_slow=5, which creates extreme theta dominance.
@@ -2257,8 +2530,10 @@ mod tests {
                     v.is_finite(),
                     "EEG[{i}] non-finite with b_slow_gain={gain} b_slow_rate={rate}: {v}"
                 );
-                assert!(v.abs() < 1e6,
-                    "EEG[{i}] blew up with b_slow_gain={gain} b_slow_rate={rate}: {v}");
+                assert!(
+                    v.abs() < 1e6,
+                    "EEG[{i}] blew up with b_slow_gain={gain} b_slow_rate={rate}: {v}"
+                );
             }
         }
     }
@@ -2281,8 +2556,11 @@ mod tests {
         let r_b = jr_b.simulate(&input);
 
         for (i, (&a, &b)) in r_a.eeg.iter().zip(r_b.eeg.iter()).enumerate() {
-            assert_eq!(a.to_bits(), b.to_bits(),
-                "Default GABA_B params must produce bitwise-identical output: sample {i}");
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "Default GABA_B params must produce bitwise-identical output: sample {i}"
+            );
         }
     }
 
@@ -2304,9 +2582,13 @@ mod tests {
         let r_old = jr_old.simulate(&input);
         let r_new = jr_new.simulate(&input);
 
-        let mad: f64 = r_old.eeg.iter().zip(r_new.eeg.iter())
+        let mad: f64 = r_old
+            .eeg
+            .iter()
+            .zip(r_new.eeg.iter())
             .map(|(a, b)| (a - b).abs())
-            .sum::<f64>() / r_old.eeg.len() as f64;
+            .sum::<f64>()
+            / r_old.eeg.len() as f64;
 
         assert!(mad > 1e-3,
             "Retuned GABA_B (b_slow=25) must produce different EEG than original (b_slow=5), MAD={mad:.6}");
@@ -2352,8 +2634,11 @@ mod tests {
 
         // Higher sigma should produce more evenly distributed band powers
         // (lower concentration in alpha, more in theta/delta)
-        let alpha_frac_det = bp_det.alpha / (bp_det.delta + bp_det.theta + bp_det.alpha + bp_det.beta + bp_det.gamma).max(1e-10);
-        let alpha_frac_high = bp_high.alpha / (bp_high.delta + bp_high.theta + bp_high.alpha + bp_high.beta + bp_high.gamma).max(1e-10);
+        let alpha_frac_det = bp_det.alpha
+            / (bp_det.delta + bp_det.theta + bp_det.alpha + bp_det.beta + bp_det.gamma).max(1e-10);
+        let alpha_frac_high = bp_high.alpha
+            / (bp_high.delta + bp_high.theta + bp_high.alpha + bp_high.beta + bp_high.gamma)
+                .max(1e-10);
 
         // With sufficient noise, alpha should be less dominant
         // (This test may need adjustment after 18a changes the noise placement)
@@ -2378,8 +2663,11 @@ mod tests {
         let r_b = jr_b.simulate(&input);
 
         for (i, (&a, &b)) in r_a.eeg.iter().zip(r_b.eeg.iter()).enumerate() {
-            assert_eq!(a.to_bits(), b.to_bits(),
-                "sigma=0 must be deterministic: sample {i} differs");
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "sigma=0 must be deterministic: sample {i} differs"
+            );
         }
     }
 
@@ -2397,10 +2685,8 @@ mod tests {
             let result = jr.simulate(&input);
 
             for (i, &v) in result.eeg.iter().enumerate() {
-                assert!(v.is_finite(),
-                    "EEG[{i}] non-finite at sigma={sigma}: {v}");
-                assert!(v.abs() < 1e8,
-                    "EEG[{i}] blew up at sigma={sigma}: {v}");
+                assert!(v.is_finite(), "EEG[{i}] non-finite at sigma={sigma}: {v}");
+                assert!(v.abs() < 1e8, "EEG[{i}] blew up at sigma={sigma}: {v}");
             }
         }
     }
@@ -2437,12 +2723,42 @@ mod tests {
         // genuine coexistence.
         let offsets: [f64; 6] = [160.0, 180.0, 200.0, 220.0, 240.0, 260.0];
 
-        struct Cfg { name: &'static str, sigma: f64, b_slow_gain: f64, b_slow_rate: f64, c_slow: f64 }
+        struct Cfg {
+            name: &'static str,
+            sigma: f64,
+            b_slow_gain: f64,
+            b_slow_rate: f64,
+            c_slow: f64,
+        }
         let configs = [
-            Cfg { name: "deterministic",       sigma:  0.0, b_slow_gain:  0.0, b_slow_rate: 0.0, c_slow:  0.0 },
-            Cfg { name: "stochastic-sigma-15", sigma: 15.0, b_slow_gain:  0.0, b_slow_rate: 0.0, c_slow:  0.0 },
-            Cfg { name: "cet-default",         sigma:  0.0, b_slow_gain: 10.0, b_slow_rate: 5.0, c_slow: 30.0 },
-            Cfg { name: "stochastic+cet",      sigma: 15.0, b_slow_gain: 10.0, b_slow_rate: 5.0, c_slow: 30.0 },
+            Cfg {
+                name: "deterministic",
+                sigma: 0.0,
+                b_slow_gain: 0.0,
+                b_slow_rate: 0.0,
+                c_slow: 0.0,
+            },
+            Cfg {
+                name: "stochastic-sigma-15",
+                sigma: 15.0,
+                b_slow_gain: 0.0,
+                b_slow_rate: 0.0,
+                c_slow: 0.0,
+            },
+            Cfg {
+                name: "cet-default",
+                sigma: 0.0,
+                b_slow_gain: 10.0,
+                b_slow_rate: 5.0,
+                c_slow: 30.0,
+            },
+            Cfg {
+                name: "stochastic+cet",
+                sigma: 15.0,
+                b_slow_gain: 10.0,
+                b_slow_rate: 5.0,
+                c_slow: 30.0,
+            },
         ];
 
         // Coexistence threshold: balance = min(θ, α) / (θ + α)  ≥ 0.40
@@ -2469,7 +2785,9 @@ mod tests {
 
                 let r = jr.simulate(&input);
                 let sum = r.band_powers.theta + r.band_powers.alpha;
-                if sum < MIN_OSC_POWER { continue; }
+                if sum < MIN_OSC_POWER {
+                    continue;
+                }
 
                 let balance = (r.band_powers.theta / sum).min(r.band_powers.alpha / sum);
 
@@ -2489,7 +2807,11 @@ mod tests {
              total_osc_power={:.3e}. The current JR model CAN sustain \
              mixed theta/alpha within the physiological operating range \
              — Priority 18 is unnecessary.",
-            best_balance, COEXISTENCE_THRESHOLD, best_cfg, best_offset, best_total
+            best_balance,
+            COEXISTENCE_THRESHOLD,
+            best_cfg,
+            best_offset,
+            best_total
         );
     }
 }

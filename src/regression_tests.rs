@@ -8,10 +8,12 @@
 #[cfg(test)]
 mod tests {
     use crate::brain_type::BrainType;
-    use crate::neural::jansen_rit::*;
     use crate::neural::fhn::*;
+    use crate::neural::jansen_rit::*;
     use crate::optimizer::DifferentialEvolution;
-    use crate::pipeline::{evaluate_preset, evaluate_preset_detailed, SimulationConfig};
+    use crate::pipeline::{
+        evaluate_preset, evaluate_preset_detailed, SimulationConfig, SAMPLE_RATE,
+    };
     use crate::preset::{Preset, GENOME_LEN};
     use crate::scoring::{Goal, GoalKind};
 
@@ -20,6 +22,44 @@ mod tests {
             duration_secs: 4.0,
             ..SimulationConfig::default()
         }
+    }
+
+    fn assert_same_legacy_simulation_result(
+        lhs: &crate::pipeline::SimulationResult,
+        rhs: &crate::pipeline::SimulationResult,
+    ) {
+        assert_same_legacy_simulation_result_except_score(lhs, rhs);
+        assert_eq!(lhs.score, rhs.score);
+    }
+
+    fn assert_same_legacy_simulation_result_except_score(
+        lhs: &crate::pipeline::SimulationResult,
+        rhs: &crate::pipeline::SimulationResult,
+    ) {
+        assert_eq!(lhs.fhn_firing_rate, rhs.fhn_firing_rate);
+        assert_eq!(lhs.fhn_isi_cv, rhs.fhn_isi_cv);
+        assert_eq!(lhs.dominant_freq, rhs.dominant_freq);
+        assert_eq!(lhs.delta_power, rhs.delta_power);
+        assert_eq!(lhs.theta_power, rhs.theta_power);
+        assert_eq!(lhs.alpha_power, rhs.alpha_power);
+        assert_eq!(lhs.beta_power, rhs.beta_power);
+        assert_eq!(lhs.gamma_power, rhs.gamma_power);
+        assert_eq!(lhs.brightness, rhs.brightness);
+        assert_eq!(lhs.band_energy_fractions, rhs.band_energy_fractions);
+        assert_eq!(lhs.left_dominant_freq, rhs.left_dominant_freq);
+        assert_eq!(lhs.right_dominant_freq, rhs.right_dominant_freq);
+        assert_eq!(lhs.alpha_asymmetry, rhs.alpha_asymmetry);
+        assert_eq!(
+            lhs.performance.entrainment_ratio,
+            rhs.performance.entrainment_ratio
+        );
+        assert_eq!(lhs.performance.ei_stability, rhs.performance.ei_stability);
+        assert_eq!(
+            lhs.performance.spectral_centroid,
+            rhs.performance.spectral_centroid
+        );
+        assert_eq!(lhs.performance.plv, rhs.performance.plv);
+        assert_eq!(lhs.performance.envelope_plv, rhs.performance.envelope_plv);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -55,9 +95,23 @@ mod tests {
             c7: params.jansen_rit.c7,
         };
         let bi = simulate_bilateral(
-            &bands, &bands, &energy, &energy,
-            &bilateral, params.jansen_rit.c, params.jansen_rit.input_scale, sr, &fi,
-            params.jansen_rit.v0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            &bands,
+            &bands,
+            &energy,
+            &energy,
+            &bilateral,
+            params.jansen_rit.c,
+            params.jansen_rit.input_scale,
+            sr,
+            &fi,
+            params.jansen_rit.v0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
         );
 
         // Normalise EEG for FHN
@@ -67,22 +121,39 @@ mod tests {
         let p95_idx = (abs_values.len() as f64 * 0.95) as usize;
         let p95 = abs_values[p95_idx.min(abs_values.len() - 1)];
         let scale = if p95 > 1e-10 { 1.0 / p95 } else { 1.0 };
-        let fhn_input: Vec<f64> = bi.combined.eeg.iter().map(|x| (x * scale).clamp(-3.0, 3.0)).collect();
-        let fhn = FhnModel::with_params(sr, params.fhn.a, params.fhn.b, params.fhn.epsilon, params.fhn.time_scale);
+        let fhn_input: Vec<f64> = bi
+            .combined
+            .eeg
+            .iter()
+            .map(|x| (x * scale).clamp(-3.0, 3.0))
+            .collect();
+        let fhn = FhnModel::with_params(
+            sr,
+            params.fhn.a,
+            params.fhn.b,
+            params.fhn.epsilon,
+            params.fhn.time_scale,
+        );
         let fhn_result = fhn.simulate(&fhn_input, params.fhn.input_scale);
 
         // Evaluate and snapshot
         let score = goal.evaluate_with_brightness(&fhn_result, &bi.combined, 0.5);
 
         // Score must be in [0, 1]
-        assert!(score >= 0.0 && score <= 1.0,
-            "score {} out of [0,1] range", score);
+        assert!(
+            score >= 0.0 && score <= 1.0,
+            "score {} out of [0,1] range",
+            score
+        );
 
         // Snapshot: the score with Normal brain + Focus goal should be in a
         // reasonable range. We record the exact value as a comment for comparison
         // after refactoring, but assert a wider band to avoid flaky tests.
         println!("REGRESSION SNAPSHOT: Focus/Normal score = {:.6}", score);
-        assert!(score > 0.0, "Focus score should be non-zero for Normal brain");
+        assert!(
+            score > 0.0,
+            "Focus score should be non-zero for Normal brain"
+        );
     }
 
     /// Triangular scoring produces exactly 0 at the boundaries.
@@ -96,15 +167,15 @@ mod tests {
 
         // Construct JR result with band powers that put delta exactly at min
         let bp_at_min = BandPowers {
-            delta: 0.05,   // exactly at min
-            theta: 0.35,   // at ideal
-            alpha: 0.36,   // at ideal
-            beta: 0.03,    // at ideal
-            gamma: 0.01,   // at ideal
+            delta: 0.05, // exactly at min
+            theta: 0.35, // at ideal
+            alpha: 0.36, // at ideal
+            beta: 0.03,  // at ideal
+            gamma: 0.01, // at ideal
         };
 
         let bp_at_max = BandPowers {
-            delta: 0.40,   // exactly at max
+            delta: 0.40, // exactly at max
             theta: 0.35,
             alpha: 0.36,
             beta: 0.03,
@@ -112,7 +183,7 @@ mod tests {
         };
 
         let bp_at_ideal = BandPowers {
-            delta: 0.22,   // at ideal
+            delta: 0.22, // at ideal
             theta: 0.35,
             alpha: 0.36,
             beta: 0.03,
@@ -134,13 +205,23 @@ mod tests {
 
         // At boundaries, the band score for delta should be 0 → lower total score
         // At ideal, band score for delta should be 1.0 → higher total score
-        assert!(score_ideal > score_min,
-            "ideal ({:.4}) should score higher than at-min ({:.4})", score_ideal, score_min);
-        assert!(score_ideal > score_max,
-            "ideal ({:.4}) should score higher than at-max ({:.4})", score_ideal, score_max);
+        assert!(
+            score_ideal > score_min,
+            "ideal ({:.4}) should score higher than at-min ({:.4})",
+            score_ideal,
+            score_min
+        );
+        assert!(
+            score_ideal > score_max,
+            "ideal ({:.4}) should score higher than at-max ({:.4})",
+            score_ideal,
+            score_max
+        );
 
-        println!("REGRESSION SNAPSHOT: boundary scores min={:.6} max={:.6} ideal={:.6}",
-            score_min, score_max, score_ideal);
+        println!(
+            "REGRESSION SNAPSHOT: boundary scores min={:.6} max={:.6} ideal={:.6}",
+            score_min, score_max, score_ideal
+        );
     }
 
     /// All goals produce scores in [0, 1] range.
@@ -151,24 +232,56 @@ mod tests {
 
             // Test with various band power distributions
             let distributions = [
-                BandPowers { delta: 0.5, theta: 0.2, alpha: 0.2, beta: 0.05, gamma: 0.05 },
-                BandPowers { delta: 0.05, theta: 0.1, alpha: 0.4, beta: 0.35, gamma: 0.1 },
-                BandPowers { delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2 },
-                BandPowers { delta: 0.0, theta: 0.0, alpha: 1.0, beta: 0.0, gamma: 0.0 },
+                BandPowers {
+                    delta: 0.5,
+                    theta: 0.2,
+                    alpha: 0.2,
+                    beta: 0.05,
+                    gamma: 0.05,
+                },
+                BandPowers {
+                    delta: 0.05,
+                    theta: 0.1,
+                    alpha: 0.4,
+                    beta: 0.35,
+                    gamma: 0.1,
+                },
+                BandPowers {
+                    delta: 0.2,
+                    theta: 0.2,
+                    alpha: 0.2,
+                    beta: 0.2,
+                    gamma: 0.2,
+                },
+                BandPowers {
+                    delta: 0.0,
+                    theta: 0.0,
+                    alpha: 1.0,
+                    beta: 0.0,
+                    gamma: 0.0,
+                },
             ];
 
             for (i, bp) in distributions.iter().enumerate() {
                 let jr = make_jr_result_from_powers(BandPowers {
-                    delta: bp.delta, theta: bp.theta, alpha: bp.alpha,
-                    beta: bp.beta, gamma: bp.gamma,
+                    delta: bp.delta,
+                    theta: bp.theta,
+                    alpha: bp.alpha,
+                    beta: bp.beta,
+                    gamma: bp.gamma,
                 });
                 let fhn = make_perfect_fhn(*kind);
 
                 for brightness in [0.0, 0.25, 0.5, 0.75, 1.0] {
                     let score = goal.evaluate_with_brightness(&fhn, &jr, brightness);
-                    assert!(score >= 0.0 && score <= 1.0,
+                    assert!(
+                        score >= 0.0 && score <= 1.0,
                         "{:?} dist={} brightness={}: score {} out of range",
-                        kind, i, brightness, score);
+                        kind,
+                        i,
+                        brightness,
+                        score
+                    );
                 }
             }
         }
@@ -179,16 +292,27 @@ mod tests {
     fn isolation_perfect_flat_scores_high() {
         let goal = Goal::new(GoalKind::Isolation);
         let perfect_flat = BandPowers {
-            delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2,
+            delta: 0.2,
+            theta: 0.2,
+            alpha: 0.2,
+            beta: 0.2,
+            gamma: 0.2,
         };
         let jr = make_jr_result_from_powers(perfect_flat);
         let fhn = make_perfect_fhn(GoalKind::Isolation);
 
         let score = goal.evaluate_with_brightness(&fhn, &jr, 0.7);
-        println!("REGRESSION SNAPSHOT: Isolation perfect flat score = {:.6}", score);
+        println!(
+            "REGRESSION SNAPSHOT: Isolation perfect flat score = {:.6}",
+            score
+        );
 
         // Perfect flat distribution should score well
-        assert!(score > 0.5, "perfect flat isolation should score > 0.5, got {:.4}", score);
+        assert!(
+            score > 0.5,
+            "perfect flat isolation should score > 0.5, got {:.4}",
+            score
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -213,8 +337,14 @@ mod tests {
         for (_, trial) in &trials {
             for (j, &val) in trial.iter().enumerate() {
                 let (lo, hi) = bounds[j];
-                assert!(val >= lo && val <= hi,
-                    "trial gene {} = {} outside bounds [{}, {}]", j, val, lo, hi);
+                assert!(
+                    val >= lo && val <= hi,
+                    "trial gene {} = {} outside bounds [{}, {}]",
+                    j,
+                    val,
+                    lo,
+                    hi
+                );
             }
         }
     }
@@ -245,7 +375,10 @@ mod tests {
             }
         }
 
-        println!("REGRESSION SNAPSHOT: min volume gene across 20 gens = {:.6}", min_volume);
+        println!(
+            "REGRESSION SNAPSHOT: min volume gene across 20 gens = {:.6}",
+            min_volume
+        );
         // With bounce-back, the minimum achievable is > 0 (bounced 10% into range)
         // After clamping fix, 0.0 should be reachable
     }
@@ -264,8 +397,10 @@ mod tests {
 
         for ((_, g1), (_, g2)) in pop1.iter().zip(pop2.iter()) {
             for (v1, v2) in g1.iter().zip(g2.iter()) {
-                assert!((v1 - v2).abs() < 1e-15,
-                    "same seed should produce identical populations");
+                assert!(
+                    (v1 - v2).abs() < 1e-15,
+                    "same seed should produce identical populations"
+                );
             }
         }
     }
@@ -289,14 +424,36 @@ mod tests {
         assert_eq!(original.anchor_color, decoded.anchor_color);
         assert_eq!(original.environment, decoded.environment);
 
-        for (i, (orig, dec)) in original.objects.iter().zip(decoded.objects.iter()).enumerate() {
+        for (i, (orig, dec)) in original
+            .objects
+            .iter()
+            .zip(decoded.objects.iter())
+            .enumerate()
+        {
             assert_eq!(orig.active, dec.active, "object {} active", i);
             assert_eq!(orig.color, dec.color, "object {} color", i);
-            assert!((orig.volume - dec.volume).abs() < 1e-6,
-                "object {} volume: {} vs {}", i, orig.volume, dec.volume);
-            assert_eq!(orig.bass_mod.kind, dec.bass_mod.kind, "object {} bass_mod.kind", i);
-            assert_eq!(orig.satellite_mod.kind, dec.satellite_mod.kind, "object {} sat_mod.kind", i);
-            assert_eq!(orig.movement.kind, dec.movement.kind, "object {} movement.kind", i);
+            assert!(
+                (orig.volume - dec.volume).abs() < 1e-6,
+                "object {} volume: {} vs {}",
+                i,
+                orig.volume,
+                dec.volume
+            );
+            assert_eq!(
+                orig.bass_mod.kind, dec.bass_mod.kind,
+                "object {} bass_mod.kind",
+                i
+            );
+            assert_eq!(
+                orig.satellite_mod.kind, dec.satellite_mod.kind,
+                "object {} sat_mod.kind",
+                i
+            );
+            assert_eq!(
+                orig.movement.kind, dec.movement.kind,
+                "object {} movement.kind",
+                i
+            );
         }
     }
 
@@ -323,23 +480,32 @@ mod tests {
         genome[mov_kind_idx] = 2.4;
         let preset_b = Preset::from_genome(&genome);
 
-        assert_eq!(preset_a.objects[0].movement.kind, preset_b.objects[0].movement.kind,
-            "2.1 and 2.4 should decode to the same movement kind");
+        assert_eq!(
+            preset_a.objects[0].movement.kind, preset_b.objects[0].movement.kind,
+            "2.1 and 2.4 should decode to the same movement kind"
+        );
 
         // Values 2.4 and 2.6 round to different values (2 vs 3)
         genome[mov_kind_idx] = 2.6;
         let preset_c = Preset::from_genome(&genome);
 
-        assert_ne!(preset_a.objects[0].movement.kind, preset_c.objects[0].movement.kind,
-            "2.1 and 2.6 should decode to different movement kinds");
+        assert_ne!(
+            preset_a.objects[0].movement.kind, preset_c.objects[0].movement.kind,
+            "2.1 and 2.6 should decode to different movement kinds"
+        );
     }
 
     /// Genome bounds cover full parameter space.
     #[test]
     fn genome_bounds_correct_length() {
         let bounds = Preset::bounds();
-        assert_eq!(bounds.len(), GENOME_LEN,
-            "bounds length {} != GENOME_LEN {}", bounds.len(), GENOME_LEN);
+        assert_eq!(
+            bounds.len(),
+            GENOME_LEN,
+            "bounds length {} != GENOME_LEN {}",
+            bounds.len(),
+            GENOME_LEN
+        );
 
         for (i, (lo, hi)) in bounds.iter().enumerate() {
             assert!(lo <= hi, "bound {} has lo {} > hi {}", i, lo, hi);
@@ -360,12 +526,24 @@ mod tests {
             let goal = Goal::new(*kind);
             let result = evaluate_preset(&preset, &goal, &config);
 
-            assert!(result.score >= 0.0 && result.score <= 1.0,
-                "{:?}: score {} out of range", kind, result.score);
-            assert!(result.dominant_freq >= 0.0 && result.dominant_freq <= 100.0,
-                "{:?}: dominant_freq {} out of range", kind, result.dominant_freq);
-            assert!(result.fhn_firing_rate >= 0.0,
-                "{:?}: negative firing rate {}", kind, result.fhn_firing_rate);
+            assert!(
+                result.score >= 0.0 && result.score <= 1.0,
+                "{:?}: score {} out of range",
+                kind,
+                result.score
+            );
+            assert!(
+                result.dominant_freq >= 0.0 && result.dominant_freq <= 100.0,
+                "{:?}: dominant_freq {} out of range",
+                kind,
+                result.dominant_freq
+            );
+            assert!(
+                result.fhn_firing_rate >= 0.0,
+                "{:?}: negative firing rate {}",
+                kind,
+                result.fhn_firing_rate
+            );
 
             println!("REGRESSION SNAPSHOT: {:?} default preset score={:.6} dom_freq={:.2} firing_rate={:.2}",
                 kind, result.score, result.dominant_freq, result.fhn_firing_rate);
@@ -381,11 +559,17 @@ mod tests {
 
         let result = evaluate_preset(&preset, &goal, &config);
 
-        let total = result.delta_power + result.theta_power + result.alpha_power
-            + result.beta_power + result.gamma_power;
+        let total = result.delta_power
+            + result.theta_power
+            + result.alpha_power
+            + result.beta_power
+            + result.gamma_power;
 
-        assert!((total - 1.0).abs() < 0.01,
-            "band powers should sum to ~1.0, got {:.6}", total);
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "band powers should sum to ~1.0, got {:.6}",
+            total
+        );
     }
 
     /// Pipeline: different presets produce different scores.
@@ -409,19 +593,27 @@ mod tests {
         let result2 = evaluate_preset(&preset2, &goal, &config);
 
         // Scores should differ (different audio → different neural response)
-        assert!((result1.score - result2.score).abs() > 1e-6
-            || (result1.dominant_freq - result2.dominant_freq).abs() > 0.1,
-            "different presets should produce different results");
+        assert!(
+            (result1.score - result2.score).abs() > 1e-6
+                || (result1.dominant_freq - result2.dominant_freq).abs() > 0.1,
+            "different presets should produce different results"
+        );
     }
 
     /// Simulation duration: verify default is 12 seconds with 2s warm-up discard.
     #[test]
     fn simulation_default_duration_is_12_seconds() {
         let config = SimulationConfig::default();
-        assert!((config.duration_secs - 12.0).abs() < 1e-6,
-            "default duration should be 12.0s, got {}", config.duration_secs);
-        assert!((config.warmup_discard_secs - 2.0).abs() < 1e-6,
-            "default warmup discard should be 2.0s, got {}", config.warmup_discard_secs);
+        assert!(
+            (config.duration_secs - 12.0).abs() < 1e-6,
+            "default duration should be 12.0s, got {}",
+            config.duration_secs
+        );
+        assert!(
+            (config.warmup_discard_secs - 2.0).abs() < 1e-6,
+            "default warmup discard should be 2.0s, got {}",
+            config.warmup_discard_secs
+        );
     }
 
     /// The detailed evaluation path must carry the same scalar result as the
@@ -454,7 +646,10 @@ mod tests {
         assert!((scalar.dominant_freq - summary.dominant_freq).abs() < 1e-12);
         assert!((scalar.alpha_asymmetry - summary.alpha_asymmetry).abs() < 1e-12);
         assert_eq!(scalar.performance.plv, summary.performance.plv);
-        assert_eq!(scalar.performance.envelope_plv, summary.performance.envelope_plv);
+        assert_eq!(
+            scalar.performance.envelope_plv,
+            summary.performance.envelope_plv
+        );
     }
 
     /// The canonical detailed result must contain everything `Goal::diagnose()`
@@ -524,9 +719,18 @@ mod tests {
             c7: params.jansen_rit.c7,
         };
         let mut model = JansenRitModel::with_wendling_params(
-            sr, 3.25, 22.0, 100.0, 50.0, params.jansen_rit.c,
-            220.0, params.jansen_rit.input_scale, &fi,
-            params.jansen_rit.slow_inhib_ratio, params.jansen_rit.v0, 0.62,
+            sr,
+            3.25,
+            22.0,
+            100.0,
+            50.0,
+            params.jansen_rit.c,
+            220.0,
+            params.jansen_rit.input_scale,
+            &fi,
+            params.jansen_rit.slow_inhib_ratio,
+            params.jansen_rit.v0,
+            0.62,
         );
 
         let result = model.simulate(&input);
@@ -534,11 +738,18 @@ mod tests {
         // EEG should be non-trivial
         let eeg_range = result.eeg.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
             - result.eeg.iter().cloned().fold(f64::INFINITY, f64::min);
-        assert!(eeg_range > 0.001, "EEG range {} too small — model not oscillating", eeg_range);
+        assert!(
+            eeg_range > 0.001,
+            "EEG range {} too small — model not oscillating",
+            eeg_range
+        );
 
         // Dominant frequency should be in physiological range
-        assert!(result.dominant_freq >= 0.5 && result.dominant_freq <= 50.0,
-            "dominant freq {} out of physiological range", result.dominant_freq);
+        assert!(
+            result.dominant_freq >= 0.5 && result.dominant_freq <= 50.0,
+            "dominant freq {} out of physiological range",
+            result.dominant_freq
+        );
 
         // Band powers should be non-zero
         assert!(result.band_powers.total() > 0.0, "zero total band power");
@@ -560,20 +771,34 @@ mod tests {
 
         let bt = BrainType::Normal;
         let params = bt.params();
-        let fhn = FhnModel::with_params(sr, params.fhn.a, params.fhn.b, params.fhn.epsilon, params.fhn.time_scale);
+        let fhn = FhnModel::with_params(
+            sr,
+            params.fhn.a,
+            params.fhn.b,
+            params.fhn.epsilon,
+            params.fhn.time_scale,
+        );
 
         let result1 = fhn.simulate(&input, params.fhn.input_scale);
         let result2 = fhn.simulate(&input, params.fhn.input_scale);
 
         // Same input → same output (deterministic)
-        assert_eq!(result1.firing_rate, result2.firing_rate,
-            "FHN should be deterministic");
+        assert_eq!(
+            result1.firing_rate, result2.firing_rate,
+            "FHN should be deterministic"
+        );
         // NaN != NaN in IEEE 754, so use total_cmp for bitwise equality
-        assert!(result1.isi_cv.total_cmp(&result2.isi_cv).is_eq(),
-            "FHN ISI CV should be deterministic: {} vs {}", result1.isi_cv, result2.isi_cv);
+        assert!(
+            result1.isi_cv.total_cmp(&result2.isi_cv).is_eq(),
+            "FHN ISI CV should be deterministic: {} vs {}",
+            result1.isi_cv,
+            result2.isi_cv
+        );
 
-        println!("REGRESSION SNAPSHOT: FHN 10Hz sine: rate={:.2} cv={:.4}",
-            result1.firing_rate, result1.isi_cv);
+        println!(
+            "REGRESSION SNAPSHOT: FHN 10Hz sine: rate={:.2} cv={:.4}",
+            result1.firing_rate, result1.isi_cv
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -625,7 +850,10 @@ mod tests {
     fn assr_and_gate_enabled_by_default() {
         let config = SimulationConfig::default();
         assert!(config.assr_enabled, "ASSR should be enabled by default");
-        assert!(config.thalamic_gate_enabled, "Thalamic gate should be enabled by default");
+        assert!(
+            config.thalamic_gate_enabled,
+            "Thalamic gate should be enabled by default"
+        );
     }
 
     /// Pipeline with both features disabled produces same score as before.
@@ -645,7 +873,8 @@ mod tests {
         assert!(
             (result1.score - result2.score).abs() < 1e-10,
             "Default and explicit enabled should match: {} vs {}",
-            result1.score, result2.score
+            result1.score,
+            result2.score
         );
     }
 
@@ -691,15 +920,23 @@ mod tests {
         assert!(
             (result_off.score - result_on.score).abs() > 1e-4,
             "ASSR should change scores on modulated preset: off={:.6} on={:.6}",
-            result_off.score, result_on.score
+            result_off.score,
+            result_on.score
         );
 
         // Both should still be valid
-        assert!(result_on.score >= 0.0 && result_on.score <= 1.0,
-            "ASSR-enabled score {} out of range", result_on.score);
+        assert!(
+            result_on.score >= 0.0 && result_on.score <= 1.0,
+            "ASSR-enabled score {} out of range",
+            result_on.score
+        );
 
-        println!("ASSR effect: off={:.6} on={:.6} delta={:.6}",
-            result_off.score, result_on.score, result_on.score - result_off.score);
+        println!(
+            "ASSR effect: off={:.6} on={:.6} delta={:.6}",
+            result_off.score,
+            result_on.score,
+            result_on.score - result_off.score
+        );
     }
 
     /// Thalamic gate enabled changes scores.
@@ -718,14 +955,22 @@ mod tests {
         assert!(
             (result_off.score - result_on.score).abs() > 1e-4,
             "Thalamic gate should change scores on modulated preset: off={:.6} on={:.6}",
-            result_off.score, result_on.score
+            result_off.score,
+            result_on.score
         );
 
-        assert!(result_on.score >= 0.0 && result_on.score <= 1.0,
-            "Gate-enabled score {} out of range", result_on.score);
+        assert!(
+            result_on.score >= 0.0 && result_on.score <= 1.0,
+            "Gate-enabled score {} out of range",
+            result_on.score
+        );
 
-        println!("Thalamic gate effect: off={:.6} on={:.6} delta={:.6}",
-            result_off.score, result_on.score, result_on.score - result_off.score);
+        println!(
+            "Thalamic gate effect: off={:.6} on={:.6} delta={:.6}",
+            result_off.score,
+            result_on.score,
+            result_on.score - result_off.score
+        );
     }
 
     /// Both features enabled together produces valid scores.
@@ -744,7 +989,8 @@ mod tests {
             assert!(
                 result.score >= 0.0 && result.score <= 1.0,
                 "{:?} with both features: score {} out of range",
-                kind, result.score
+                kind,
+                result.score
             );
             assert!(
                 result.dominant_freq.is_finite(),
@@ -752,9 +998,129 @@ mod tests {
                 kind
             );
 
-            println!("Both enabled {:?}: score={:.6} dom_freq={:.2}",
-                kind, result.score, result.dominant_freq);
+            println!(
+                "Both enabled {:?}: score={:.6} dom_freq={:.2}",
+                kind, result.score, result.dominant_freq
+            );
         }
+    }
+
+    #[test]
+    fn acoustic_scaffolding_flag_does_not_change_scores() {
+        let preset = make_modulated_preset();
+        let goal = Goal::new(GoalKind::Shield);
+
+        let config_off = fast_pipeline_config();
+        let mut config_on = fast_pipeline_config();
+        config_on.acoustic_scoring_enabled = true;
+
+        let result_off = evaluate_preset(&preset, &goal, &config_off);
+        let result_on = evaluate_preset(&preset, &goal, &config_on);
+
+        assert_same_legacy_simulation_result(&result_off, &result_on);
+        assert!(result_off.acoustic_score.is_none());
+        assert!(result_on.acoustic_score.is_some());
+    }
+
+    #[test]
+    fn acoustic_render_is_exposed_only_when_enabled() {
+        let preset = make_modulated_preset();
+        let goal = Goal::new(GoalKind::Shield);
+
+        let config_off = fast_pipeline_config();
+        let mut config_on = fast_pipeline_config();
+        config_on.acoustic_scoring_enabled = true;
+
+        let detailed_off = evaluate_preset_detailed(&preset, &goal, &config_off);
+        let detailed_on = evaluate_preset_detailed(&preset, &goal, &config_on);
+
+        assert!(detailed_off.acoustic_render.is_none());
+        assert!(detailed_off.summary.acoustic_score.is_none());
+
+        let render = detailed_on
+            .acoustic_render
+            .as_ref()
+            .expect("acoustic render should be populated when enabled");
+        assert!(render.is_finite());
+        assert_eq!(
+            render.frame_count(),
+            (SAMPLE_RATE as f32 * config_on.duration_secs) as usize
+        );
+        let acoustic = detailed_on
+            .summary
+            .acoustic_score
+            .as_ref()
+            .expect("acoustic score should be populated when enabled");
+        assert!((0.0..=1.0).contains(&acoustic.intelligibility_proxy.unwrap()));
+        assert!((0.0..=1.0).contains(&acoustic.speech_privacy.unwrap()));
+        let features = &acoustic.features;
+        assert!(features.broadband_level_db.unwrap().is_finite());
+        assert!((0.0..=1.0).contains(&features.speech_band_ratio.unwrap()));
+        assert!((0.0..=1.0).contains(&features.modulation_depth.unwrap()));
+        assert!((0.0..=1.0).contains(&features.sharpness_proxy.unwrap()));
+        assert_same_legacy_simulation_result(&detailed_off.summary, &detailed_on.summary);
+    }
+
+    #[test]
+    fn acoustic_fusion_keeps_unsupported_goals_on_legacy_score() {
+        let preset = make_modulated_preset();
+        let goal = Goal::new(GoalKind::Focus);
+
+        let mut config_off = fast_pipeline_config();
+        config_off.acoustic_scoring_enabled = true;
+
+        let mut config_on = fast_pipeline_config();
+        config_on.acoustic_scoring_enabled = true;
+        config_on.acoustic_score_fusion_enabled = true;
+
+        let result_off = evaluate_preset(&preset, &goal, &config_off);
+        let result_on = evaluate_preset(&preset, &goal, &config_on);
+
+        assert_same_legacy_simulation_result(&result_off, &result_on);
+        let acoustic = result_on
+            .acoustic_score
+            .as_ref()
+            .expect("acoustic payload should still be present when fusion is requested");
+        assert!(acoustic.acoustic_goal_score.is_none());
+        assert!(acoustic.comfort_score.is_none());
+        assert!(acoustic.legacy_nmm_score.is_none());
+        assert!(acoustic.fused_score_preview.is_none());
+    }
+
+    #[test]
+    fn acoustic_fusion_changes_only_score_for_supported_goals() {
+        let preset = make_modulated_preset();
+        let goal = Goal::new(GoalKind::Shield);
+
+        let mut config_off = fast_pipeline_config();
+        config_off.acoustic_scoring_enabled = true;
+
+        let mut config_on = fast_pipeline_config();
+        config_on.acoustic_scoring_enabled = true;
+        config_on.acoustic_score_fusion_enabled = true;
+
+        let result_off = evaluate_preset(&preset, &goal, &config_off);
+        let result_on = evaluate_preset(&preset, &goal, &config_on);
+
+        assert_same_legacy_simulation_result_except_score(&result_off, &result_on);
+        let acoustic = result_on
+            .acoustic_score
+            .as_ref()
+            .expect("supported fused goal should populate acoustic payload");
+        assert!(
+            (result_on.score - result_off.score).abs() > 1e-6,
+            "supported fused goal should change the scalar score"
+        );
+        assert!(
+            (acoustic.legacy_nmm_score.unwrap() - result_off.score).abs() < 1e-12,
+            "legacy NMM score should be preserved in the acoustic payload"
+        );
+        assert!(
+            (acoustic.fused_score_preview.unwrap() - result_on.score).abs() < 1e-12,
+            "fused score preview should match the exported scalar score"
+        );
+        assert!((0.0..=1.0).contains(&acoustic.comfort_score.unwrap()));
+        assert!((0.0..=1.0).contains(&acoustic.acoustic_goal_score.unwrap()));
     }
 
     /// ASSR + gate preserve band power normalization (sum ≈ 1.0).
@@ -768,8 +1134,11 @@ mod tests {
         config.thalamic_gate_enabled = true;
 
         let result = evaluate_preset(&preset, &goal, &config);
-        let total = result.delta_power + result.theta_power + result.alpha_power
-            + result.beta_power + result.gamma_power;
+        let total = result.delta_power
+            + result.theta_power
+            + result.alpha_power
+            + result.beta_power
+            + result.gamma_power;
 
         assert!(
             (total - 1.0).abs() < 0.01,
@@ -818,11 +1187,15 @@ mod tests {
             score_diff > 0.005,
             "Brown ({:.4}) and White ({:.4}) should produce different scores (diff={:.4}). \
              If identical, band normalization is destroying spectral ratios.",
-            result_brown.score, result_white.score, score_diff
+            result_brown.score,
+            result_white.score,
+            score_diff
         );
 
-        println!("NORMALIZATION TEST: brown={:.4} white={:.4} diff={:.4}",
-            result_brown.score, result_white.score, score_diff);
+        println!(
+            "NORMALIZATION TEST: brown={:.4} white={:.4} diff={:.4}",
+            result_brown.score, result_white.score, score_diff
+        );
     }
 
     /// Band power distribution should differ between Brown and White noise.
@@ -854,8 +1227,10 @@ mod tests {
 
         // With global normalization, Brown should have more slow-wave power
         // because its low-band signals are stronger relative to high bands.
-        println!("BAND RATIO TEST: brown_slow={:.4} white_slow={:.4}",
-            brown_slow, white_slow);
+        println!(
+            "BAND RATIO TEST: brown_slow={:.4} white_slow={:.4}",
+            brown_slow, white_slow
+        );
 
         // Note: this test documents expected behavior after the normalization fix.
         // With per-band normalization, brown_slow ≈ white_slow (both normalized to 1.0).
@@ -872,7 +1247,8 @@ mod tests {
         // spectral differences. This test is guarding "pipeline stays finite
         // and bounded after the normalization change", not exhaustively
         // re-validating the whole search space.
-        for color in [0u8, 2, 6] { // White, Brown, SSN
+        for color in [0u8, 2, 6] {
+            // White, Brown, SSN
             let mut preset = Preset::default();
             preset.source_count = 1;
             preset.objects[0].active = true;
@@ -891,12 +1267,16 @@ mod tests {
                 assert!(
                     result.score >= 0.0 && result.score <= 1.0,
                     "Color {} {:?}: score {} out of range",
-                    color, kind, result.score
+                    color,
+                    kind,
+                    result.score
                 );
                 assert!(
                     result.dominant_freq.is_finite() && result.dominant_freq >= 0.0,
                     "Color {} {:?}: invalid dominant freq {}",
-                    color, kind, result.dominant_freq
+                    color,
+                    kind,
+                    result.dominant_freq
                 );
             }
         }
@@ -941,8 +1321,10 @@ mod tests {
         let result_brown = evaluate_preset(&brown, &goal, &config);
         let result_blue = evaluate_preset(&blue, &goal, &config);
 
-        println!("FHN AMPLITUDE TEST: brown_rate={:.2} blue_rate={:.2}",
-            result_brown.fhn_firing_rate, result_blue.fhn_firing_rate);
+        println!(
+            "FHN AMPLITUDE TEST: brown_rate={:.2} blue_rate={:.2}",
+            result_brown.fhn_firing_rate, result_blue.fhn_firing_rate
+        );
 
         // Firing rates should differ because the EEG amplitudes differ
         // (different spectral distributions → different JR inputs → different oscillation amplitudes)
@@ -951,7 +1333,9 @@ mod tests {
             rate_diff > 0.1,
             "Brown ({:.2}) and Blue ({:.2}) should produce different FHN rates (diff={:.2}). \
              Combined global-norm + percentile-scaling should preserve amplitude differences.",
-            result_brown.fhn_firing_rate, result_blue.fhn_firing_rate, rate_diff
+            result_brown.fhn_firing_rate,
+            result_blue.fhn_firing_rate,
+            rate_diff
         );
     }
 
@@ -972,7 +1356,8 @@ mod tests {
             assert!(
                 result.fhn_firing_rate >= 0.0 && result.fhn_firing_rate < 50.0,
                 "Color {}: FHN rate {:.2} out of physiological range",
-                color, result.fhn_firing_rate
+                color,
+                result.fhn_firing_rate
             );
         }
     }
@@ -1014,8 +1399,10 @@ mod tests {
         // Boxcar passes 300 Hz at ~74% power. This is a known limitation
         // but acceptable since gammatone envelopes don't contain 300 Hz.
         println!("DECIMATION: 300 Hz boxcar passthrough = {ratio:.4} (expected ~0.74)");
-        assert!(ratio > 0.5 && ratio < 1.0,
-            "Boxcar should pass 300 Hz partially (ratio={ratio:.4})");
+        assert!(
+            ratio > 0.5 && ratio < 1.0,
+            "Boxcar should pass 300 Hz partially (ratio={ratio:.4})"
+        );
     }
 
     /// Decimation preserves low-frequency content (below ~50 Hz).
@@ -1088,8 +1475,10 @@ mod tests {
             result.alpha_asymmetry
         );
 
-        println!("BILATERAL TEST: alpha_asymmetry={:.4} (positive=left-dominant)",
-            result.alpha_asymmetry);
+        println!(
+            "BILATERAL TEST: alpha_asymmetry={:.4} (positive=left-dominant)",
+            result.alpha_asymmetry
+        );
     }
 
     /// Bilateral coupling should produce valid scores across all brain types.
@@ -1114,12 +1503,14 @@ mod tests {
             assert!(
                 result.score >= 0.0 && result.score <= 1.0,
                 "{:?}: score {} out of range after coupling change",
-                bt, result.score
+                bt,
+                result.score
             );
             assert!(
                 result.dominant_freq.is_finite() && result.dominant_freq > 0.0,
                 "{:?}: invalid dominant freq {}",
-                bt, result.dominant_freq
+                bt,
+                result.dominant_freq
             );
         }
     }
@@ -1141,7 +1532,11 @@ mod tests {
 
         // Create a JR result and FHN result
         let bp = BandPowers {
-            delta: 0.05, theta: 0.15, alpha: 0.35, beta: 0.35, gamma: 0.10,
+            delta: 0.05,
+            theta: 0.15,
+            alpha: 0.35,
+            beta: 0.35,
+            gamma: 0.10,
         };
         let jr = make_jr_result_from_powers(bp);
         let fhn = make_perfect_fhn(GoalKind::Focus);
@@ -1163,7 +1558,11 @@ mod tests {
         for kind in GoalKind::all() {
             let goal = Goal::new(*kind);
             let bp = BandPowers {
-                delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2,
+                delta: 0.2,
+                theta: 0.2,
+                alpha: 0.2,
+                beta: 0.2,
+                gamma: 0.2,
             };
             let jr = make_jr_result_from_powers(bp);
             let fhn = make_perfect_fhn(*kind);
@@ -1192,7 +1591,11 @@ mod tests {
     fn balanced_scores_higher_than_asymmetric_for_relaxation() {
         let goal = Goal::new(GoalKind::DeepRelaxation);
         let bp = BandPowers {
-            delta: 0.22, theta: 0.35, alpha: 0.36, beta: 0.03, gamma: 0.01,
+            delta: 0.22,
+            theta: 0.35,
+            alpha: 0.36,
+            beta: 0.03,
+            gamma: 0.01,
         };
         let jr = make_jr_result_from_powers(bp);
         let fhn = make_perfect_fhn(GoalKind::DeepRelaxation);
@@ -1212,7 +1615,11 @@ mod tests {
     fn sleep_ignores_asymmetry() {
         let goal = Goal::new(GoalKind::Sleep);
         let bp = BandPowers {
-            delta: 0.30, theta: 0.48, alpha: 0.12, beta: 0.02, gamma: 0.02,
+            delta: 0.30,
+            theta: 0.48,
+            alpha: 0.12,
+            beta: 0.02,
+            gamma: 0.02,
         };
         let jr = make_jr_result_from_powers(bp);
         let fhn = make_perfect_fhn(GoalKind::Sleep);
@@ -1232,7 +1639,13 @@ mod tests {
     fn asymmetry_scoring_valid_range() {
         for kind in GoalKind::all() {
             let goal = Goal::new(*kind);
-            let bp = BandPowers { delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2 };
+            let bp = BandPowers {
+                delta: 0.2,
+                theta: 0.2,
+                alpha: 0.2,
+                beta: 0.2,
+                gamma: 0.2,
+            };
             let jr = make_jr_result_from_powers(bp);
             let fhn = make_perfect_fhn(*kind);
 
@@ -1240,7 +1653,8 @@ mod tests {
                 let score = goal.evaluate_with_asymmetry(&fhn, &jr, asym);
                 assert!(
                     score >= 0.0 && score <= 1.0,
-                    "{:?} asymmetry={asym}: score {score} out of range", kind
+                    "{:?} asymmetry={asym}: score {score} out of range",
+                    kind
                 );
             }
         }
@@ -1296,14 +1710,18 @@ mod tests {
         // With DC/AC separation, ASSR should NOT dramatically reduce the
         // score when combined with gate. Allow some reduction but not collapse.
         let ratio = result_both.score / result_gate.score.max(0.001);
-        println!("ASSR DC/AC TEST: gate_only={:.4} both={:.4} ratio={:.3}",
-            result_gate.score, result_both.score, ratio);
+        println!(
+            "ASSR DC/AC TEST: gate_only={:.4} both={:.4} ratio={:.3}",
+            result_gate.score, result_both.score, ratio
+        );
 
         assert!(
             ratio > 0.60,
             "ASSR+gate should not collapse score: gate={:.4} both={:.4} ratio={:.3}. \
              ASSR is likely reducing DC drive (operating point), not just AC (modulation).",
-            result_gate.score, result_both.score, ratio
+            result_gate.score,
+            result_both.score,
+            ratio
         );
     }
 
@@ -1345,8 +1763,10 @@ mod tests {
             slice.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / slice.len() as f64
         };
 
-        println!("HABITUATION TEST: var_first={var_first:.6} var_last={var_last:.6} ratio={:.3}",
-            var_last / var_first.max(1e-20));
+        println!(
+            "HABITUATION TEST: var_first={var_first:.6} var_last={var_last:.6} ratio={:.3}",
+            var_last / var_first.max(1e-20)
+        );
 
         assert!(
             var_last < var_first * 0.95,
@@ -1412,10 +1832,12 @@ mod tests {
 
         // Use Normal brain-type parameters where alpha IS the attractor
         // (input_offset=175, input_scale=60 → p = 175 + 0.5*60 = 205)
-        let mut jr_det = JansenRitModel::with_params(sr, 3.25, 22.0, 100.0, 50.0, 135.0, 175.0, 60.0);
+        let mut jr_det =
+            JansenRitModel::with_params(sr, 3.25, 22.0, 100.0, 50.0, 135.0, 175.0, 60.0);
         let result_det = jr_det.simulate(&input);
 
-        let mut jr_stoch = JansenRitModel::with_params(sr, 3.25, 22.0, 100.0, 50.0, 135.0, 175.0, 60.0);
+        let mut jr_stoch =
+            JansenRitModel::with_params(sr, 3.25, 22.0, 100.0, 50.0, 135.0, 175.0, 60.0);
         jr_stoch.stochastic_sigma = 20.0;
         let result_stoch = jr_stoch.simulate(&input);
 
@@ -1425,21 +1847,49 @@ mod tests {
         // Stochastic should broaden the spectrum — energy distributes more
         // evenly across bands instead of concentrating in alpha+theta.
         // Measure: standard deviation of band powers (lower = more even).
-        let det_bands = [det_norm.delta, det_norm.theta, det_norm.alpha, det_norm.beta];
-        let stoch_bands = [stoch_norm.delta, stoch_norm.theta, stoch_norm.alpha, stoch_norm.beta];
+        let det_bands = [
+            det_norm.delta,
+            det_norm.theta,
+            det_norm.alpha,
+            det_norm.beta,
+        ];
+        let stoch_bands = [
+            stoch_norm.delta,
+            stoch_norm.theta,
+            stoch_norm.alpha,
+            stoch_norm.beta,
+        ];
 
         let mean_det = det_bands.iter().sum::<f64>() / 4.0;
         let mean_stoch = stoch_bands.iter().sum::<f64>() / 4.0;
-        let std_det = (det_bands.iter().map(|x| (x - mean_det).powi(2)).sum::<f64>() / 4.0).sqrt();
-        let std_stoch = (stoch_bands.iter().map(|x| (x - mean_stoch).powi(2)).sum::<f64>() / 4.0).sqrt();
+        let std_det = (det_bands
+            .iter()
+            .map(|x| (x - mean_det).powi(2))
+            .sum::<f64>()
+            / 4.0)
+            .sqrt();
+        let std_stoch = (stoch_bands
+            .iter()
+            .map(|x| (x - mean_stoch).powi(2))
+            .sum::<f64>()
+            / 4.0)
+            .sqrt();
 
         println!("STOCHASTIC: det_std={std_det:.3} stoch_std={std_stoch:.3}");
-        println!("  det: d={:.3} t={:.3} a={:.3} b={:.3}", det_norm.delta, det_norm.theta, det_norm.alpha, det_norm.beta);
-        println!("  stoch: d={:.3} t={:.3} a={:.3} b={:.3}", stoch_norm.delta, stoch_norm.theta, stoch_norm.alpha, stoch_norm.beta);
+        println!(
+            "  det: d={:.3} t={:.3} a={:.3} b={:.3}",
+            det_norm.delta, det_norm.theta, det_norm.alpha, det_norm.beta
+        );
+        println!(
+            "  stoch: d={:.3} t={:.3} a={:.3} b={:.3}",
+            stoch_norm.delta, stoch_norm.theta, stoch_norm.alpha, stoch_norm.beta
+        );
 
         // Stochastic should have MORE EVEN distribution (lower std)
-        assert!(std_stoch < std_det,
-            "Stochastic should broaden spectrum: det_std={std_det:.3} > stoch_std={std_stoch:.3}");
+        assert!(
+            std_stoch < std_det,
+            "Stochastic should broaden spectrum: det_std={std_det:.3} > stoch_std={std_stoch:.3}"
+        );
     }
 
     #[test]
@@ -1456,8 +1906,10 @@ mod tests {
         let r1 = jr_det.simulate(&input);
         let r2 = jr_zero.simulate(&input);
         for i in 0..n {
-            assert!((r1.eeg[i] - r2.eeg[i]).abs() < 1e-10,
-                "sigma=0 should match deterministic at sample {i}");
+            assert!(
+                (r1.eeg[i] - r2.eeg[i]).abs() < 1e-10,
+                "sigma=0 should match deterministic at sample {i}"
+            );
         }
     }
 
@@ -1472,7 +1924,10 @@ mod tests {
         jr.stochastic_sigma = 30.0;
         let result = jr.simulate(&input);
         for (i, &v) in result.eeg.iter().enumerate() {
-            assert!(v.is_finite(), "Stochastic EEG sample {i} is not finite: {v}");
+            assert!(
+                v.is_finite(),
+                "Stochastic EEG sample {i} is not finite: {v}"
+            );
         }
     }
 
@@ -1490,13 +1945,17 @@ mod tests {
             preset.objects[0].volume = 0.80;
 
             let result = evaluate_preset(&preset, &goal, &config);
-            let total = result.delta_power + result.theta_power + result.alpha_power
-                + result.beta_power + result.gamma_power;
+            let total = result.delta_power
+                + result.theta_power
+                + result.alpha_power
+                + result.beta_power
+                + result.gamma_power;
 
             assert!(
                 (total - 1.0).abs() < 0.02,
                 "Color {}: band powers sum to {:.4}, should be ~1.0",
-                color, total
+                color,
+                total
             );
         }
     }

@@ -2,7 +2,6 @@
 ///
 /// Different brain types adjust FHN and Jansen-Rit parameters to simulate
 /// individual neurological variation (e.g. ADHD, aging, anxiety).
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -62,7 +61,6 @@ impl BrainType {
             // The standard JR model oscillates (alpha, ~10 Hz) for p ∈ [120, 320].
             // We keep the model in this oscillatory regime and use spectral brightness
             // (from the audio FFT) as a separate score modifier in the scoring stage.
-
             BrainType::Normal => NeuralParams {
                 fhn: FhnParams {
                     a: 0.7,
@@ -82,10 +80,10 @@ impl BrainType {
                     // Wendling 2002: balanced fast inhibitory loop
                     g_fast_gain: 10.0,
                     g_fast_rate: 500.0,
-                    c5: 0.3 * 135.0,  // 40.5 — Pyr → FSI
-                    c6: 0.1 * 135.0,  // 13.5 — Slow Inhib → FSI (disinhibition)
-                    c7: 115.0,        // Universal: strengthened FSI→Pyr (was 108)
-                    slow_inhib_ratio: 0.20,  // Universal: loosen GABA-B for beta access
+                    c5: 0.3 * 135.0,        // 40.5 — Pyr → FSI
+                    c6: 0.1 * 135.0,        // 13.5 — Slow Inhib → FSI (disinhibition)
+                    c7: 115.0,              // Universal: strengthened FSI→Pyr (was 108)
+                    slow_inhib_ratio: 0.20, // Universal: loosen GABA-B for beta access
                     v0: 6.0,
                 },
             },
@@ -111,7 +109,7 @@ impl BrainType {
                     g_fast_rate: 500.0,
                     c5: 0.3 * 135.0,
                     c6: 0.1 * 135.0,
-                    c7: 0.8 * 135.0,  // 108.0
+                    c7: 0.8 * 135.0, // 108.0
                     slow_inhib_ratio: 0.20,
                     v0: 6.0,
                 },
@@ -120,7 +118,8 @@ impl BrainType {
             // ADHD: hypoaroused cortex — just above bifurcation boundary.
             // Spontaneous theta present, beta deficit without external drive.
             // With noise: higher bands pushed across threshold → stochastic resonance.
-            // Wendling: weaker fast inhibition → reduced gamma capacity (Edden et al. 2012)
+            // Wendling: weaker fast inhibition + slightly slower GABA-B kinetics
+            // → reduced gamma capacity and broader noise tolerance.
             BrainType::Adhd => NeuralParams {
                 fhn: FhnParams {
                     a: 0.7,
@@ -133,16 +132,16 @@ impl BrainType {
                     a_gain: 3.5,
                     b_gain: 18.0,
                     a_rate: 100.0,
-                    b_rate: 50.0,
+                    b_rate: 45.0,
                     c: 135.0,
                     input_offset: 135.0,
                     input_scale: 80.0,
                     // Neuro-Plastic Shift: raise arousal floor so presets can reach the brain
                     g_fast_gain: 10.0,
-                    g_fast_rate: 450.0,   // Slower GABA-A kinetics
+                    g_fast_rate: 450.0, // Slower GABA-A kinetics
                     c5: 0.3 * 135.0,
                     c6: 0.1 * 135.0,
-                    c7: 112.0,            // Strengthened fast brakes (was 102)
+                    c7: 112.0, // Strengthened fast brakes (was 102)
                     slow_inhib_ratio: 0.15,
                     v0: 5.5,
                 },
@@ -166,10 +165,10 @@ impl BrainType {
                     input_scale: 50.0,
                     // Aging: slower GABA-A, reduced connectivity
                     g_fast_gain: 10.0,
-                    g_fast_rate: 350.0,   // Slowed GABA-A kinetics
-                    c5: 0.3 * 120.0,     // 36.0
-                    c6: 0.1 * 120.0,     // 12.0
-                    c7: 0.8 * 120.0,     // 96.0
+                    g_fast_rate: 350.0, // Slowed GABA-A kinetics
+                    c5: 0.3 * 120.0,    // 36.0
+                    c6: 0.1 * 120.0,    // 12.0
+                    c7: 0.8 * 120.0,    // 96.0
                     slow_inhib_ratio: 0.20,
                     v0: 6.0,
                 },
@@ -178,7 +177,7 @@ impl BrainType {
             // Anxious: overdriven cortex, elevated beta, always oscillating
             // Wendling: hyperactive fast inhibitory loop → excessive beta
             // b_gain raised from 19→20: hyperexcitability driven by a_gain=3.5
-            // and c=145; slightly more GABA-B tone matches anxiety phenotypes
+            // and c=145; faster GABA-B kinetics match anxiety phenotypes
             // with increased (not decreased) GABAergic activity.
             BrainType::Anxious => NeuralParams {
                 fhn: FhnParams {
@@ -192,16 +191,16 @@ impl BrainType {
                     a_gain: 3.5,
                     b_gain: 20.0,
                     a_rate: 100.0,
-                    b_rate: 50.0,
+                    b_rate: 55.0,
                     c: 145.0,
                     input_offset: 220.0,
                     input_scale: 70.0,
                     // Hyperactive fast inhibition → excessive beta/gamma
-                    g_fast_gain: 15.0,    // Higher gain
+                    g_fast_gain: 15.0, // Higher gain
                     g_fast_rate: 500.0,
-                    c5: 0.3 * 145.0,     // 43.5
-                    c6: 0.1 * 145.0,     // 14.5
-                    c7: 0.8 * 145.0,     // 116.0
+                    c5: 0.3 * 145.0, // 43.5
+                    c6: 0.1 * 145.0, // 14.5
+                    c7: 0.8 * 145.0, // 116.0
                     slow_inhib_ratio: 0.20,
                     v0: 6.0,
                 },
@@ -234,17 +233,12 @@ impl BrainType {
             // strong input → theta + alpha + beta.
             BrainType::Normal => TonotopicParams {
                 band_rates: [
-                    (70.0, 35.0),   // Low → theta (ratio 2.0)
-                    (85.0, 42.0),   // Low-mid → alpha-low (ratio 2.02)
-                    (100.0, 50.0),  // Band 2: unused (WilsonCowan)
-                    (100.0, 50.0),  // Band 3: unused (WilsonCowan)
+                    (70.0, 35.0),  // Low → theta (ratio 2.0)
+                    (85.0, 42.0),  // Low-mid → alpha-low (ratio 2.02)
+                    (100.0, 50.0), // Band 2: unused (WilsonCowan)
+                    (100.0, 50.0), // Band 3: unused (WilsonCowan)
                 ],
-                band_gains: [
-                    (3.25, 22.0),
-                    (3.25, 22.0),
-                    (3.25, 22.0),
-                    (3.25, 22.0),
-                ],
+                band_gains: [(3.25, 22.0), (3.25, 22.0), (3.25, 22.0), (3.25, 22.0)],
                 band_offsets: [150.0, 170.0, 150.0, 150.0],
                 band_input_gains: [1.0; 4],
                 band_output_weights: [1.0; 4],
@@ -254,19 +248,24 @@ impl BrainType {
                 band_c1c2_scale: [1.0; 4],
                 band_g_fast_rate: [500.0; 4],
                 band_v0: [6.0; 4],
-                band_model_types: [BandModelType::JansenRit, BandModelType::JansenRit, BandModelType::WilsonCowan(14.0), BandModelType::WilsonCowan(25.0)],
+                band_model_types: [
+                    BandModelType::JansenRit,
+                    BandModelType::JansenRit,
+                    BandModelType::WilsonCowan(14.0),
+                    BandModelType::WilsonCowan(25.0),
+                ],
             },
 
             BrainType::HighAlpha => TonotopicParams {
                 band_rates: [
                     (75.0, 38.0),
-                    (90.0, 45.0),   // Closer to alpha
+                    (90.0, 45.0), // Closer to alpha
                     (100.0, 50.0),
-                    (110.0, 55.0),  // Less beta push
+                    (110.0, 55.0), // Less beta push
                 ],
                 band_gains: [
                     (3.25, 24.0),
-                    (3.25, 25.0),   // Strong inhibition → alpha lock
+                    (3.25, 25.0), // Strong inhibition → alpha lock
                     (3.25, 25.0),
                     (3.25, 23.0),
                 ],
@@ -289,13 +288,13 @@ impl BrainType {
             // (Barry et al. 2003: elevated theta/beta ratio)
             BrainType::Adhd => TonotopicParams {
                 band_rates: [
-                    (75.0, 37.0),   // Slightly faster low band
-                    (90.0, 45.0),
-                    (110.0, 55.0),  // Faster mid → more beta when activated
-                    (120.0, 60.0),
+                    (75.0, 34.0), // Slightly slower inhibition than Normal
+                    (90.0, 40.0),
+                    (110.0, 49.0), // Faster mid via a_rate, but weaker GABA-B
+                    (120.0, 54.0),
                 ],
                 band_gains: [
-                    (3.5, 18.0),    // Weaker inhibition
+                    (3.5, 18.0), // Weaker inhibition
                     (3.5, 18.0),
                     (3.5, 19.0),
                     (3.5, 18.0),
@@ -311,22 +310,22 @@ impl BrainType {
                 band_c1c2_scale: [1.0; 4],
                 band_g_fast_rate: [450.0; 4],
                 band_v0: [5.5; 4],
-                band_model_types: [BandModelType::JansenRit, BandModelType::JansenRit, BandModelType::WilsonCowan(14.0), BandModelType::WilsonCowan(25.0)],
+                band_model_types: [
+                    BandModelType::JansenRit,
+                    BandModelType::JansenRit,
+                    BandModelType::WilsonCowan(14.0),
+                    BandModelType::WilsonCowan(25.0),
+                ],
             },
 
             BrainType::Aging => TonotopicParams {
                 band_rates: [
-                    (60.0, 30.0),   // Very slow → delta/theta
-                    (70.0, 35.0),   // Slow → theta
-                    (85.0, 42.0),   // Slower than normal
-                    (100.0, 50.0),  // Normal (reduced from 120)
+                    (60.0, 30.0),  // Very slow → delta/theta
+                    (70.0, 35.0),  // Slow → theta
+                    (85.0, 42.0),  // Slower than normal
+                    (100.0, 50.0), // Normal (reduced from 120)
                 ],
-                band_gains: [
-                    (3.25, 22.0),
-                    (3.25, 22.0),
-                    (3.25, 22.0),
-                    (3.0, 21.0),
-                ],
+                band_gains: [(3.25, 22.0), (3.25, 22.0), (3.25, 22.0), (3.0, 21.0)],
                 // Moderate offsets; slower rates shift frequency down
                 band_offsets: [155.0, 170.0, 185.0, 180.0],
                 band_input_gains: [1.0; 4],
@@ -343,17 +342,12 @@ impl BrainType {
             // Anxious: overdriven cortex — elevated beta, hyperarousal
             BrainType::Anxious => TonotopicParams {
                 band_rates: [
-                    (80.0, 40.0),
-                    (100.0, 50.0),
-                    (115.0, 57.0),  // Faster → beta bias
-                    (120.0, 60.0),
+                    (80.0, 44.0),
+                    (100.0, 55.0),
+                    (115.0, 63.0), // Faster inhibition → stronger beta bias
+                    (120.0, 66.0),
                 ],
-                band_gains: [
-                    (3.4, 20.0),
-                    (3.5, 20.0),
-                    (3.5, 20.0),
-                    (3.5, 20.0),
-                ],
+                band_gains: [(3.4, 20.0), (3.5, 20.0), (3.5, 20.0), (3.5, 20.0)],
                 // Deep in oscillatory regime → persistent high-frequency activity
                 band_offsets: [190.0, 210.0, 230.0, 240.0],
                 band_input_gains: [1.0; 4],
@@ -387,10 +381,10 @@ impl BrainType {
                 // Left hemisphere: fast — θ/α/SMR/β (hybrid JR+WC)
                 left: TonotopicParams {
                     band_rates: [
-                        (80.0, 40.0),    // θ ~9 Hz (ratio 2.0)
-                        (100.0, 50.0),   // α ~11 Hz (ratio 2.0)
-                        (100.0, 50.0),   // Band 2: unused (WilsonCowan)
-                        (100.0, 50.0),   // Band 3: unused (WilsonCowan)
+                        (80.0, 40.0),  // θ ~9 Hz (ratio 2.0)
+                        (100.0, 50.0), // α ~11 Hz (ratio 2.0)
+                        (100.0, 50.0), // Band 2: unused (WilsonCowan)
+                        (100.0, 50.0), // Band 3: unused (WilsonCowan)
                     ],
                     band_gains: [(3.25, 22.0); 4],
                     band_offsets: [150.0, 175.0, 150.0, 150.0],
@@ -402,7 +396,12 @@ impl BrainType {
                     band_c1c2_scale: [1.0; 4],
                     band_g_fast_rate: [500.0; 4],
                     band_v0: [6.0; 4],
-                    band_model_types: [BandModelType::JansenRit, BandModelType::JansenRit, BandModelType::WilsonCowan(14.0), BandModelType::WilsonCowan(25.0)],
+                    band_model_types: [
+                        BandModelType::JansenRit,
+                        BandModelType::JansenRit,
+                        BandModelType::WilsonCowan(14.0),
+                        BandModelType::WilsonCowan(25.0),
+                    ],
                 },
                 // Right hemisphere: slow — θ-high/α-low/α/α-high
                 // Recalibrated from (60,30)/(70,35) "delta drag" to awake-relaxed range.
@@ -411,10 +410,10 @@ impl BrainType {
                 // matching the AST hypothesis without crossing into pathological delta.
                 right: TonotopicParams {
                     band_rates: [
-                        (75.0, 37.0),    // θ-high ~8.7 Hz
-                        (85.0, 42.0),    // α-low ~9.5 Hz
-                        (95.0, 47.0),    // α ~10.6 Hz
-                        (100.0, 50.0),   // α ~11.3 Hz
+                        (75.0, 37.0),  // θ-high ~8.7 Hz
+                        (85.0, 42.0),  // α-low ~9.5 Hz
+                        (95.0, 47.0),  // α ~10.6 Hz
+                        (100.0, 50.0), // α ~11.3 Hz
                     ],
                     band_gains: [(3.25, 22.0); 4],
                     // Pushed deeper into oscillatory regime to produce alpha at rest
@@ -442,18 +441,8 @@ impl BrainType {
             BrainType::HighAlpha => BilateralParams {
                 // Both hemispheres converge toward alpha (meditation training)
                 left: TonotopicParams {
-                    band_rates: [
-                        (85.0, 42.0),
-                        (95.0, 47.0),
-                        (105.0, 52.0),
-                        (115.0, 57.0),
-                    ],
-                    band_gains: [
-                        (3.25, 24.0),
-                        (3.25, 25.0),
-                        (3.25, 25.0),
-                        (3.25, 24.0),
-                    ],
+                    band_rates: [(85.0, 42.0), (95.0, 47.0), (105.0, 52.0), (115.0, 57.0)],
+                    band_gains: [(3.25, 24.0), (3.25, 25.0), (3.25, 25.0), (3.25, 24.0)],
                     // Mid bands deepest → strong bilateral alpha synchrony
                     band_offsets: [165.0, 195.0, 210.0, 185.0],
                     band_input_gains: [1.0; 4],
@@ -467,18 +456,8 @@ impl BrainType {
                     band_model_types: [BandModelType::JansenRit; 4],
                 },
                 right: TonotopicParams {
-                    band_rates: [
-                        (70.0, 35.0),
-                        (85.0, 42.0),
-                        (95.0, 47.0),
-                        (105.0, 52.0),
-                    ],
-                    band_gains: [
-                        (3.25, 24.0),
-                        (3.25, 25.0),
-                        (3.25, 25.0),
-                        (3.25, 24.0),
-                    ],
+                    band_rates: [(70.0, 35.0), (85.0, 42.0), (95.0, 47.0), (105.0, 52.0)],
+                    band_gains: [(3.25, 24.0), (3.25, 25.0), (3.25, 25.0), (3.25, 24.0)],
                     band_offsets: [155.0, 185.0, 200.0, 175.0],
                     band_input_gains: [1.0; 4],
                     band_output_weights: [1.0; 4],
@@ -499,14 +478,10 @@ impl BrainType {
 
             BrainType::Adhd => BilateralParams {
                 // Left: fast hemisphere — Neuro-Plastic Shift applied
-                // Raised offsets + stronger C7 = responsive but still ADHD-impaired
+                // Raised offsets + stronger C7 = responsive but still ADHD-impaired.
+                // b_rate remains slower than Normal across the JR-driven bands.
                 left: TonotopicParams {
-                    band_rates: [
-                        (85.0, 42.0),
-                        (105.0, 52.0),
-                        (120.0, 60.0),
-                        (135.0, 67.0),
-                    ],
+                    band_rates: [(85.0, 38.0), (105.0, 47.0), (120.0, 54.0), (135.0, 60.0)],
                     band_gains: [(3.5, 18.0); 4],
                     band_offsets: [140.0, 120.0, 105.0, 95.0],
                     band_input_gains: [1.0; 4],
@@ -517,7 +492,12 @@ impl BrainType {
                     band_c1c2_scale: [1.0; 4],
                     band_g_fast_rate: [450.0; 4],
                     band_v0: [5.5; 4],
-                    band_model_types: [BandModelType::JansenRit, BandModelType::JansenRit, BandModelType::WilsonCowan(14.0), BandModelType::WilsonCowan(25.0)],
+                    band_model_types: [
+                        BandModelType::JansenRit,
+                        BandModelType::JansenRit,
+                        BandModelType::WilsonCowan(14.0),
+                        BandModelType::WilsonCowan(25.0),
+                    ],
                 },
                 // Right: Lite Hybrid — theta-dominant but capable of fast response
                 // Bands 0-1: JR (slow, theta/alpha characteristic of ADHD right hemisphere)
@@ -525,10 +505,10 @@ impl BrainType {
                 // Output weights dampened to preserve L>R asymmetry
                 right: TonotopicParams {
                     band_rates: [
-                        (65.0, 32.0),    // θ-low ~8.0 Hz
-                        (75.0, 37.0),    // θ-high ~8.7 Hz
-                        (85.0, 42.0),    // Band 2: unused (WilsonCowan)
-                        (95.0, 47.0),    // Band 3: unused (WilsonCowan)
+                        (65.0, 29.0), // θ-low ~8.0 Hz with slower inhibition
+                        (75.0, 33.0), // θ-high ~8.7 Hz
+                        (85.0, 38.0), // Band 2: unused (WilsonCowan)
+                        (95.0, 42.0), // Band 3: unused (WilsonCowan)
                     ],
                     band_gains: [(3.5, 18.0); 4],
                     band_offsets: [135.0, 120.0, 105.0, 95.0],
@@ -540,7 +520,12 @@ impl BrainType {
                     band_c1c2_scale: [1.0; 4],
                     band_g_fast_rate: [450.0; 4],
                     band_v0: [5.5; 4],
-                    band_model_types: [BandModelType::JansenRit, BandModelType::JansenRit, BandModelType::WilsonCowan(12.0), BandModelType::WilsonCowan(20.0)],
+                    band_model_types: [
+                        BandModelType::JansenRit,
+                        BandModelType::JansenRit,
+                        BandModelType::WilsonCowan(12.0),
+                        BandModelType::WilsonCowan(20.0),
+                    ],
                 },
                 // Strengthened callosal coupling (was 0.08) — hemispheres can communicate
                 callosal_coupling: 0.12,
@@ -552,18 +537,8 @@ impl BrainType {
             BrainType::Aging => BilateralParams {
                 // Both hemispheres slower; asymmetry reduced
                 left: TonotopicParams {
-                    band_rates: [
-                        (70.0, 35.0),
-                        (85.0, 42.0),
-                        (100.0, 50.0),
-                        (115.0, 57.0),
-                    ],
-                    band_gains: [
-                        (3.25, 22.0),
-                        (3.25, 22.0),
-                        (3.0, 21.0),
-                        (3.0, 21.0),
-                    ],
+                    band_rates: [(70.0, 35.0), (85.0, 42.0), (100.0, 50.0), (115.0, 57.0)],
+                    band_gains: [(3.25, 22.0), (3.25, 22.0), (3.0, 21.0), (3.0, 21.0)],
                     // Moderate, slightly reduced from Normal
                     band_offsets: [155.0, 170.0, 185.0, 185.0],
                     band_input_gains: [1.0; 4],
@@ -578,17 +553,12 @@ impl BrainType {
                 },
                 right: TonotopicParams {
                     band_rates: [
-                        (60.0, 30.0),    // θ-low ~7 Hz (was δ ~5.7 Hz)
-                        (70.0, 35.0),    // θ ~8 Hz (was δ/θ ~7 Hz)
-                        (80.0, 40.0),    // α-low ~9 Hz (was θ ~8 Hz)
-                        (85.0, 42.0),    // α-low ~9.5 Hz (unchanged)
+                        (60.0, 30.0), // θ-low ~7 Hz (was δ ~5.7 Hz)
+                        (70.0, 35.0), // θ ~8 Hz (was δ/θ ~7 Hz)
+                        (80.0, 40.0), // α-low ~9 Hz (was θ ~8 Hz)
+                        (85.0, 42.0), // α-low ~9.5 Hz (unchanged)
                     ],
-                    band_gains: [
-                        (3.25, 22.0),
-                        (3.25, 22.0),
-                        (3.0, 21.0),
-                        (3.0, 21.0),
-                    ],
+                    band_gains: [(3.25, 22.0), (3.25, 22.0), (3.0, 21.0), (3.0, 21.0)],
                     band_offsets: [155.0, 170.0, 180.0, 180.0],
                     band_input_gains: [1.0; 4],
                     band_output_weights: [1.0; 4],
@@ -604,7 +574,7 @@ impl BrainType {
                 // degradation (Sullivan & Pfefferbaum 2006). Literature supports
                 // 20-30% reduction, not 50%.
                 callosal_coupling: 0.11,
-                callosal_delay_s: 0.012,  // Slower transfer
+                callosal_delay_s: 0.012, // Slower transfer
                 contralateral_ratio: 0.65,
                 left_weight: 0.5,
             },
@@ -613,10 +583,10 @@ impl BrainType {
                 // Left: beta excess (hyperactive left hemisphere)
                 left: TonotopicParams {
                     band_rates: [
-                        (90.0, 45.0),
-                        (110.0, 55.0),
-                        (130.0, 65.0),   // Strong β bias
-                        (145.0, 72.0),   // β-high
+                        (90.0, 50.0),
+                        (110.0, 61.0),
+                        (130.0, 72.0), // Strong β bias
+                        (145.0, 79.0), // β-high
                     ],
                     band_gains: [(3.5, 20.0); 4],
                     // Deep in oscillatory regime → persistent beta overactivation
@@ -633,12 +603,7 @@ impl BrainType {
                 },
                 // Right: elevated but less extreme
                 right: TonotopicParams {
-                    band_rates: [
-                        (70.0, 35.0),
-                        (85.0, 42.0),
-                        (100.0, 50.0),
-                        (115.0, 57.0),
-                    ],
+                    band_rates: [(70.0, 39.0), (85.0, 46.0), (100.0, 55.0), (115.0, 63.0)],
                     band_gains: [(3.5, 20.0); 4],
                     band_offsets: [185.0, 205.0, 220.0, 230.0],
                     band_input_gains: [1.0; 4],
@@ -861,7 +826,10 @@ mod tests {
             assert!(p.jansen_rit.c5 >= 0.0, "{bt:?} jr.c5");
             assert!(p.jansen_rit.c6 >= 0.0, "{bt:?} jr.c6");
             assert!(p.jansen_rit.c7 >= 0.0, "{bt:?} jr.c7");
-            assert!(p.jansen_rit.slow_inhib_ratio > 0.0, "{bt:?} jr.slow_inhib_ratio");
+            assert!(
+                p.jansen_rit.slow_inhib_ratio > 0.0,
+                "{bt:?} jr.slow_inhib_ratio"
+            );
         }
     }
 
@@ -880,8 +848,14 @@ mod tests {
 
                 assert!(t.band_offsets[b] > 0.0, "{bt:?} band {b} offset");
                 assert!(t.band_input_gains[b] > 0.0, "{bt:?} band {b} input_gain");
-                assert!(t.band_output_weights[b] > 0.0, "{bt:?} band {b} output_weight");
-                assert!(t.band_slow_inhib_ratios[b] > 0.0, "{bt:?} band {b} slow_inhib");
+                assert!(
+                    t.band_output_weights[b] > 0.0,
+                    "{bt:?} band {b} output_weight"
+                );
+                assert!(
+                    t.band_slow_inhib_ratios[b] > 0.0,
+                    "{bt:?} band {b} slow_inhib"
+                );
                 assert!(t.band_c7[b] > 0.0, "{bt:?} band {b} c7");
                 assert!(t.band_sigmoid_r[b] > 0.0, "{bt:?} band {b} sigmoid_r");
                 assert!(t.band_c1c2_scale[b] > 0.0, "{bt:?} band {b} c1c2_scale");
@@ -896,19 +870,34 @@ mod tests {
         for &bt in BrainType::all() {
             let bi = bt.bilateral_params();
 
-            assert!(bi.callosal_coupling >= 0.0 && bi.callosal_coupling <= 1.0,
-                "{bt:?} callosal_coupling = {}", bi.callosal_coupling);
-            assert!(bi.callosal_delay_s > 0.0 && bi.callosal_delay_s < 0.1,
-                "{bt:?} callosal_delay_s = {}", bi.callosal_delay_s);
-            assert!(bi.contralateral_ratio > 0.5 && bi.contralateral_ratio < 1.0,
-                "{bt:?} contralateral_ratio = {}", bi.contralateral_ratio);
-            assert!(bi.left_weight > 0.0 && bi.left_weight <= 1.0,
-                "{bt:?} left_weight = {}", bi.left_weight);
+            assert!(
+                bi.callosal_coupling >= 0.0 && bi.callosal_coupling <= 1.0,
+                "{bt:?} callosal_coupling = {}",
+                bi.callosal_coupling
+            );
+            assert!(
+                bi.callosal_delay_s > 0.0 && bi.callosal_delay_s < 0.1,
+                "{bt:?} callosal_delay_s = {}",
+                bi.callosal_delay_s
+            );
+            assert!(
+                bi.contralateral_ratio > 0.5 && bi.contralateral_ratio < 1.0,
+                "{bt:?} contralateral_ratio = {}",
+                bi.contralateral_ratio
+            );
+            assert!(
+                bi.left_weight > 0.0 && bi.left_weight <= 1.0,
+                "{bt:?} left_weight = {}",
+                bi.left_weight
+            );
 
             // Both hemispheres should have valid tonotopic params
             for b in 0..4 {
                 assert!(bi.left.band_offsets[b] > 0.0, "{bt:?} left band {b} offset");
-                assert!(bi.right.band_offsets[b] > 0.0, "{bt:?} right band {b} offset");
+                assert!(
+                    bi.right.band_offsets[b] > 0.0,
+                    "{bt:?} right band {b} offset"
+                );
             }
         }
     }
@@ -925,8 +914,52 @@ mod tests {
         assert!(
             adhd.jansen_rit.b_gain < normal.jansen_rit.b_gain,
             "ADHD b_gain ({}) should be < Normal ({})",
-            adhd.jansen_rit.b_gain, normal.jansen_rit.b_gain
+            adhd.jansen_rit.b_gain,
+            normal.jansen_rit.b_gain
         );
+    }
+
+    #[test]
+    fn adhd_b_rate_is_slower_than_normal_across_jr_profiles() {
+        let normal = BrainType::Normal.params();
+        let adhd = BrainType::Adhd.params();
+
+        assert!(
+            adhd.jansen_rit.b_rate < normal.jansen_rit.b_rate,
+            "ADHD scalar b_rate ({}) should be < Normal ({})",
+            adhd.jansen_rit.b_rate,
+            normal.jansen_rit.b_rate
+        );
+
+        let normal_tono = BrainType::Normal.tonotopic_params();
+        let adhd_tono = BrainType::Adhd.tonotopic_params();
+
+        for band in 0..2 {
+            assert!(
+                adhd_tono.band_rates[band].1 < normal_tono.band_rates[band].1,
+                "ADHD tonotopic band {band} b_rate ({}) should be < Normal ({})",
+                adhd_tono.band_rates[band].1,
+                normal_tono.band_rates[band].1
+            );
+        }
+
+        let normal_bi = BrainType::Normal.bilateral_params();
+        let adhd_bi = BrainType::Adhd.bilateral_params();
+
+        for band in 0..2 {
+            assert!(
+                adhd_bi.left.band_rates[band].1 < normal_bi.left.band_rates[band].1,
+                "ADHD left bilateral band {band} b_rate ({}) should be < Normal ({})",
+                adhd_bi.left.band_rates[band].1,
+                normal_bi.left.band_rates[band].1
+            );
+            assert!(
+                adhd_bi.right.band_rates[band].1 < normal_bi.right.band_rates[band].1,
+                "ADHD right bilateral band {band} b_rate ({}) should be < Normal ({})",
+                adhd_bi.right.band_rates[band].1,
+                normal_bi.right.band_rates[band].1
+            );
+        }
     }
 
     #[test]
@@ -937,7 +970,8 @@ mod tests {
         assert!(
             adhd.jansen_rit.input_offset < normal.jansen_rit.input_offset,
             "ADHD input_offset ({}) should be < Normal ({})",
-            adhd.jansen_rit.input_offset, normal.jansen_rit.input_offset
+            adhd.jansen_rit.input_offset,
+            normal.jansen_rit.input_offset
         );
     }
 
@@ -949,7 +983,8 @@ mod tests {
         assert!(
             ha.jansen_rit.b_gain >= normal.jansen_rit.b_gain,
             "HighAlpha b_gain ({}) should be >= Normal ({})",
-            ha.jansen_rit.b_gain, normal.jansen_rit.b_gain
+            ha.jansen_rit.b_gain,
+            normal.jansen_rit.b_gain
         );
     }
 
@@ -961,12 +996,14 @@ mod tests {
         assert!(
             aging.jansen_rit.a_rate < normal.jansen_rit.a_rate,
             "Aging a_rate ({}) should be < Normal ({})",
-            aging.jansen_rit.a_rate, normal.jansen_rit.a_rate
+            aging.jansen_rit.a_rate,
+            normal.jansen_rit.a_rate
         );
         assert!(
             aging.jansen_rit.b_rate < normal.jansen_rit.b_rate,
             "Aging b_rate ({}) should be < Normal ({})",
-            aging.jansen_rit.b_rate, normal.jansen_rit.b_rate
+            aging.jansen_rit.b_rate,
+            normal.jansen_rit.b_rate
         );
     }
 
@@ -978,7 +1015,8 @@ mod tests {
         assert!(
             aging.jansen_rit.c < normal.jansen_rit.c,
             "Aging c ({}) should be < Normal ({})",
-            aging.jansen_rit.c, normal.jansen_rit.c
+            aging.jansen_rit.c,
+            normal.jansen_rit.c
         );
     }
 
@@ -990,8 +1028,52 @@ mod tests {
         assert!(
             anxious.jansen_rit.input_offset > normal.jansen_rit.input_offset,
             "Anxious input_offset ({}) should be > Normal ({})",
-            anxious.jansen_rit.input_offset, normal.jansen_rit.input_offset
+            anxious.jansen_rit.input_offset,
+            normal.jansen_rit.input_offset
         );
+    }
+
+    #[test]
+    fn anxious_b_rate_is_faster_than_normal_across_jr_profiles() {
+        let normal = BrainType::Normal.params();
+        let anxious = BrainType::Anxious.params();
+
+        assert!(
+            anxious.jansen_rit.b_rate > normal.jansen_rit.b_rate,
+            "Anxious scalar b_rate ({}) should be > Normal ({})",
+            anxious.jansen_rit.b_rate,
+            normal.jansen_rit.b_rate
+        );
+
+        let normal_tono = BrainType::Normal.tonotopic_params();
+        let anxious_tono = BrainType::Anxious.tonotopic_params();
+
+        for band in 0..4 {
+            assert!(
+                anxious_tono.band_rates[band].1 > normal_tono.band_rates[band].1,
+                "Anxious tonotopic band {band} b_rate ({}) should be > Normal ({})",
+                anxious_tono.band_rates[band].1,
+                normal_tono.band_rates[band].1
+            );
+        }
+
+        let normal_bi = BrainType::Normal.bilateral_params();
+        let anxious_bi = BrainType::Anxious.bilateral_params();
+
+        for band in 0..4 {
+            assert!(
+                anxious_bi.left.band_rates[band].1 > normal_bi.left.band_rates[band].1,
+                "Anxious left bilateral band {band} b_rate ({}) should be > Normal ({})",
+                anxious_bi.left.band_rates[band].1,
+                normal_bi.left.band_rates[band].1
+            );
+            assert!(
+                anxious_bi.right.band_rates[band].1 > normal_bi.right.band_rates[band].1,
+                "Anxious right bilateral band {band} b_rate ({}) should be > Normal ({})",
+                anxious_bi.right.band_rates[band].1,
+                normal_bi.right.band_rates[band].1
+            );
+        }
     }
 
     #[test]
@@ -1002,7 +1084,8 @@ mod tests {
         assert!(
             anxious.jansen_rit.c > normal.jansen_rit.c,
             "Anxious c ({}) should be > Normal ({})",
-            anxious.jansen_rit.c, normal.jansen_rit.c
+            anxious.jansen_rit.c,
+            normal.jansen_rit.c
         );
     }
 

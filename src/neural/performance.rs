@@ -6,7 +6,6 @@
 /// 1. **Entrainment Ratio**: Does the EEG lock onto the preset's LFO?
 /// 2. **E/I Stability Index**: Is the fast inhibitory loop stable?
 /// 3. **Spectral Centroid**: Where is the EEG's "centre of gravity"?
-
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -90,18 +89,15 @@ impl PerformanceVector {
         envelope: Option<&[f64]>,
     ) -> Self {
         let spectral_centroid = compute_spectral_centroid(eeg, sample_rate);
-        let entrainment_ratio = target_freq.map(|freq| {
-            compute_entrainment_ratio(eeg, sample_rate, freq)
-        });
+        let entrainment_ratio =
+            target_freq.map(|freq| compute_entrainment_ratio(eeg, sample_rate, freq));
         let ei_stability = if fast_inhib_trace.is_empty() {
             None
         } else {
             Some(compute_ei_stability(fast_inhib_trace))
         };
 
-        let plv = target_freq.map(|freq| {
-            compute_plv(eeg, sample_rate, freq)
-        });
+        let plv = target_freq.map(|freq| compute_plv(eeg, sample_rate, freq));
 
         let envelope_plv = envelope.map(|env| compute_envelope_plv(eeg, env, sample_rate));
 
@@ -239,7 +235,9 @@ fn compute_entrainment_ratio(eeg: &[f64], sample_rate: f64, target_freq: f64) ->
 
     // Target band: target_freq ± 1 Hz
     let target_lo = ((target_freq - 1.0).max(0.5) / freq_res).floor() as usize;
-    let target_hi = ((target_freq + 1.0) / freq_res).ceil().min(nyquist_bin as f64) as usize;
+    let target_hi = ((target_freq + 1.0) / freq_res)
+        .ceil()
+        .min(nyquist_bin as f64) as usize;
 
     let mut target_power = 0.0_f64;
     let mut total_power = 0.0_f64;
@@ -300,7 +298,9 @@ fn compute_plv(eeg: &[f64], sample_rate: f64, target_freq: f64) -> f64 {
 
     let freq_res = sample_rate / fft_len as f64;
     let lo_bin = ((target_freq - 3.0).max(0.5) / freq_res).floor() as usize;
-    let hi_bin = ((target_freq + 3.0) / freq_res).ceil().min((fft_len / 2) as f64) as usize;
+    let hi_bin = ((target_freq + 3.0) / freq_res)
+        .ceil()
+        .min((fft_len / 2) as f64) as usize;
 
     // Zero out everything outside the bandpass
     for i in 0..fft_len {
@@ -442,8 +442,14 @@ mod tests {
         let eeg = sine(10.0, SR, 5.0);
         let pv = PerformanceVector::compute(&eeg, &[], SR, None);
 
-        assert!(pv.entrainment_ratio.is_none(), "No LFO → entrainment should be None");
-        assert!(pv.ei_stability.is_none(), "Empty fast_inhib → ei_stability should be None");
+        assert!(
+            pv.entrainment_ratio.is_none(),
+            "No LFO → entrainment should be None"
+        );
+        assert!(
+            pv.ei_stability.is_none(),
+            "Empty fast_inhib → ei_stability should be None"
+        );
         assert!(pv.spectral_centroid > 0.0, "Centroid should be positive");
     }
 
@@ -513,7 +519,10 @@ mod tests {
         // Constant y3 → std_dev = 0 → CV = 0
         let y3 = vec![5.0; 1000];
         let cv = compute_ei_stability(&y3);
-        assert!(cv.abs() < 1e-10, "Constant signal should give CV=0, got {cv}");
+        assert!(
+            cv.abs() < 1e-10,
+            "Constant signal should give CV=0, got {cv}"
+        );
     }
 
     #[test]
@@ -523,7 +532,10 @@ mod tests {
             .map(|i| 5.0 + 2.0 * (2.0 * PI * 10.0 * i as f64 / SR).sin())
             .collect();
         let cv = compute_ei_stability(&y3);
-        assert!(cv > 0.0, "Oscillating signal should give positive CV, got {cv}");
+        assert!(
+            cv > 0.0,
+            "Oscillating signal should give positive CV, got {cv}"
+        );
     }
 
     #[test]
@@ -668,15 +680,14 @@ mod tests {
         let mut state = 12345u64;
         let eeg: Vec<f64> = (0..n)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (state as f64 / u64::MAX as f64) * 2.0 - 1.0
             })
             .collect();
         let plv = compute_plv(&eeg, SR, 10.0);
-        assert!(
-            plv < 0.3,
-            "Random noise should have low PLV, got {plv:.3}"
-        );
+        assert!(plv < 0.3, "Random noise should have low PLV, got {plv:.3}");
     }
 
     #[test]
@@ -686,7 +697,10 @@ mod tests {
             .map(|i| (2.0 * PI * 14.0 * i as f64 / SR).sin())
             .collect();
         let plv = compute_plv(&eeg, SR, 14.0);
-        assert!(plv >= 0.0 && plv <= 1.0, "PLV should be in [0,1], got {plv}");
+        assert!(
+            plv >= 0.0 && plv <= 1.0,
+            "PLV should be in [0,1], got {plv}"
+        );
     }
 
     #[test]
@@ -696,7 +710,10 @@ mod tests {
             .map(|i| (2.0 * PI * 10.0 * i as f64 / SR).sin())
             .collect();
         let pv = PerformanceVector::compute(&eeg, &[], SR, Some(10.0));
-        assert!(pv.plv.is_some(), "PLV should be present when target freq given");
+        assert!(
+            pv.plv.is_some(),
+            "PLV should be present when target freq given"
+        );
         assert!(pv.plv.unwrap() > 0.5, "Pure sine PLV should be high");
     }
 
@@ -827,6 +844,9 @@ mod tests {
             .collect();
         let plv = compute_envelope_plv(&eeg, &env, SR);
         assert!(plv.is_finite(), "envelope PLV must be finite, got {plv}");
-        assert!((0.0..=1.0).contains(&plv), "envelope PLV out of range: {plv}");
+        assert!(
+            (0.0..=1.0).contains(&plv),
+            "envelope PLV out of range: {plv}"
+        );
     }
 }
