@@ -276,7 +276,10 @@ impl DifferentialEvolution {
     /// stagnation check measures progress relative to the recomputed
     /// incumbent — not the stale strict-feasible one.
     pub fn enable_eps_constrained(&mut self, eps_0: f64, t_c: usize) {
-        assert!(eps_0.is_finite() && eps_0 >= 0.0, "eps_0 must be finite and non-negative, got {eps_0}");
+        assert!(
+            eps_0.is_finite() && eps_0 >= 0.0,
+            "eps_0 must be finite and non-negative, got {eps_0}"
+        );
         assert!(t_c > 0, "t_c must be > 0");
         self.eps_schedule = Some(EpsSchedule { eps_0, t_c });
         self.recompute_best_under_current_eps();
@@ -1188,10 +1191,10 @@ mod tests {
 
     #[test]
     fn constrained_compare_feasible_beats_infeasible() {
-        let feasible = make_individual(0.1, 0.05);   // low fitness, low violation
+        let feasible = make_individual(0.1, 0.05); // low fitness, low violation
         let infeasible = make_individual(0.99, 0.5); // high fitness, high violation
-        // ε = 0.10 → feasible (0.05 ≤ 0.10) beats infeasible (0.5 > 0.10)
-        // even though the infeasible one has higher fitness.
+                                                     // ε = 0.10 → feasible (0.05 ≤ 0.10) beats infeasible (0.5 > 0.10)
+                                                     // even though the infeasible one has higher fitness.
         assert!(constrained_better(&feasible, &infeasible, 0.10));
         assert!(!constrained_better(&infeasible, &feasible, 0.10));
     }
@@ -1252,7 +1255,11 @@ mod tests {
             let _ = de.generate_trials(); // generation = 10
         }
         assert_eq!(de.generation(), 10);
-        assert!((de.current_eps() - 0.05).abs() < 1e-10, "ε at half-way should be 0.05, got {}", de.current_eps());
+        assert!(
+            (de.current_eps() - 0.05).abs() < 1e-10,
+            "ε at half-way should be 0.05, got {}",
+            de.current_eps()
+        );
 
         // At T_c → ε = 0
         for _ in 0..10 {
@@ -1299,9 +1306,15 @@ mod tests {
             de.report_constrained(i, 0.5, i as f64 * 0.1);
         }
         let med = de.suggest_eps_from_population(0.5);
-        assert!((med - 0.5).abs() < 1e-10, "median violation should be 0.5, got {med}");
+        assert!(
+            (med - 0.5).abs() < 1e-10,
+            "median violation should be 0.5, got {med}"
+        );
         let p70 = de.suggest_eps_from_population(0.7);
-        assert!((p70 - 0.6).abs() < 1e-10, "70th percentile should be 0.6, got {p70}");
+        assert!(
+            (p70 - 0.6).abs() < 1e-10,
+            "70th percentile should be 0.6, got {p70}"
+        );
         assert_eq!(de.suggest_eps_from_population(0.0), 0.0);
         assert!((de.suggest_eps_from_population(1.0) - 0.9).abs() < 1e-10);
     }
@@ -1324,7 +1337,7 @@ mod tests {
         // Report population BEFORE enabling the schedule (mirrors the
         // production main.rs sequence: init pop → enable_eps_constrained).
         de.report_constrained(0, 0.90, 0.10); // A — high fitness, mild infeasible
-        de.report_constrained(1, 0.50, 0.0);  // B — moderate, strict feasible
+        de.report_constrained(1, 0.50, 0.0); // B — moderate, strict feasible
         de.report_constrained(2, 0.20, 0.30); // far infeasible
         de.report_constrained(3, 0.10, 0.40); // worst
 
@@ -1433,7 +1446,9 @@ mod tests {
         // best() under current ε accepts (0, 0.95, 0.10).
         assert!((de.best().neural_fitness - 0.95).abs() < 1e-10);
         // best_strict() requires violation ≤ 1e-9; only individual 1 qualifies.
-        let strict = de.best_strict().expect("at least one strict-feasible exists");
+        let strict = de
+            .best_strict()
+            .expect("at least one strict-feasible exists");
         assert!((strict.neural_fitness - 0.50).abs() < 1e-10);
     }
 
@@ -1466,9 +1481,9 @@ mod tests {
     #[test]
     fn best_strict_accepts_tiny_fp_noise_violations() {
         let mut de = DifferentialEvolution::new(simple_bounds(2), 3, 0.8, 0.9, 42);
-        de.report_constrained(0, 0.30, 0.0);    // exactly 0
-        de.report_constrained(1, 0.80, 1e-15);  // FP-noise
-        de.report_constrained(2, 0.20, 0.10);   // genuinely infeasible
+        de.report_constrained(0, 0.30, 0.0); // exactly 0
+        de.report_constrained(1, 0.80, 1e-15); // FP-noise
+        de.report_constrained(2, 0.20, 0.10); // genuinely infeasible
         let strict = de.best_strict().expect("two of three are strict-feasible");
         assert!(
             (strict.neural_fitness - 0.80).abs() < 1e-10,
@@ -1598,7 +1613,10 @@ mod tests {
             history2.push((de2.best().fitness, de2.mean_fitness(), de2.fitness_std()));
         }
 
-        assert_eq!(history, history2, "legacy DE must be deterministic at fixed seed");
+        assert_eq!(
+            history, history2,
+            "legacy DE must be deterministic at fixed seed"
+        );
         // And every Individual must have neural_fitness == fitness, violation == 0.
         for ind in &de.population {
             assert_eq!(ind.neural_fitness, ind.fitness);
@@ -1856,7 +1874,10 @@ mod tests {
                 de.report_trial_result(target, trial, 0.0);
             }
             let now = de.stagnation_restart_count();
-            assert!(now >= prev, "restart counter must be monotone non-decreasing");
+            assert!(
+                now >= prev,
+                "restart counter must be monotone non-decreasing"
+            );
             if now > prev {
                 total_fires += 1;
             }

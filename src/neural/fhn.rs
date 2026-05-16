@@ -22,6 +22,38 @@ const DEFAULT_EPSILON: f64 = 0.08;
 
 /// Spike detection threshold (v crosses this upward → spike).
 const SPIKE_THRESHOLD: f64 = 1.0;
+/// Initial membrane potential (resting state).
+const INITIAL_VOLTAGE: f64 = -1.2;
+/// Initial recovery state (resting state).
+const INITIAL_RECOVERY: f64 = -0.6;
+/// Number of RK4 sub-steps per input sample.
+const RK4_SUB_STEPS: usize = 4;
+/// Minimum number of spikes required to compute finite ISI CV.
+const ISI_CV_MIN_SPIKES: usize = 3;
+/// Guard against near-zero mean ISI.
+const ISI_CV_MIN_MEAN_ISI: f64 = 1e-12;
+
+/// Legacy FHN runtime constants not represented in brain-type parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FhnLegacyConstantsSnapshot {
+    pub spike_threshold: f64,
+    pub initial_voltage: f64,
+    pub initial_recovery: f64,
+    pub rk4_sub_steps: usize,
+    pub isi_cv_min_spikes: usize,
+    pub isi_cv_min_mean_isi: f64,
+}
+
+pub fn legacy_constants_snapshot() -> FhnLegacyConstantsSnapshot {
+    FhnLegacyConstantsSnapshot {
+        spike_threshold: SPIKE_THRESHOLD,
+        initial_voltage: INITIAL_VOLTAGE,
+        initial_recovery: INITIAL_RECOVERY,
+        rk4_sub_steps: RK4_SUB_STEPS,
+        isi_cv_min_spikes: ISI_CV_MIN_SPIKES,
+        isi_cv_min_mean_isi: ISI_CV_MIN_MEAN_ISI,
+    }
+}
 
 pub struct FhnModel {
     pub a: f64,
@@ -93,14 +125,14 @@ impl FhnModel {
         let mut spike_times = Vec::new();
 
         // Initial conditions: resting state
-        let mut v: f64 = -1.2;
-        let mut w: f64 = -0.6;
+        let mut v: f64 = INITIAL_VOLTAGE;
+        let mut w: f64 = INITIAL_RECOVERY;
         let mut prev_v: f64 = v;
 
         // Number of RK4 sub-steps per input sample for stability.
         // h is in model time: real_dt × time_scale, so model dynamics
         // run time_scale× faster than real time.
-        let sub_steps = 4_usize;
+        let sub_steps = RK4_SUB_STEPS;
         let h = self.dt * self.time_scale / sub_steps as f64;
 
         for i in 0..n {
@@ -164,7 +196,7 @@ impl FhnModel {
     /// because a meaningful variance estimate requires at least 2 data points.
     /// Callers must check `is_nan()` before using the result in arithmetic.
     pub(crate) fn compute_isi_cv(spike_times: &[usize], sample_rate: f64) -> f64 {
-        if spike_times.len() < 3 {
+        if spike_times.len() < ISI_CV_MIN_SPIKES {
             return f64::NAN;
         }
 
@@ -174,7 +206,7 @@ impl FhnModel {
             .collect();
 
         let mean_isi = isis.iter().sum::<f64>() / isis.len() as f64;
-        if mean_isi < 1e-12 {
+        if mean_isi < ISI_CV_MIN_MEAN_ISI {
             return 0.0;
         }
 

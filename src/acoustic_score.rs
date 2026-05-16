@@ -181,7 +181,11 @@ pub fn extract_features_v1(rendered: &RenderedStereoAudio) -> AcousticFeatureVec
     let tp_left = true_peak_dbfs(&left_f64);
     let tp_right = true_peak_dbfs(&right_f64);
     let true_peak = tp_left.max(tp_right);
-    let true_peak_dbfs_field = if true_peak > -119.5 { Some(true_peak) } else { None };
+    let true_peak_dbfs_field = if true_peak > -119.5 {
+        Some(true_peak)
+    } else {
+        None
+    };
 
     // PLR is a pure derivation; only meaningful when both inputs exist.
     let plr_db = match (true_peak_dbfs_field, lufs_integrated) {
@@ -576,8 +580,17 @@ fn build_k_weighting(sample_rate_hz: f64) -> Option<(Biquad, Biquad)> {
     // Best-effort bilinear-transform fallback for non-48 kHz rates.
     // Within ~0.5 dB of the published coefficients across the audible band;
     // adequate for tests that exercise different sample rates.
-    let pre = high_shelf_biquad(sample_rate_hz, 1681.974_450_955_533, 0.707_175_236_955_419_6, 3.999_843_853_973_347);
-    let rlb = high_pass_biquad(sample_rate_hz, 38.135_470_876_024_44, 0.500_327_037_323_877_3);
+    let pre = high_shelf_biquad(
+        sample_rate_hz,
+        1681.974_450_955_533,
+        0.707_175_236_955_419_6,
+        3.999_843_853_973_347,
+    );
+    let rlb = high_pass_biquad(
+        sample_rate_hz,
+        38.135_470_876_024_44,
+        0.500_327_037_323_877_3,
+    );
     Some((pre, rlb))
 }
 
@@ -643,7 +656,11 @@ struct LoudnessResult {
 /// Block size 400 ms, 75 % overlap (100 ms hop). Two-stage gating:
 ///   1. Absolute gate at −70 LUFS (drops digital silence).
 ///   2. Relative gate at integrated − 10 LU (drops the lowest-loudness tail).
-fn compute_loudness_stereo(left: &[f64], right: &[f64], sample_rate_hz: f64) -> Option<LoudnessResult> {
+fn compute_loudness_stereo(
+    left: &[f64],
+    right: &[f64],
+    sample_rate_hz: f64,
+) -> Option<LoudnessResult> {
     if left.len() != right.len() {
         return None;
     }
@@ -745,8 +762,9 @@ fn compute_loudness_stereo(left: &[f64], right: &[f64], sample_rate_hz: f64) -> 
     };
     let left_lufs = left_lufs
         .unwrap_or_else(|| block_lufs_from_sum(kept2.iter().map(|&i| ms_left[i]).sum::<f64>() / n));
-    let right_lufs = right_lufs
-        .unwrap_or_else(|| block_lufs_from_sum(kept2.iter().map(|&i| ms_right[i]).sum::<f64>() / n));
+    let right_lufs = right_lufs.unwrap_or_else(|| {
+        block_lufs_from_sum(kept2.iter().map(|&i| ms_right[i]).sum::<f64>() / n)
+    });
 
     Some(LoudnessResult {
         integrated_lufs: integrated,
@@ -771,7 +789,10 @@ fn single_channel_integrated_lufs(per_block_ms: &[f64]) -> Option<f64> {
     if per_block_ms.is_empty() {
         return None;
     }
-    let block_loudness: Vec<f64> = per_block_ms.iter().map(|&m| block_lufs_from_sum(m)).collect();
+    let block_loudness: Vec<f64> = per_block_ms
+        .iter()
+        .map(|&m| block_lufs_from_sum(m))
+        .collect();
     let kept1: Vec<usize> = block_loudness
         .iter()
         .enumerate()
@@ -780,8 +801,7 @@ fn single_channel_integrated_lufs(per_block_ms: &[f64]) -> Option<f64> {
     if kept1.is_empty() {
         return None;
     }
-    let mean_1: f64 =
-        kept1.iter().map(|&i| per_block_ms[i]).sum::<f64>() / kept1.len() as f64;
+    let mean_1: f64 = kept1.iter().map(|&i| per_block_ms[i]).sum::<f64>() / kept1.len() as f64;
     let integrated_1 = block_lufs_from_sum(mean_1);
     let rel_threshold = integrated_1 - 10.0;
     let kept2: Vec<usize> = kept1
@@ -791,8 +811,7 @@ fn single_channel_integrated_lufs(per_block_ms: &[f64]) -> Option<f64> {
     if kept2.is_empty() {
         return None;
     }
-    let mean_2: f64 =
-        kept2.iter().map(|&i| per_block_ms[i]).sum::<f64>() / kept2.len() as f64;
+    let mean_2: f64 = kept2.iter().map(|&i| per_block_ms[i]).sum::<f64>() / kept2.len() as f64;
     Some(block_lufs_from_sum(mean_2))
 }
 
@@ -848,8 +867,7 @@ fn polyphase_4x_taps() -> [[f64; 12]; 4] {
             let pi_arg = std::f64::consts::PI * arg;
             pi_arg.sin() / pi_arg
         };
-        let hann = 0.5
-            * (1.0 - (2.0 * std::f64::consts::PI * k as f64 / (L - 1) as f64).cos());
+        let hann = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * k as f64 / (L - 1) as f64).cos());
         h_full[k] = sinc_value * hann;
         sum += h_full[k];
     }
@@ -1362,15 +1380,29 @@ mod tests {
     }
 
     /// Build a stereo signal with independent L/R amplitudes (in dBFS).
-    fn stereo_two_levels(sample_rate_hz: u32, freq_hz: f64, l_dbfs: f64, r_dbfs: f64, secs: f64) -> RenderedStereoAudio {
+    fn stereo_two_levels(
+        sample_rate_hz: u32,
+        freq_hz: f64,
+        l_dbfs: f64,
+        r_dbfs: f64,
+        secs: f64,
+    ) -> RenderedStereoAudio {
         let n = (sample_rate_hz as f64 * secs) as usize;
         let amp_l = 10.0_f64.powf(l_dbfs / 20.0);
         let amp_r = 10.0_f64.powf(r_dbfs / 20.0);
         let left: Vec<f32> = (0..n)
-            .map(|i| (amp_l * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sample_rate_hz as f64).sin()) as f32)
+            .map(|i| {
+                (amp_l
+                    * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sample_rate_hz as f64)
+                        .sin()) as f32
+            })
             .collect();
         let right: Vec<f32> = (0..n)
-            .map(|i| (amp_r * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sample_rate_hz as f64).sin()) as f32)
+            .map(|i| {
+                (amp_r
+                    * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sample_rate_hz as f64)
+                        .sin()) as f32
+            })
             .collect();
         RenderedStereoAudio::new(sample_rate_hz, left, right)
     }
@@ -1401,7 +1433,10 @@ mod tests {
         let loud = stereo_dual(48_000, sine(48_000, 1000.0, 0.50, 2.0));
         let q = extract_features_v1(&quiet).lufs_integrated.unwrap();
         let l = extract_features_v1(&loud).lufs_integrated.unwrap();
-        assert!(l > q + 15.0, "20 dB level rise must lift LUFS, got {q:.2} → {l:.2}");
+        assert!(
+            l > q + 15.0,
+            "20 dB level rise must lift LUFS, got {q:.2} → {l:.2}"
+        );
     }
 
     #[test]
@@ -1436,7 +1471,9 @@ mod tests {
         let amp = 10.0_f64.powf(-20.0 / 20.0);
         // Left: constant −20 dBFS sine at 1 kHz
         let left: Vec<f32> = (0..n)
-            .map(|i| (amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0).sin()) as f32)
+            .map(|i| {
+                (amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0).sin()) as f32
+            })
             .collect();
         // Right: alternating 1 s of −20 dBFS sine and 1 s of silence.
         let right: Vec<f32> = (0..n)
@@ -1526,7 +1563,9 @@ mod tests {
     fn true_peak_at_least_sample_peak_for_random_signals() {
         let mut state = 1234567u64;
         for _ in 0..6 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let mono = deterministic_white(48_000, state);
             let stereo = stereo_dual(48_000, mono.clone());
             let features = extract_features_v1(&stereo);
@@ -1579,10 +1618,14 @@ mod tests {
     /// Generate deterministic white noise from a seeded LCG. Phase 1 only
     /// needs reproducible "wide-spectrum" data, not high-quality randomness.
     fn deterministic_white(n: usize, seed: u64) -> Vec<f64> {
-        let mut state = seed.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(3_037_000_493);
+        let mut state = seed
+            .wrapping_mul(2_862_933_555_777_941_757)
+            .wrapping_add(3_037_000_493);
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             // Map upper 32 bits to [-1, 1].
             let u = ((state >> 32) as u32) as f64 / u32::MAX as f64;
             out.push(2.0 * u - 1.0);
@@ -1715,7 +1758,10 @@ mod tests {
         let stereo = stereo_dual(48_000, sine(48_000, 200.0, 0.5, 1.0));
         let features = extract_features_v1(&stereo);
         let hf = features.hf_fraction_above_8khz.unwrap();
-        assert!(hf < 0.05, "200 Hz tone should have ~0 HF fraction, got {hf:.3}");
+        assert!(
+            hf < 0.05,
+            "200 Hz tone should have ~0 HF fraction, got {hf:.3}"
+        );
     }
 
     #[test]
@@ -1723,7 +1769,10 @@ mod tests {
         let stereo = stereo_dual(48_000, sine(48_000, 12_000.0, 0.5, 1.0));
         let features = extract_features_v1(&stereo);
         let hf = features.hf_fraction_above_8khz.unwrap();
-        assert!(hf > 0.90, "12 kHz tone should have ~1 HF fraction, got {hf:.3}");
+        assert!(
+            hf > 0.90,
+            "12 kHz tone should have ~1 HF fraction, got {hf:.3}"
+        );
     }
 
     // ── Peak-to-Loudness Ratio ─────────────────────────────────────────

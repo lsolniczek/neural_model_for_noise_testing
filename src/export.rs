@@ -1,3 +1,4 @@
+use crate::model_signature::ModelSignature;
 /// JSON export of optimised presets.
 ///
 /// Outputs a JSON file that maps directly to the NoiseEngine API,
@@ -20,6 +21,8 @@ pub struct PresetExport {
 pub struct ExportMeta {
     pub goal: String,
     pub score: f64,
+    /// Stage 0 compact serialized config object for exact model provenance.
+    pub model_signature: ModelSignature,
     pub generated_at: String,
     pub optimizer_generations: usize,
     pub audio_duration_secs: f32,
@@ -54,6 +57,7 @@ pub fn export_preset(
         meta: ExportMeta {
             goal: goal.to_string(),
             score: result.score,
+            model_signature: result.model_signature.clone(),
             generated_at: Utc::now().to_rfc3339(),
             optimizer_generations: generations,
             audio_duration_secs: duration_secs,

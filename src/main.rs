@@ -4,6 +4,7 @@ mod auditory;
 mod brain_type;
 mod disturb;
 mod export;
+mod model_signature;
 mod movement;
 mod neural;
 mod optimizer;
@@ -546,6 +547,23 @@ fn status_icon(status: &MetricStatus) -> &'static str {
     }
 }
 
+fn print_model_signature(signature: &model_signature::ModelSignature) {
+    println!(
+        "  Model:          {} / {} / {}",
+        signature.version, signature.scoring_profile, signature.normalization_mode
+    );
+    println!(
+        "  Pipeline path:  {}",
+        match signature.pipeline_variant {
+            model_signature::PipelineVariant::EvaluateCanonical => "evaluate_canonical",
+            model_signature::PipelineVariant::DisturbLegacyAblated => "disturb_legacy_ablated",
+        }
+    );
+    let json = serde_json::to_string(signature)
+        .unwrap_or_else(|_| "{\"error\":\"signature_serialization_failed\"}".to_string());
+    println!("  Model signature (json): {json}");
+}
+
 fn resolve_evaluate_feature_flags(
     assr: bool,
     no_assr: bool,
@@ -593,11 +611,13 @@ fn build_generate_data_config(
     duration: f32,
     brain_type: BrainType,
     phys_gate: bool,
+    seed: u64,
 ) -> SimulationConfig {
     SimulationConfig {
         duration_secs: duration,
         brain_type,
         physiological_thalamic_gate_enabled: phys_gate,
+        reproducibility_seed: Some(seed),
         ..SimulationConfig::default()
     }
 }
@@ -613,6 +633,7 @@ fn build_optimize_config(
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
+    seed: u64,
 ) -> SimulationConfig {
     // Priority 28 Phase 2 — when constraints are on, we MUST populate
     // acoustic features (so `Goal::comfort_violation` has something to
@@ -620,8 +641,7 @@ fn build_optimize_config(
     // see SimulationConfig::acoustic_constraints_enabled docs).
     // Validation in `validate_optimize_acoustic_mode` already rejects the
     // illegal combinations; this constructor is just a final safety net.
-    let acoustic_scoring_enabled =
-        acoustic_score_fusion_enabled || acoustic_constraints_enabled;
+    let acoustic_scoring_enabled = acoustic_score_fusion_enabled || acoustic_constraints_enabled;
     let acoustic_score_fusion_enabled = if acoustic_constraints_enabled {
         false
     } else {
@@ -642,6 +662,7 @@ fn build_optimize_config(
         jr_stochastic_sigma: jr_sigma,
         cet_b_slow_rate: gaba_b_rate,
         cet_b_slow_gain: gaba_b_gain,
+        reproducibility_seed: Some(seed),
         ..SimulationConfig::default()
     }
 }
@@ -955,6 +976,10 @@ fn open_append_csv(path: &Path, header: String) -> File {
     file
 }
 
+fn csv_escape_field(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 fn pairs_csv_header() -> String {
     [
         "pair_id",
@@ -988,6 +1013,8 @@ fn pairs_csv_header() -> String {
         "same_constraints",
         "same_p18_params",
         "same_flags",
+        "model_signature_schema_version",
+        "model_signature_json",
     ]
     .join(",")
 }
@@ -1010,6 +1037,8 @@ fn pairs_csv_row(
     child_selected_by_de: bool,
 ) -> String {
     let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
+    let signature_json = serde_json::to_string(&config.model_signature())
+        .unwrap_or_else(|_| "{\"error\":\"signature_serialization_failed\"}".to_string());
     [
         pair_id.to_string(),
         run_id.to_string(),
@@ -1037,7 +1066,10 @@ fn pairs_csv_row(
         bool01(child_selected_by_de),
         format!("{:.6}", parent_result.alpha_power),
         format!("{:.6}", child_result.alpha_power),
-        format!("{:.6}", child_result.alpha_power - parent_result.alpha_power),
+        format!(
+            "{:.6}",
+            child_result.alpha_power - parent_result.alpha_power
+        ),
         format!("{:.6}", parent_result.beta_power),
         format!("{:.6}", child_result.beta_power),
         format!("{:.6}", child_result.beta_power - parent_result.beta_power),
@@ -1046,6 +1078,8 @@ fn pairs_csv_row(
         bool01(config.acoustic_constraints_enabled),
         "1".to_string(),
         "1".to_string(),
+        "1".to_string(),
+        csv_escape_field(&signature_json),
     ]
     .join(",")
 }
@@ -1083,6 +1117,8 @@ fn runs_csv_header() -> String {
         "pairs_path",
         "total_examples",
         "total_pairs",
+        "model_signature_schema_version",
+        "model_signature_json",
     ]
     .join(",")
 }
@@ -1113,6 +1149,8 @@ fn runs_csv_row(
     total_pairs: usize,
 ) -> String {
     let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
+    let signature_json = serde_json::to_string(&config.model_signature())
+        .unwrap_or_else(|_| "{\"error\":\"signature_serialization_failed\"}".to_string());
     [
         run_id.to_string(),
         created_at.to_string(),
@@ -1147,11 +1185,18 @@ fn runs_csv_row(
         pairs_path.display().to_string(),
         total_examples.to_string(),
         total_pairs.to_string(),
+        "1".to_string(),
+        csv_escape_field(&signature_json),
     ]
     .join(",")
 }
 
 fn surrogate_csv_header() -> String {
+    // Stage 0 contract:
+    // `model_signature_json` is the compact serialized config object required by
+    // nmm_refactor Stage 0. It carries the full model path/provenance in one field.
+    // `model_signature_schema_version` versions that payload independently from
+    // older CSV readers.
     let mut cols: Vec<String> = vec![
         "example_id".into(),
         "run_id".into(),
@@ -1176,51 +1221,55 @@ fn surrogate_csv_header() -> String {
         "gaba_b_gain".into(),
     ];
     cols.extend((0..surrogate::GENOME_DIM).map(|i| format!("g{i}")));
-    cols.extend([
-        "score",
-        "legacy_nmm_score",
-        "fused_score",
-        "acoustic_goal_score",
-        "comfort_score",
-        "violation",
-        "dominant_freq_hz",
-        "delta_power",
-        "theta_power",
-        "alpha_power",
-        "beta_power",
-        "gamma_power",
-        "left_dominant_freq_hz",
-        "right_dominant_freq_hz",
-        "alpha_asymmetry",
-        "fhn_firing_rate",
-        "fhn_isi_cv",
-        "spectral_centroid_hz",
-        "entrainment_ratio",
-        "ei_stability_cv",
-        "brightness",
-        "broadband_level_db",
-        "speech_band_ratio",
-        "modulation_depth",
-        "sharpness_proxy",
-        "intelligibility",
-        "speech_privacy",
-        "lufs_asymmetry_lu",
-        "true_peak_dbfs",
-        "plr_db",
-        "spectral_tilt_db_per_oct",
-        "hf_fraction_above_8khz",
-        "source_balance_db_range",
-        "is_feasible",
-        "is_good_10s",
-        "is_good_30s",
-        "is_good_60s",
-        "is_stable_10_60",
-        "score_mean",
-        "score_std",
-        "repeats",
-    ]
-    .into_iter()
-    .map(str::to_string));
+    cols.extend(
+        [
+            "score",
+            "legacy_nmm_score",
+            "fused_score",
+            "acoustic_goal_score",
+            "comfort_score",
+            "violation",
+            "dominant_freq_hz",
+            "delta_power",
+            "theta_power",
+            "alpha_power",
+            "beta_power",
+            "gamma_power",
+            "left_dominant_freq_hz",
+            "right_dominant_freq_hz",
+            "alpha_asymmetry",
+            "fhn_firing_rate",
+            "fhn_isi_cv",
+            "spectral_centroid_hz",
+            "entrainment_ratio",
+            "ei_stability_cv",
+            "brightness",
+            "broadband_level_db",
+            "speech_band_ratio",
+            "modulation_depth",
+            "sharpness_proxy",
+            "intelligibility",
+            "speech_privacy",
+            "lufs_asymmetry_lu",
+            "true_peak_dbfs",
+            "plr_db",
+            "spectral_tilt_db_per_oct",
+            "hf_fraction_above_8khz",
+            "source_balance_db_range",
+            "is_feasible",
+            "is_good_10s",
+            "is_good_30s",
+            "is_good_60s",
+            "is_stable_10_60",
+            "score_mean",
+            "score_std",
+            "repeats",
+            "model_signature_schema_version",
+            "model_signature_json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
     cols.join(",")
 }
 
@@ -1257,6 +1306,9 @@ fn surrogate_csv_row(
     let fmt_opt = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
     let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
     let score = result.score;
+    // Stage 0 compact serialized config object (see surrogate_csv_header comment).
+    let signature_json = serde_json::to_string(&result.model_signature)
+        .unwrap_or_else(|_| "{\"error\":\"signature_serialization_failed\"}".to_string());
     let is_good_10s = if (config.duration_secs - 10.0).abs() < 1e-6 {
         bool01(score >= 0.60)
     } else {
@@ -1339,14 +1391,13 @@ fn surrogate_csv_row(
         format!("{score:.6}"),
         String::new(), // score_std
         "1".to_string(),
+        "1".to_string(),
+        csv_escape_field(&signature_json),
     ]);
     cols.join(",")
 }
 
-fn preset_from_genome_with_seed_context(
-    genome: &[f64],
-    seed_ctx: &SeedPresetContext,
-) -> Preset {
+fn preset_from_genome_with_seed_context(genome: &[f64], seed_ctx: &SeedPresetContext) -> Preset {
     let mut preset = Preset::from_genome_with_spread(genome, &seed_ctx.spread_per_slot);
     preset.room = seed_ctx.room.clone();
     for (i, obj) in preset.objects.iter_mut().enumerate() {
@@ -1377,7 +1428,8 @@ fn export_best_genome(
     sim_config: &SimulationConfig,
     seed_ctx: &SeedPresetContext,
 ) -> std::io::Result<(Preset, pipeline::SimulationResult)> {
-    let (best_preset, best_result) = reevaluate_best_preset(best_genome, goal, sim_config, seed_ctx);
+    let (best_preset, best_result) =
+        reevaluate_best_preset(best_genome, goal, sim_config, seed_ctx);
     export::export_preset(
         &best_preset,
         &best_result,
@@ -1462,7 +1514,10 @@ fn staged_output_paths(goal: &str, output: Option<&Path>) -> (PathBuf, PathBuf, 
 
 fn seed_only_path_for_preset(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("preset");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("preset");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("json");
     parent.join(format!("{stem}_seed_only.{ext}"))
 }
@@ -1961,7 +2016,9 @@ fn print_metric_distribution(
     };
     let suggestion = match current_threshold {
         Some(t) if p90 > t => format!("  ⚠ p90 > thr (∴ raise to ≥{:.2})", p90),
-        Some(t) if p90 < t * 0.5 => format!("  ⚠ p90 << thr (∴ tighten to ≈{:.2})", p90.max(p50 * 1.2)),
+        Some(t) if p90 < t * 0.5 => {
+            format!("  ⚠ p90 << thr (∴ tighten to ≈{:.2})", p90.max(p50 * 1.2))
+        }
         Some(_) => "  ✓ fits".to_string(),
         None => "".to_string(),
     };
@@ -2080,9 +2137,7 @@ fn run_calibrate_comfort(presets_dir: &Path, duration: f32, brain_type_str: &str
         };
         let f = &acoustic.features;
         let target_tilt = goal_target_tilt(*goal_kind);
-        let tilt_dev = f
-            .spectral_tilt_db_per_oct
-            .map(|t| (t - target_tilt).abs());
+        let tilt_dev = f.spectral_tilt_db_per_oct.map(|t| (t - target_tilt).abs());
         let sample = ComfortSample {
             lufs_asymmetry_lu: f.lufs_asymmetry_lu,
             true_peak_dbfs: f.true_peak_dbfs,
@@ -2196,12 +2251,7 @@ fn print_distributions(goal_label: &str, samples: &[ComfortSample]) {
         Some(5.0), // SPECTRAL_TILT_TOLERANCE_DB after 2026-05-01 calibration
         "dB/oct",
     );
-    print_metric_distribution(
-        "hf_fraction",
-        &hf,
-        goal_hf_threshold(goal_label),
-        "[0,1]",
-    );
+    print_metric_distribution("hf_fraction", &hf, goal_hf_threshold(goal_label), "[0,1]");
     print_metric_distribution(
         "source_balance",
         &src_balance,
@@ -2283,6 +2333,7 @@ fn run_optimize(
         jr_sigma,
         gaba_b_rate,
         gaba_b_gain,
+        seed,
     );
 
     println!();
@@ -2303,6 +2354,7 @@ fn run_optimize(
     if acoustic_score_fusion {
         println!("  Acoustic fusion: enabled ({goal_kind} objective)");
     }
+    print_model_signature(&sim_config.model_signature());
 
     let mut eval_logger = log_evaluations_path.map(|path| OptimizeCsvLogger::new(path, "optimize"));
     if let Some(ref logger) = eval_logger {
@@ -2408,7 +2460,10 @@ fn run_optimize(
             );
         }
         if seed_ctx.room.mode != 0
-            || seed_ctx.position_space_per_slot.iter().any(|&space| space != 0)
+            || seed_ctx
+                .position_space_per_slot
+                .iter()
+                .any(|&space| space != 0)
         {
             println!("  Seed context:   preserving room mode and object position spaces from seed");
         }
@@ -2548,7 +2603,14 @@ fn run_optimize(
                             "surrogate_validated_trial",
                             None,
                         );
-                        logger.log_example(&meta, trial_genome, goal_kind, bt, &sim_config, &result);
+                        logger.log_example(
+                            &meta,
+                            trial_genome,
+                            goal_kind,
+                            bt,
+                            &sim_config,
+                            &result,
+                        );
                         logger.log_pair(
                             gen + 1,
                             target_idx,
@@ -2622,12 +2684,7 @@ fn run_optimize(
                     String::new()
                 };
                 if constrained {
-                    de.report_trial_constrained(
-                        target_idx,
-                        trial_genome,
-                        result.score,
-                        violation,
-                    );
+                    de.report_trial_constrained(target_idx, trial_genome, result.score, violation);
                 } else {
                     de.report_trial_result(target_idx, trial_genome, result.score);
                 }
@@ -2654,7 +2711,11 @@ fn run_optimize(
             if constrained {
                 let (strict_label, strict_neural, strict_violation) = match de.best_strict() {
                     Some(s) => ("strict", s.neural_fitness, s.violation),
-                    None => ("none-strict-feasible; ε-best", de.best().neural_fitness, de.best().violation),
+                    None => (
+                        "none-strict-feasible; ε-best",
+                        de.best().neural_fitness,
+                        de.best().violation,
+                    ),
                 };
                 println!(
                     "  Gen {:>4}  ε = {:.4}  best ({}): neural = {:.4}  v = {:.4}  mean = {:.4}{}  [{:.0}s]",
@@ -2748,12 +2809,10 @@ fn run_optimize(
             Some(s) => s.genome.clone(),
             None => {
                 returned_strict = false;
+                eprintln!("  WARNING: no strictly feasible candidate found in constrained run.");
                 eprintln!(
-                    "  WARNING: no strictly feasible candidate found in constrained run."
-                );
-                eprintln!(
-                    "           Returning the ε-relaxed best (violation = {:.4}) — this preset"
-                    , de.best().violation
+                    "           Returning the ε-relaxed best (violation = {:.4}) — this preset",
+                    de.best().violation
                 );
                 eprintln!(
                     "           does not satisfy the comfort constraints. Consider increasing"
@@ -3017,7 +3076,9 @@ fn run_evaluate(
 
     if is_matrix {
         if log_evaluations_path.is_some() {
-            eprintln!("--log-evaluations is currently supported only for single goal/brain evaluate");
+            eprintln!(
+                "--log-evaluations is currently supported only for single goal/brain evaluate"
+            );
             std::process::exit(2);
         }
         // ── Matrix mode ─────────────────────────────────────────────────────
@@ -3032,6 +3093,17 @@ fn run_evaluate(
             gaba_b_rate,
             gaba_b_gain,
         );
+        let signature_preview = build_eval_config(
+            duration,
+            brain_types[0],
+            flags,
+            acoustic_score_fusion,
+            acoustic_score_fusion,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
+        );
+        print_model_signature(&signature_preview.model_signature());
         if acoustic_score {
             println!("  Note: acoustic metrics are shown only for single goal/brain evaluate.");
             println!();
@@ -3069,6 +3141,7 @@ fn run_evaluate(
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
+        print_model_signature(&result.model_signature);
         if fusion_applied {
             println!("  Score:      {:.4} (fused)", result.score);
         } else {
@@ -3444,8 +3517,7 @@ fn print_acoustic_score_summary(acoustic: &crate::acoustic_score::AcousticScoreR
     if let Some(acoustic_goal_score) = acoustic.acoustic_goal_score {
         println!(
             "    {:<24} {:>8.3}",
-            "Acoustic goal score",
-            acoustic_goal_score
+            "Acoustic goal score", acoustic_goal_score
         );
     }
     if let Some(legacy_nmm_score) = acoustic.legacy_nmm_score {
@@ -3626,6 +3698,7 @@ fn run_disturb_cmd(
         window_s: 0.5,
         hop_s: 0.05,
         acoustic_scoring_enabled: false,
+        model_version: model_signature::ModelVersion::LegacyV1,
     };
 
     let start = Instant::now();
@@ -3647,6 +3720,7 @@ fn run_disturb_cmd(
         println!("  Target LFO:      {:.1} Hz", tf);
     }
     println!("  Brightness:      {:.2}", result.brightness);
+    print_model_signature(&result.model_signature);
     println!(
         "  Duration:        {:.1}s ({:.2}s elapsed)",
         duration,
@@ -3892,6 +3966,8 @@ fn run_generate_data(
         "  Phys gate:      {}",
         if phys_gate { "enabled" } else { "disabled" }
     );
+    let signature_preview = build_generate_data_config(duration, brain_types[0], phys_gate, seed);
+    print_model_signature(&signature_preview.model_signature());
     println!("  Output:         {}", output.display());
     println!();
 
@@ -3930,7 +4006,16 @@ fn run_generate_data(
 
     // Thread-safe results collector
     let results: Arc<
-        Mutex<Vec<(usize, Vec<f64>, GoalKind, BrainType, SimulationConfig, SimulationResult)>>,
+        Mutex<
+            Vec<(
+                usize,
+                Vec<f64>,
+                GoalKind,
+                BrainType,
+                SimulationConfig,
+                SimulationResult,
+            )>,
+        >,
     > = Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
     let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -3951,7 +4036,7 @@ fn run_generate_data(
                     let (preset_idx, ref genome, goal_kind, bt) = work[i];
                     let preset = Preset::from_genome(genome);
                     let goal = Goal::new(goal_kind);
-                    let config = build_generate_data_config(duration, bt, phys_gate);
+                    let config = build_generate_data_config(duration, bt, phys_gate, seed);
                     let result = evaluate_preset(&preset, &goal, &config);
 
                     results.lock().unwrap().push((
@@ -4087,7 +4172,7 @@ mod tests {
 
     #[test]
     fn build_generate_data_config_carries_phys_gate() {
-        let config = build_generate_data_config(3.5, BrainType::Adhd, true);
+        let config = build_generate_data_config(3.5, BrainType::Adhd, true, 42);
         assert!((config.duration_secs - 3.5).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Adhd);
         assert!(config.assr_enabled);
@@ -4095,6 +4180,7 @@ mod tests {
         assert!(config.cet_enabled);
         assert!(config.physiological_thalamic_gate_enabled);
         assert!(!config.acoustic_scoring_enabled);
+        assert_eq!(config.reproducibility_seed, Some(42));
     }
 
     #[test]
@@ -4102,7 +4188,16 @@ mod tests {
         // Pass legacy P18 defaults (15.0, 5.0, 10.0) so the resulting
         // config is bit-identical to pre-P18 behaviour.
         let config = build_optimize_config(
-            4.0, BrainType::Anxious, true, true, true, false, 15.0, 5.0, 10.0,
+            4.0,
+            BrainType::Anxious,
+            true,
+            true,
+            true,
+            false,
+            15.0,
+            5.0,
+            10.0,
+            42,
         );
         assert!((config.duration_secs - 4.0).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Anxious);
@@ -4115,6 +4210,7 @@ mod tests {
         assert_eq!(config.jr_stochastic_sigma, 15.0);
         assert_eq!(config.cet_b_slow_rate, 5.0);
         assert_eq!(config.cet_b_slow_gain, 10.0);
+        assert_eq!(config.reproducibility_seed, Some(42));
     }
 
     /// **P18 wiring pin**: build_optimize_config must propagate
@@ -4124,11 +4220,21 @@ mod tests {
     #[test]
     fn build_optimize_config_propagates_p18_params() {
         let config = build_optimize_config(
-            4.0, BrainType::Normal, true, false, false, true, 100.0, 25.0, 18.0,
+            4.0,
+            BrainType::Normal,
+            true,
+            false,
+            false,
+            true,
+            100.0,
+            25.0,
+            18.0,
+            42,
         );
         assert_eq!(config.jr_stochastic_sigma, 100.0);
         assert_eq!(config.cet_b_slow_rate, 25.0);
         assert_eq!(config.cet_b_slow_gain, 18.0);
+        assert_eq!(config.reproducibility_seed, Some(42));
     }
 
     #[test]
@@ -4152,7 +4258,16 @@ mod tests {
     fn build_optimize_config_constrained_forces_scoring_on_and_fusion_off() {
         // Even if the caller passes fusion=true, constrained=true must win.
         let config = build_optimize_config(
-            4.0, BrainType::Normal, true, false, true, true, 15.0, 5.0, 10.0,
+            4.0,
+            BrainType::Normal,
+            true,
+            false,
+            true,
+            true,
+            15.0,
+            5.0,
+            10.0,
+            42,
         );
         assert!(config.acoustic_scoring_enabled);
         assert!(!config.acoustic_score_fusion_enabled);
@@ -4162,7 +4277,16 @@ mod tests {
     #[test]
     fn build_optimize_config_constrained_alone_enables_scoring() {
         let config = build_optimize_config(
-            4.0, BrainType::Normal, true, false, false, true, 15.0, 5.0, 10.0,
+            4.0,
+            BrainType::Normal,
+            true,
+            false,
+            false,
+            true,
+            15.0,
+            5.0,
+            10.0,
+            42,
         );
         assert!(config.acoustic_scoring_enabled);
         assert!(!config.acoustic_score_fusion_enabled);
@@ -4293,6 +4417,10 @@ mod tests {
         assert!(cols.contains(&"violation"));
         assert!(cols.contains(&"speech_privacy"));
         assert!(cols.contains(&"is_feasible"));
+        assert!(cols.contains(&"model_signature_schema_version"));
+        assert!(cols.contains(&"model_signature_json"));
+        assert_eq!(cols[cols.len() - 2], "model_signature_schema_version");
+        assert_eq!(cols[cols.len() - 1], "model_signature_json");
     }
 
     #[test]
@@ -4359,7 +4487,39 @@ mod tests {
         assert_eq!(cols[meta_start + 19], "25.000000");
         assert_eq!(cols[meta_start + 20], "18.000000");
         assert_eq!(cols[meta_start + 21], "0.500000");
-        assert_eq!(cols[meta_start + 21 + surrogate::GENOME_DIM], format!("{:.6}", result.score));
+        assert_eq!(
+            cols[meta_start + 21 + surrogate::GENOME_DIM],
+            format!("{:.6}", result.score)
+        );
+        assert!(
+            row.contains(",1,\"{"),
+            "row should contain signature schema marker"
+        );
+        assert!(
+            row.contains("\"\"version\"\":\"\"legacy_v1\"\"")
+                || row.contains("\"\"version\"\": \"\"legacy_v1\"\""),
+            "row should embed a legacy_v1 signature json payload"
+        );
+        assert!(
+            row.contains("\"\"normalization_mode\"\":\"\"global_per_ear\"\"")
+                || row.contains("\"\"normalization_mode\"\": \"\"global_per_ear\"\""),
+            "signature payload should carry normalization mode as compact config provenance"
+        );
+        assert!(
+            row.contains("\"\"audio_sample_rate_hz\"\":48000")
+                || row.contains("\"\"audio_sample_rate_hz\"\": 48000"),
+            "signature payload should carry audio sample rate provenance"
+        );
+        assert!(
+            row.contains("\"\"neural_decimation_factor\"\":48")
+                || row.contains("\"\"neural_decimation_factor\"\": 48"),
+            "signature payload should carry neural decimation provenance"
+        );
+        assert!(
+            row.contains("\"\"neural_sample_rate_hz\"\":1000.0")
+                || row.contains("\"\"neural_sample_rate_hz\"\": 1000.0"),
+            "signature payload should carry neural sample rate provenance"
+        );
     }
 
     #[test]
@@ -4408,10 +4568,30 @@ mod tests {
         let exported_beta = exported["analysis"]["band_powers"]["beta"]
             .as_f64()
             .expect("analysis.band_powers.beta should be f64");
+        let exported_version = exported["meta"]["model_signature"]["version"]
+            .as_str()
+            .expect("meta.model_signature.version should be string");
+        let exported_audio_sr = exported["meta"]["model_signature"]["audio_sample_rate_hz"]
+            .as_u64()
+            .expect("meta.model_signature.audio_sample_rate_hz should be u64");
+        let exported_neural_decimation =
+            exported["meta"]["model_signature"]["neural_decimation_factor"]
+                .as_u64()
+                .expect("meta.model_signature.neural_decimation_factor should be u64");
+        let exported_neural_sr = exported["meta"]["model_signature"]["neural_sample_rate_hz"]
+            .as_f64()
+            .expect("meta.model_signature.neural_sample_rate_hz should be f64");
 
         assert!((exported_result.score - direct.score).abs() < 1e-12);
         assert!((exported_score - direct.score).abs() < 1e-12);
         assert!((exported_beta - direct.beta_power).abs() < 1e-12);
+        assert_eq!(exported_version, "legacy_v1");
+        assert_eq!(exported_audio_sr, crate::pipeline::SAMPLE_RATE as u64);
+        assert_eq!(
+            exported_neural_decimation,
+            crate::pipeline::DECIMATION_FACTOR as u64
+        );
+        assert_eq!(exported_neural_sr.to_bits(), crate::pipeline::NEURAL_SR.to_bits());
         assert!((exported_score - fake_cached_fitness).abs() > 1e-6);
 
         let _ = std::fs::remove_file(output_path);
@@ -4453,9 +4633,24 @@ mod tests {
         let exported_score = exported["meta"]["score"]
             .as_f64()
             .expect("meta.score should be f64");
+        let exported_signature = &exported["meta"]["model_signature"];
 
         assert!((exported_result.score - direct.score).abs() < 1e-12);
         assert!((exported_score - direct.score).abs() < 1e-12);
+        assert_eq!(exported_signature["version"], "legacy_v1");
+        assert_eq!(exported_signature["scoring_profile"], "legacy_v1");
+        assert_eq!(
+            exported_signature["audio_sample_rate_hz"],
+            serde_json::json!(crate::pipeline::SAMPLE_RATE)
+        );
+        assert_eq!(
+            exported_signature["neural_decimation_factor"],
+            serde_json::json!(crate::pipeline::DECIMATION_FACTOR)
+        );
+        assert_eq!(
+            exported_signature["neural_sample_rate_hz"],
+            serde_json::json!(crate::pipeline::NEURAL_SR)
+        );
         assert!(
             exported_result
                 .acoustic_score
@@ -4539,7 +4734,10 @@ mod tests {
             ("deepwork_adhd.json", Some(GoalKind::DeepWork)),
             ("deepwork_normal_v2.json", Some(GoalKind::DeepWork)),
             ("normal_set_deep_relax.json", Some(GoalKind::DeepRelaxation)),
-            ("deep_relax_phys_cet_v1.json", Some(GoalKind::DeepRelaxation)),
+            (
+                "deep_relax_phys_cet_v1.json",
+                Some(GoalKind::DeepRelaxation),
+            ),
             ("sleep_phys_cet_v1.json", Some(GoalKind::Sleep)),
             ("showcase_pink.json", None),
             ("normal_set_reset.json", None),
@@ -4572,7 +4770,7 @@ mod tests {
     #[test]
     fn percentile_handles_edges_and_quantiles() {
         let v: Vec<f64> = (0..10).map(|i| i as f64).collect(); // 0..9
-        // p0 → min, p100 → max
+                                                               // p0 → min, p100 → max
         assert!((percentile(&v, 0.0) - 0.0).abs() < 1e-12);
         assert!((percentile(&v, 1.0) - 9.0).abs() < 1e-12);
         // p50 nearest-rank: round(9 * 0.5) = 5 → 5.0

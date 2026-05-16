@@ -778,7 +778,12 @@ impl Goal {
         // a BS.1770 threshold per se. Excess ramps to TRUE_PEAK_CAP at
         // +2 dBFS.
         if let Some(tp) = features.true_peak_dbfs {
-            violation += linear_violation(tp, TRUE_PEAK_THRESHOLD_DBFS, TRUE_PEAK_CAP_DBFS, TRUE_PEAK_CAP);
+            violation += linear_violation(
+                tp,
+                TRUE_PEAK_THRESHOLD_DBFS,
+                TRUE_PEAK_CAP_DBFS,
+                TRUE_PEAK_CAP,
+            );
         }
 
         // §28c — spectral-tilt deviation from the goal's preferred slope.
@@ -790,7 +795,12 @@ impl Goal {
         if let Some(tilt) = features.spectral_tilt_db_per_oct {
             let target = self.spectral_tilt_target_db_per_oct();
             let dev = (tilt - target).abs();
-            violation += linear_violation(dev, SPECTRAL_TILT_TOLERANCE_DB, SPECTRAL_TILT_CAP_DB, SPECTRAL_TILT_CAP);
+            violation += linear_violation(
+                dev,
+                SPECTRAL_TILT_TOLERANCE_DB,
+                SPECTRAL_TILT_CAP_DB,
+                SPECTRAL_TILT_CAP,
+            );
         }
 
         // §28c — HF-fraction guardrail.
@@ -826,12 +836,7 @@ impl Goal {
         // constraint, not a perceptual-loudness measurement.
         if let Some(range_db) = features.source_balance_db_range {
             let threshold = self.source_balance_threshold_db();
-            violation += linear_violation(
-                range_db,
-                threshold,
-                threshold * 2.0,
-                SOURCE_BALANCE_CAP,
-            );
+            violation += linear_violation(range_db, threshold, threshold * 2.0, SOURCE_BALANCE_CAP);
         }
 
         // §28b (companion to source_balance) — minimum active-source
@@ -863,10 +868,7 @@ impl Goal {
             GoalKind::Shield | GoalKind::Isolation => 3,
             // Relaxation / flow — typically 2+ sources for envelope diversity
             // and habituation; not strictly required, but expected.
-            GoalKind::Sleep
-            | GoalKind::DeepRelaxation
-            | GoalKind::Meditation
-            | GoalKind::Flow => 2,
+            GoalKind::Sleep | GoalKind::DeepRelaxation | GoalKind::Meditation | GoalKind::Flow => 2,
             // Active-attention goals — a single carefully-tuned source is
             // a valid product choice (e.g., focused beat-binding).
             GoalKind::Focus | GoalKind::DeepWork | GoalKind::Ignition => 1,
@@ -975,7 +977,6 @@ fn linear_violation(value: f64, threshold: f64, cap_at: f64, max_penalty: f64) -
 }
 
 impl Goal {
-
     /// CET 13c — How much this goal values envelope-phase tracking (slow
     /// 2–9 Hz cortical entrainment to the auditory envelope).
     ///
@@ -1686,7 +1687,9 @@ mod tests {
         let acoustic = make_acoustic_result(0.80, 0.60, 0.20, 0.20);
 
         assert!(!goal.supports_acoustic_fusion());
-        assert!(goal.evaluate_with_acoustic_fusion(0.50, &acoustic).is_none());
+        assert!(goal
+            .evaluate_with_acoustic_fusion(0.50, &acoustic)
+            .is_none());
     }
 
     // ---------------------------------------------------------------
@@ -1996,7 +1999,11 @@ mod tests {
             let mut f = within_threshold_features();
             f.spectral_tilt_db_per_oct = Some(goal.spectral_tilt_target_db_per_oct());
             // All other metrics are inside threshold → total violation is 0.
-            assert_eq!(goal.comfort_violation(&f), 0.0, "tilt at target → no violation for {kind}");
+            assert_eq!(
+                goal.comfort_violation(&f),
+                0.0,
+                "tilt at target → no violation for {kind}"
+            );
         }
     }
 
@@ -2014,7 +2021,10 @@ mod tests {
         // Within tolerance band → 0 violation.
         assert!(v_close < 1e-12);
         // At cap → equals SPECTRAL_TILT_CAP (no other metric violates here).
-        assert!((v_far - SPECTRAL_TILT_CAP).abs() < 1e-10, "tilt at cap should saturate, got {v_far:.6}");
+        assert!(
+            (v_far - SPECTRAL_TILT_CAP).abs() < 1e-10,
+            "tilt at cap should saturate, got {v_far:.6}"
+        );
     }
 
     #[test]
@@ -2042,17 +2052,32 @@ mod tests {
         // others (threshold 0.20).
         let mut f = within_threshold_features();
         f.hf_fraction_above_8khz = Some(0.15);
-        for &kind in &[GoalKind::Sleep, GoalKind::DeepRelaxation, GoalKind::Meditation] {
+        for &kind in &[
+            GoalKind::Sleep,
+            GoalKind::DeepRelaxation,
+            GoalKind::Meditation,
+        ] {
             let g = Goal::new(kind);
             let mut ff = f.clone();
             ff.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
-            assert!(g.comfort_violation(&ff) > 0.0, "{kind} should violate at HF=0.15");
+            assert!(
+                g.comfort_violation(&ff) > 0.0,
+                "{kind} should violate at HF=0.15"
+            );
         }
-        for &kind in &[GoalKind::Focus, GoalKind::DeepWork, GoalKind::Flow, GoalKind::Shield] {
+        for &kind in &[
+            GoalKind::Focus,
+            GoalKind::DeepWork,
+            GoalKind::Flow,
+            GoalKind::Shield,
+        ] {
             let g = Goal::new(kind);
             let mut ff = f.clone();
             ff.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
-            assert!(g.comfort_violation(&ff) < 1e-12, "{kind} should not violate at HF=0.15");
+            assert!(
+                g.comfort_violation(&ff) < 1e-12,
+                "{kind} should not violate at HF=0.15"
+            );
         }
     }
 
@@ -2067,14 +2092,14 @@ mod tests {
             sharpness_proxy: Some(0.9),
             lufs_integrated: Some(-23.0),
             lufs_left: Some(-20.0),
-            lufs_right: Some(-50.0),                // huge asymmetry
+            lufs_right: Some(-50.0), // huge asymmetry
             lufs_asymmetry_lu: Some(30.0),
-            true_peak_dbfs: Some(10.0),             // far above ceiling
-            plr_db: Some(50.0),                     // way above cap
-            spectral_tilt_db_per_oct: Some(10.0),   // far from any target
-            hf_fraction_above_8khz: Some(1.0),      // saturated
-            source_balance_db_range: Some(40.0),    // way past any goal threshold
-            active_source_count: Some(0),           // zero sources → max min-source penalty
+            true_peak_dbfs: Some(10.0),           // far above ceiling
+            plr_db: Some(50.0),                   // way above cap
+            spectral_tilt_db_per_oct: Some(10.0), // far from any target
+            hf_fraction_above_8khz: Some(1.0),    // saturated
+            source_balance_db_range: Some(40.0),  // way past any goal threshold
+            active_source_count: Some(0),         // zero sources → max min-source penalty
         };
         let max_total = LUFS_ASYM_CAP
             + TRUE_PEAK_CAP
@@ -2115,7 +2140,10 @@ mod tests {
         let g = Goal::new(GoalKind::Sleep);
         f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
         let v = g.comfort_violation(&f);
-        assert!(v.is_finite(), "violation must remain finite under NaN input");
+        assert!(
+            v.is_finite(),
+            "violation must remain finite under NaN input"
+        );
         // NaN is treated as worst-case → asymmetry term saturates.
         assert!(v >= LUFS_ASYM_CAP - 1e-10, "NaN should saturate the term");
     }

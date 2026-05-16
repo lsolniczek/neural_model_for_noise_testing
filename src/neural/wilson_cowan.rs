@@ -18,6 +18,9 @@
 ///   f ≈ (1/2π) · √(w_ei·w_ie·S'_e·S'_i / (τ_e·τ_i))
 use rustfft::{num_complex::Complex, FftPlanner};
 
+/// Legacy Stage 0 adaptive entrainment range (Arnold tongue half-width).
+pub const DEFAULT_ADAPTIVE_ENTRAINMENT_RANGE_HZ: f64 = 5.0;
+
 /// Wilson-Cowan model result (compatible with JR pipeline).
 pub struct WilsonCowanResult {
     /// EEG-like output: E(t) - I(t).
@@ -27,6 +30,7 @@ pub struct WilsonCowanResult {
 }
 
 /// Wilson-Cowan model parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WilsonCowanParams {
     /// Excitatory time constant (seconds). Smaller = faster E dynamics.
     pub tau_e: f64,
@@ -75,6 +79,13 @@ impl WilsonCowanModel {
     /// weights. This constructor sets physiologically reasonable defaults
     /// and tunes τ values to hit the target.
     pub fn for_frequency(sample_rate: f64, target_hz: f64, input_scale: f64) -> Self {
+        let params = Self::effective_params_for_frequency(target_hz, input_scale);
+        WilsonCowanModel::new(sample_rate, params)
+    }
+
+    /// Effective WC parameters used by `for_frequency(...)` for the given
+    /// `target_hz` and `input_scale`.
+    pub fn effective_params_for_frequency(target_hz: f64, input_scale: f64) -> WilsonCowanParams {
         // Wilson-Cowan oscillation frequency is primarily set by τ_e and τ_i.
         // For a standard E-I circuit with the coupling weights below,
         // the oscillation frequency ≈ 1 / (2.45 * (τ_e + τ_i)) (empirically calibrated).
@@ -97,23 +108,20 @@ impl WilsonCowanModel {
         let tau_e = tau_sum * 0.45;
         let tau_i = tau_sum * 0.55;
 
-        WilsonCowanModel::new(
-            sample_rate,
-            WilsonCowanParams {
-                tau_e,
-                tau_i,
-                w_ee,
-                w_ie,
-                w_ei,
-                w_ii,
-                h_e: 1.5, // Drive into oscillatory regime
-                h_i: 0.0,
-                sigmoid_a,
-                sigmoid_theta,
-                input_scale,
-                input_offset: 1.0,
-            },
-        )
+        WilsonCowanParams {
+            tau_e,
+            tau_i,
+            w_ee,
+            w_ie,
+            w_ei,
+            w_ii,
+            h_e: 1.5, // Drive into oscillatory regime
+            h_i: 0.0,
+            sigmoid_a,
+            sigmoid_theta,
+            input_scale,
+            input_offset: 1.0,
+        }
     }
 
     /// Sigmoid activation function.

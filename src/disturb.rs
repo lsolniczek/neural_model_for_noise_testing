@@ -6,6 +6,10 @@
 /// to measure perturbation impact and recovery dynamics.
 use crate::auditory::GammatoneFilterbank;
 use crate::brain_type::BrainType;
+use crate::model_signature::{
+    AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
+    NumericParamsSnapshot, PipelineVariant, ReproducibilitySeeds, ScoringProfile,
+};
 use crate::neural::{simulate_bilateral, BilateralResult, FastInhibParams};
 use crate::pipeline::{
     decimate, render_preset_stereo_dry, spectral_brightness, validate_analysis_window,
@@ -35,6 +39,7 @@ pub struct WindowMetrics {
 
 /// Summary of the disturbance test.
 pub struct DisturbResult {
+    pub model_signature: ModelSignature,
     /// Per-window metrics across the entire simulation.
     pub windows: Vec<WindowMetrics>,
     /// Baseline mean entrainment ratio (pre-spike).
@@ -87,6 +92,9 @@ pub struct DisturbResult {
     pub target_freq: Option<f64>,
 }
 
+pub const DISTURB_LEFT_SPIKE_SEED: u64 = 0xDEAD_BEEF_CAFE_1234;
+pub const DISTURB_RIGHT_SPIKE_SEED: u64 = 0xCAFE_BABE_DEAD_5678;
+
 /// Configuration for the disturbance test.
 pub struct DisturbConfig {
     pub spike_time_s: f64,
@@ -98,6 +106,7 @@ pub struct DisturbConfig {
     pub window_s: f64,
     pub hop_s: f64,
     pub acoustic_scoring_enabled: bool,
+    pub model_version: ModelVersion,
 }
 
 impl Default for DisturbConfig {
@@ -112,6 +121,7 @@ impl Default for DisturbConfig {
             window_s: 0.5,
             hop_s: 0.05,
             acoustic_scoring_enabled: false,
+            model_version: ModelVersion::LegacyV1,
         }
     }
 }
@@ -438,7 +448,7 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         config.spike_duration_s,
         config.spike_gain,
         NEURAL_SR,
-        0xDEAD_BEEF_CAFE_1234,
+        DISTURB_LEFT_SPIKE_SEED,
     );
     inject_spike(
         &mut right_spiked,
@@ -446,7 +456,7 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         config.spike_duration_s,
         config.spike_gain,
         NEURAL_SR,
-        0xCAFE_BABE_DEAD_5678, // different seed for independence
+        DISTURB_RIGHT_SPIKE_SEED, // different seed for independence
     );
 
     // Phase 3: Run bilateral JR model on disturbed signals
@@ -602,7 +612,48 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         scdi_hz,
     );
 
+    let model_signature = ModelSignature {
+        version: config.model_version,
+        pipeline_variant: PipelineVariant::DisturbLegacyAblated,
+        scoring_profile: ScoringProfile::LegacyV1,
+        normalization_mode: NormalizationMode::PerBandPerEar,
+        brain_type: config.brain_type,
+        audio_sample_rate_hz: SAMPLE_RATE,
+        neural_decimation_factor: DECIMATION_FACTOR,
+        neural_sample_rate_hz: NEURAL_SR,
+        auditory_flags: AuditoryFeatureFlags {
+            // Legacy disturb path keeps these disabled today; Stage 1 will canonicalize.
+            assr_enabled: false,
+            thalamic_gate_enabled: false,
+            physiological_thalamic_gate_enabled: false,
+            cet_enabled: false,
+            habituation_enabled: false,
+            acoustic_scoring_enabled: config.acoustic_scoring_enabled,
+            acoustic_score_fusion_enabled: false,
+            acoustic_constraints_enabled: false,
+        },
+        neural_flags: NeuralFeatureFlags {
+            stochastic_jr_enabled: false,
+        },
+        numeric_params: NumericParamsSnapshot::from_runtime(
+            config.brain_type,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            false,
+        ),
+        warmup_discard_secs: config.warmup_discard_secs,
+        duration_secs: config.duration_secs,
+        seeds: ReproducibilitySeeds {
+            primary_seed: None,
+            disturbance_left_spike_seed: Some(DISTURB_LEFT_SPIKE_SEED),
+            disturbance_right_spike_seed: Some(DISTURB_RIGHT_SPIKE_SEED),
+        },
+    };
+
     DisturbResult {
+        model_signature,
         windows,
         baseline_entrainment,
         baseline_dominant_freq,
@@ -841,6 +892,59 @@ mod tests {
             spectral_centroid: centroid,
             band_powers: bp,
         }
+    }
+
+    #[test]
+    fn disturb_result_emits_legacy_signature_metadata() {
+        let preset = crate::preset::Preset::default();
+        let config = DisturbConfig {
+            duration_secs: 4.0,
+            ..DisturbConfig::default()
+        };
+        let result = run_disturb(&preset, &config);
+        assert_eq!(result.model_signature.version, ModelVersion::LegacyV1);
+        assert_eq!(
+            result.model_signature.pipeline_variant,
+            PipelineVariant::DisturbLegacyAblated
+        );
+        assert_eq!(
+            result.model_signature.normalization_mode,
+            NormalizationMode::PerBandPerEar
+        );
+        assert_eq!(
+            result.model_signature.audio_sample_rate_hz,
+            crate::pipeline::SAMPLE_RATE
+        );
+        assert_eq!(
+            result.model_signature.neural_decimation_factor,
+            crate::pipeline::DECIMATION_FACTOR
+        );
+        assert_eq!(
+            result.model_signature.neural_sample_rate_hz.to_bits(),
+            crate::pipeline::NEURAL_SR.to_bits()
+        );
+        assert_eq!(
+            result.model_signature.seeds.disturbance_left_spike_seed,
+            Some(DISTURB_LEFT_SPIKE_SEED)
+        );
+        assert_eq!(
+            result.model_signature.seeds.disturbance_right_spike_seed,
+            Some(DISTURB_RIGHT_SPIKE_SEED)
+        );
+    }
+
+    #[test]
+    fn disturb_signature_reports_per_band_normalization_mode() {
+        let preset = crate::preset::Preset::default();
+        let config = DisturbConfig {
+            duration_secs: 4.0,
+            ..DisturbConfig::default()
+        };
+        let result = run_disturb(&preset, &config);
+        assert_eq!(
+            result.model_signature.normalization_mode,
+            NormalizationMode::PerBandPerEar
+        );
     }
 
     // ═══ BPPR tests ═══

@@ -20,7 +20,7 @@
 /// When g_fast_gain = 0, the model degenerates to the classic JR 1995
 /// 6-state system (y3 stays at zero, EEG = y1 - y2).
 use crate::brain_type::{BandModelType, BilateralParams, TonotopicParams};
-use crate::neural::wilson_cowan::WilsonCowanModel;
+use crate::neural::wilson_cowan::{WilsonCowanModel, DEFAULT_ADAPTIVE_ENTRAINMENT_RANGE_HZ};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -42,6 +42,40 @@ const C1: f64 = C;
 const C2: f64 = 0.8 * C;
 const C3: f64 = 0.20 * C; // Universal: loosen GABA-B for beta access (0.25→0.225→0.20)
 const C4: f64 = 0.20 * C; // Universal: allow fast loop to drive SMR/beta
+
+/// Legacy JR/Wendling runtime constants that are not part of brain-type tables.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JansenRitLegacyConstantsSnapshot {
+    pub v_max: f64,
+    pub default_c: f64,
+    pub default_c1: f64,
+    pub default_c2: f64,
+    pub default_c3: f64,
+    pub default_c4: f64,
+    pub default_v0: f64,
+    pub default_sigmoid_r: f64,
+    pub warmup_seconds: f64,
+    pub sub_steps_base: usize,
+    pub sub_steps_fast: usize,
+    pub sub_steps_fast_rate_threshold: f64,
+}
+
+pub fn legacy_constants_snapshot() -> JansenRitLegacyConstantsSnapshot {
+    JansenRitLegacyConstantsSnapshot {
+        v_max: V_MAX,
+        default_c: C,
+        default_c1: C1,
+        default_c2: C2,
+        default_c3: C3,
+        default_c4: C4,
+        default_v0: V0,
+        default_sigmoid_r: R,
+        warmup_seconds: 1.0,
+        sub_steps_base: 2,
+        sub_steps_fast: 4,
+        sub_steps_fast_rate_threshold: 200.0,
+    }
+}
 
 /// Frequency bands for EEG analysis (Hz).
 pub struct BandPowers {
@@ -1075,7 +1109,7 @@ pub fn simulate_tonotopic(
                     target_hz,
                     input_scale as f64 * 0.01,
                     &input_signal,
-                    5.0,
+                    DEFAULT_ADAPTIVE_ENTRAINMENT_RANGE_HZ,
                 );
                 let result = wc.simulate(&input_signal);
                 (result.eeg, result.inhib_trace)
@@ -1426,7 +1460,7 @@ fn run_hemisphere_tonotopic(
                     target_hz,
                     input_scale as f64 * 0.01,
                     &input_signal,
-                    5.0,
+                    DEFAULT_ADAPTIVE_ENTRAINMENT_RANGE_HZ,
                 );
                 let result = wc.simulate(&input_signal);
                 (result.eeg, result.inhib_trace)

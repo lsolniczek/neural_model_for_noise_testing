@@ -12,7 +12,8 @@ mod tests {
     use crate::neural::jansen_rit::*;
     use crate::optimizer::DifferentialEvolution;
     use crate::pipeline::{
-        evaluate_preset, evaluate_preset_detailed, SimulationConfig, SAMPLE_RATE,
+        evaluate_preset, evaluate_preset_detailed, SimulationConfig, DECIMATION_FACTOR, NEURAL_SR,
+        SAMPLE_RATE,
     };
     use crate::preset::{Preset, GENOME_LEN};
     use crate::scoring::{Goal, GoalKind};
@@ -60,6 +61,92 @@ mod tests {
         );
         assert_eq!(lhs.performance.plv, rhs.performance.plv);
         assert_eq!(lhs.performance.envelope_plv, rhs.performance.envelope_plv);
+    }
+
+    fn fixture_dark_unmodulated_symmetric() -> Preset {
+        let mut preset = Preset::default();
+        preset.master_gain = 0.75;
+        preset.source_count = 2;
+        for idx in [0usize, 1usize] {
+            preset.objects[idx].active = true;
+            preset.objects[idx].color = 2; // brown
+            preset.objects[idx].volume = 0.34;
+            preset.objects[idx].reverb_send = 0.18;
+            preset.objects[idx].bass_mod.kind = 0;
+            preset.objects[idx].satellite_mod.kind = 0;
+            preset.objects[idx].movement.kind = 0;
+        }
+        preset.objects[0].x = -1.6;
+        preset.objects[1].x = 1.6;
+        preset
+    }
+
+    fn fixture_mid_modulated_lateralized() -> Preset {
+        let mut preset = Preset::default();
+        preset.master_gain = 0.82;
+        preset.source_count = 2;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 1; // pink (mid)
+        preset.objects[0].volume = 0.42;
+        preset.objects[0].x = 2.8; // lateralized right
+        preset.objects[0].reverb_send = 0.24;
+        preset.objects[0].bass_mod.kind = 4; // NeuralLfo
+        preset.objects[0].bass_mod.param_a = 6.0;
+        preset.objects[0].bass_mod.param_b = 0.85;
+        preset.objects[0].satellite_mod.kind = 5; // Isochronic
+        preset.objects[0].satellite_mod.param_a = 10.0;
+        preset.objects[0].satellite_mod.param_b = 0.70;
+        preset.objects[0].satellite_mod.param_c = 0.45;
+        preset.objects[1].active = true;
+        preset.objects[1].color = 4; // grey support bed
+        preset.objects[1].volume = 0.14;
+        preset.objects[1].x = 1.9;
+        preset.objects[1].reverb_send = 0.18;
+        preset
+    }
+
+    fn fixture_bright_modulated_symmetric() -> Preset {
+        let mut preset = Preset::default();
+        preset.master_gain = 0.80;
+        preset.source_count = 2;
+        for idx in [0usize, 1usize] {
+            preset.objects[idx].active = true;
+            preset.objects[idx].color = 0; // white
+            preset.objects[idx].volume = 0.28;
+            preset.objects[idx].reverb_send = 0.12;
+            preset.objects[idx].bass_mod.kind = 4; // NeuralLfo
+            preset.objects[idx].bass_mod.param_a = 14.0;
+            preset.objects[idx].bass_mod.param_b = 0.62;
+            preset.objects[idx].satellite_mod.kind = 6; // RandomPulse
+            preset.objects[idx].satellite_mod.param_a = 7.0;
+            preset.objects[idx].satellite_mod.param_b = 0.55;
+            preset.objects[idx].satellite_mod.param_c = 120.0;
+        }
+        preset.objects[0].x = -1.4;
+        preset.objects[1].x = 1.4;
+        preset
+    }
+
+    fn canonical_config(duration_secs: f32, brain_type: BrainType) -> SimulationConfig {
+        SimulationConfig {
+            duration_secs,
+            brain_type,
+            ..SimulationConfig::default()
+        }
+    }
+
+    fn ablation_config(duration_secs: f32, brain_type: BrainType) -> SimulationConfig {
+        SimulationConfig {
+            duration_secs,
+            brain_type,
+            assr_enabled: false,
+            thalamic_gate_enabled: false,
+            cet_enabled: false,
+            physiological_thalamic_gate_enabled: false,
+            habituation_enabled: false,
+            stochastic_jr_enabled: false,
+            ..SimulationConfig::default()
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -616,6 +703,573 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct LegacyGoldenSnapshot {
+        score: f64,
+        dominant_freq: f64,
+        delta_power: f64,
+        theta_power: f64,
+        alpha_power: f64,
+        beta_power: f64,
+        gamma_power: f64,
+        brightness: f64,
+        alpha_asymmetry: f64,
+    }
+
+    struct LegacyGoldenCase {
+        name: &'static str,
+        preset: Preset,
+        goal_kind: GoalKind,
+        config: SimulationConfig,
+        expected: LegacyGoldenSnapshot,
+    }
+
+    fn assert_snapshot_eq(
+        actual: &crate::pipeline::SimulationResult,
+        expected: LegacyGoldenSnapshot,
+    ) {
+        const EPS: f64 = 1e-9;
+        assert!(
+            (actual.score - expected.score).abs() < EPS,
+            "score mismatch: actual={:.12} expected={:.12}",
+            actual.score,
+            expected.score
+        );
+        assert!(
+            (actual.dominant_freq - expected.dominant_freq).abs() < EPS,
+            "dominant_freq mismatch: actual={:.12} expected={:.12}",
+            actual.dominant_freq,
+            expected.dominant_freq
+        );
+        assert!(
+            (actual.delta_power - expected.delta_power).abs() < EPS,
+            "delta_power mismatch: actual={:.12} expected={:.12}",
+            actual.delta_power,
+            expected.delta_power
+        );
+        assert!(
+            (actual.theta_power - expected.theta_power).abs() < EPS,
+            "theta_power mismatch: actual={:.12} expected={:.12}",
+            actual.theta_power,
+            expected.theta_power
+        );
+        assert!(
+            (actual.alpha_power - expected.alpha_power).abs() < EPS,
+            "alpha_power mismatch: actual={:.12} expected={:.12}",
+            actual.alpha_power,
+            expected.alpha_power
+        );
+        assert!(
+            (actual.beta_power - expected.beta_power).abs() < EPS,
+            "beta_power mismatch: actual={:.12} expected={:.12}",
+            actual.beta_power,
+            expected.beta_power
+        );
+        assert!(
+            (actual.gamma_power - expected.gamma_power).abs() < EPS,
+            "gamma_power mismatch: actual={:.12} expected={:.12}",
+            actual.gamma_power,
+            expected.gamma_power
+        );
+        assert!(
+            (actual.brightness - expected.brightness).abs() < EPS,
+            "brightness mismatch: actual={:.12} expected={:.12}",
+            actual.brightness,
+            expected.brightness
+        );
+        assert!(
+            (actual.alpha_asymmetry - expected.alpha_asymmetry).abs() < EPS,
+            "alpha_asymmetry mismatch: actual={:.12} expected={:.12}",
+            actual.alpha_asymmetry,
+            expected.alpha_asymmetry
+        );
+    }
+
+    fn legacy_v1_stage0_golden_cases() -> Vec<LegacyGoldenCase> {
+        vec![
+            LegacyGoldenCase {
+                name: "dark_sleep_normal_canonical_4s",
+                preset: fixture_dark_unmodulated_symmetric(),
+                goal_kind: GoalKind::Sleep,
+                config: canonical_config(4.0, BrainType::Normal),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.335911959459740,
+                    dominant_freq: 0.976562500000000,
+                    delta_power: 0.424334458638242,
+                    theta_power: 0.129684027561843,
+                    alpha_power: 0.361601526286417,
+                    beta_power: 0.078704473926617,
+                    gamma_power: 0.005675513586882,
+                    brightness: 0.112807522664250,
+                    alpha_asymmetry: -0.585339028141012,
+                },
+            },
+            LegacyGoldenCase {
+                name: "dark_deep_relax_aging_ablation_12s",
+                preset: fixture_dark_unmodulated_symmetric(),
+                goal_kind: GoalKind::DeepRelaxation,
+                config: ablation_config(12.0, BrainType::Aging),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.321670819867025,
+                    dominant_freq: 6.835937500000000,
+                    delta_power: 0.003527594893125,
+                    theta_power: 0.951742055357745,
+                    alpha_power: 0.034577468291727,
+                    beta_power: 0.009703062040394,
+                    gamma_power: 0.000449819417009,
+                    brightness: 0.054102405387457,
+                    alpha_asymmetry: 0.997744091862655,
+                },
+            },
+            LegacyGoldenCase {
+                name: "mid_focus_adhd_canonical_4s",
+                preset: fixture_mid_modulated_lateralized(),
+                goal_kind: GoalKind::Focus,
+                config: canonical_config(4.0, BrainType::Adhd),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.334738086849502,
+                    dominant_freq: 5.859375000000000,
+                    delta_power: 0.255168311618526,
+                    theta_power: 0.550173524729978,
+                    alpha_power: 0.085564464498437,
+                    beta_power: 0.101323860329155,
+                    gamma_power: 0.007769838823905,
+                    brightness: 0.325224436122527,
+                    alpha_asymmetry: 0.081789223181948,
+                },
+            },
+            LegacyGoldenCase {
+                name: "mid_shield_adhd_ablation_12s",
+                preset: fixture_mid_modulated_lateralized(),
+                goal_kind: GoalKind::Shield,
+                config: ablation_config(12.0, BrainType::Adhd),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.341502463573143,
+                    dominant_freq: 6.896972656250000,
+                    delta_power: 0.003504896326945,
+                    theta_power: 0.923150317183464,
+                    alpha_power: 0.044790014912155,
+                    beta_power: 0.026042026789557,
+                    gamma_power: 0.002512744787880,
+                    brightness: 0.317479948341570,
+                    alpha_asymmetry: 0.929018533420237,
+                },
+            },
+            LegacyGoldenCase {
+                name: "mid_meditation_high_alpha_canonical_4s",
+                preset: fixture_mid_modulated_lateralized(),
+                goal_kind: GoalKind::Meditation,
+                config: canonical_config(4.0, BrainType::HighAlpha),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.510769605947867,
+                    dominant_freq: 0.976562500000000,
+                    delta_power: 0.481143795629993,
+                    theta_power: 0.489930784034469,
+                    alpha_power: 0.022950590348520,
+                    beta_power: 0.005812061723820,
+                    gamma_power: 0.000162768263198,
+                    brightness: 0.325224436122527,
+                    alpha_asymmetry: -0.497281058536251,
+                },
+            },
+            LegacyGoldenCase {
+                name: "bright_ignition_anxious_canonical_4s",
+                preset: fixture_bright_modulated_symmetric(),
+                goal_kind: GoalKind::Ignition,
+                config: canonical_config(4.0, BrainType::Anxious),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.216077172096382,
+                    dominant_freq: 0.976562500000000,
+                    delta_power: 0.990839614872210,
+                    theta_power: 0.007148707534671,
+                    alpha_power: 0.001237826637320,
+                    beta_power: 0.000686510150874,
+                    gamma_power: 0.000087340804925,
+                    brightness: 0.960022127940275,
+                    alpha_asymmetry: -0.817632399628552,
+                },
+            },
+            LegacyGoldenCase {
+                name: "bright_flow_normal_ablation_12s",
+                preset: fixture_bright_modulated_symmetric(),
+                goal_kind: GoalKind::Flow,
+                config: ablation_config(12.0, BrainType::Normal),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.238052585930439,
+                    dominant_freq: 24.230957031250000,
+                    delta_power: 0.000422105414719,
+                    theta_power: 0.001532795314489,
+                    alpha_power: 0.018127457361253,
+                    beta_power: 0.807669810840614,
+                    gamma_power: 0.172247831068925,
+                    brightness: 0.962277113499317,
+                    alpha_asymmetry: -0.993466058254526,
+                },
+            },
+            LegacyGoldenCase {
+                name: "bright_deep_work_high_alpha_ablation_12s",
+                preset: fixture_bright_modulated_symmetric(),
+                goal_kind: GoalKind::DeepWork,
+                config: ablation_config(12.0, BrainType::HighAlpha),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.400027331597159,
+                    dominant_freq: 7.751464843750000,
+                    delta_power: 0.033792227195554,
+                    theta_power: 0.753879345392662,
+                    alpha_power: 0.154169743825606,
+                    beta_power: 0.054961361292831,
+                    gamma_power: 0.003197322293347,
+                    brightness: 0.962277113499317,
+                    alpha_asymmetry: 0.862206520752636,
+                },
+            },
+            LegacyGoldenCase {
+                name: "bright_isolation_normal_canonical_12s",
+                preset: fixture_bright_modulated_symmetric(),
+                goal_kind: GoalKind::Isolation,
+                config: canonical_config(12.0, BrainType::Normal),
+                expected: LegacyGoldenSnapshot {
+                    score: 0.484498072976395,
+                    dominant_freq: 24.230957031250000,
+                    delta_power: 0.034256679819131,
+                    theta_power: 0.000121218029019,
+                    alpha_power: 0.000037928274931,
+                    beta_power: 0.795697651609615,
+                    gamma_power: 0.169886522267304,
+                    brightness: 0.962277113499317,
+                    alpha_asymmetry: -0.987781083619729,
+                },
+            },
+        ]
+    }
+
+    fn missing_goal_from_legacy_v1_stage0_cases(cases: &[LegacyGoldenCase]) -> Option<GoalKind> {
+        let represented: Vec<GoalKind> = cases.iter().map(|c| c.goal_kind).collect();
+        for goal in GoalKind::all() {
+            if !represented.contains(goal) {
+                return Some(*goal);
+            }
+        }
+        None
+    }
+
+    #[test]
+    #[ignore]
+    fn print_legacy_v1_stage0_golden_snapshots() {
+        for case in legacy_v1_stage0_golden_cases() {
+            let name = case.name;
+            let preset = case.preset;
+            let goal_kind = case.goal_kind;
+            let config = case.config;
+            let goal = Goal::new(goal_kind);
+            let result = evaluate_preset(&preset, &goal, &config);
+            println!(
+                "{name}: score={:.15}, dom={:.15}, delta={:.15}, theta={:.15}, alpha={:.15}, beta={:.15}, gamma={:.15}, brightness={:.15}, asym={:.15}",
+                result.score,
+                result.dominant_freq,
+                result.delta_power,
+                result.theta_power,
+                result.alpha_power,
+                result.beta_power,
+                result.gamma_power,
+                result.brightness,
+                result.alpha_asymmetry
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_v1_stage0_golden_regression_snapshots() {
+        for case in legacy_v1_stage0_golden_cases() {
+            let name = case.name;
+            let preset = case.preset;
+            let goal_kind = case.goal_kind;
+            let config = case.config;
+            let expected = case.expected;
+            let goal = Goal::new(goal_kind);
+            let result = evaluate_preset(&preset, &goal, &config);
+            assert_snapshot_eq(&result, expected);
+            assert_eq!(
+                result.model_signature.version,
+                crate::model_signature::ModelVersion::LegacyV1,
+                "{name}: model version drifted"
+            );
+            assert_eq!(
+                result.model_signature.pipeline_variant,
+                crate::model_signature::PipelineVariant::EvaluateCanonical,
+                "{name}: pipeline variant drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_v1_stage0_golden_snapshots_cover_all_goals() {
+        let cases = legacy_v1_stage0_golden_cases();
+        if let Some(goal) = missing_goal_from_legacy_v1_stage0_cases(&cases) {
+            panic!("missing Stage 0 golden coverage for goal {goal}");
+        }
+    }
+
+    #[test]
+    fn legacy_v1_stage0_goal_coverage_detector_catches_removed_goal_case() {
+        let mut cases = legacy_v1_stage0_golden_cases();
+        cases.retain(|case| case.goal_kind != GoalKind::Flow);
+        assert_eq!(
+            missing_goal_from_legacy_v1_stage0_cases(&cases),
+            Some(GoalKind::Flow)
+        );
+    }
+
+    #[test]
+    fn legacy_v1_result_signature_has_expected_defaults() {
+        let preset = fixture_dark_unmodulated_symmetric();
+        let goal = Goal::new(GoalKind::Sleep);
+        let config = canonical_config(4.0, BrainType::Normal);
+        let result = evaluate_preset(&preset, &goal, &config);
+        let sig = &result.model_signature;
+
+        assert_eq!(sig.version, crate::model_signature::ModelVersion::LegacyV1);
+        assert_eq!(
+            sig.scoring_profile,
+            crate::model_signature::ScoringProfile::LegacyV1
+        );
+        assert_eq!(
+            sig.normalization_mode,
+            crate::model_signature::NormalizationMode::GlobalPerEar
+        );
+        assert_eq!(
+            sig.pipeline_variant,
+            crate::model_signature::PipelineVariant::EvaluateCanonical
+        );
+        assert_eq!(sig.brain_type, BrainType::Normal);
+        assert_eq!(sig.audio_sample_rate_hz, SAMPLE_RATE);
+        assert_eq!(sig.neural_decimation_factor, DECIMATION_FACTOR);
+        assert_eq!(sig.neural_sample_rate_hz.to_bits(), NEURAL_SR.to_bits());
+        assert!(sig.auditory_flags.assr_enabled);
+        assert!(sig.auditory_flags.thalamic_gate_enabled);
+        assert!(sig.auditory_flags.cet_enabled);
+        assert!(sig.neural_flags.stochastic_jr_enabled);
+        assert_eq!(sig.warmup_discard_secs.to_bits(), 2.0f32.to_bits());
+        assert_eq!(sig.duration_secs.to_bits(), 4.0f32.to_bits());
+        assert_eq!(
+            sig.numeric_params.habituation_rate.to_bits(),
+            0.0003f64.to_bits()
+        );
+        assert_eq!(
+            sig.numeric_params.habituation_recovery.to_bits(),
+            0.0001f64.to_bits()
+        );
+        assert_eq!(
+            sig.numeric_params.cet_c_slow_connectivity.to_bits(),
+            30.0f64.to_bits()
+        );
+        assert_eq!(sig.numeric_params.jr_stochastic_rng_seed, 42);
+        assert_eq!(sig.numeric_params.jr_v_max.to_bits(), 5.0f64.to_bits());
+        assert_eq!(
+            sig.numeric_params.fhn_spike_threshold.to_bits(),
+            1.0f64.to_bits()
+        );
+        assert_eq!(
+            sig.numeric_params.fhn_initial_voltage.to_bits(),
+            (-1.2f64).to_bits()
+        );
+        assert_eq!(
+            sig.numeric_params.fhn_initial_recovery.to_bits(),
+            (-0.6f64).to_bits()
+        );
+        assert_eq!(sig.numeric_params.fhn_rk4_sub_steps, 4);
+        assert_eq!(
+            sig.numeric_params
+                .wc_adaptive_entrainment_range_hz
+                .to_bits(),
+            5.0f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn model_signature_includes_tonotopic_parameters() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(4.0, BrainType::Adhd);
+        let result = evaluate_preset(&preset, &goal, &config);
+        let numeric = &result.model_signature.numeric_params;
+
+        assert_eq!(numeric.tonotopic_params.band_rates[0], (75.0, 34.0));
+        assert_eq!(numeric.tonotopic_params.band_offsets[3], 100.0);
+        assert_eq!(numeric.tonotopic_params.band_g_fast_rate[2], 450.0);
+        assert_eq!(numeric.tonotopic_params.band_v0[1], 5.5);
+        match numeric.tonotopic_params.band_model_types[2] {
+            crate::model_signature::BandModelTypeSnapshot::WilsonCowan { target_hz, .. } => {
+                assert_eq!(target_hz, 14.0);
+            }
+            _ => panic!("band 2 expected Wilson-Cowan"),
+        }
+
+        assert_eq!(numeric.bilateral_params.left.band_offsets[0], 140.0);
+        assert_eq!(numeric.bilateral_params.right.band_offsets[0], 135.0);
+        match numeric.bilateral_params.right.band_model_types[3] {
+            crate::model_signature::BandModelTypeSnapshot::WilsonCowan { target_hz, .. } => {
+                assert_eq!(target_hz, 20.0);
+            }
+            _ => panic!("right band 3 expected Wilson-Cowan"),
+        }
+        assert_eq!(numeric.bilateral_params.callosal_coupling, 0.12);
+    }
+
+    #[test]
+    fn model_signature_includes_jr_hidden_runtime_constants() {
+        let result = evaluate_preset(
+            &fixture_dark_unmodulated_symmetric(),
+            &Goal::new(GoalKind::Sleep),
+            &canonical_config(4.0, BrainType::Normal),
+        );
+        let n = &result.model_signature.numeric_params;
+
+        assert_eq!(n.jr_v_max, 5.0);
+        assert_eq!(n.jr_default_c, 135.0);
+        assert_eq!(n.jr_default_c1, 135.0);
+        assert_eq!(n.jr_default_c2, 108.0);
+        assert_eq!(n.jr_default_c3, 27.0);
+        assert_eq!(n.jr_default_c4, 27.0);
+        assert_eq!(n.jr_default_v0, 6.0);
+        assert_eq!(n.jr_default_sigmoid_r, 0.62);
+        assert_eq!(n.jr_warmup_seconds, 1.0);
+        assert_eq!(n.jr_sub_steps_base, 2);
+        assert_eq!(n.jr_sub_steps_fast, 4);
+        assert_eq!(n.jr_sub_steps_fast_rate_threshold, 200.0);
+    }
+
+    #[test]
+    fn model_signature_includes_fhn_hidden_runtime_constants() {
+        let result = evaluate_preset(
+            &fixture_dark_unmodulated_symmetric(),
+            &Goal::new(GoalKind::Sleep),
+            &canonical_config(4.0, BrainType::Normal),
+        );
+        let n = &result.model_signature.numeric_params;
+        let fhn_constants = crate::neural::fhn::legacy_constants_snapshot();
+
+        assert_eq!(n.fhn_spike_threshold, fhn_constants.spike_threshold);
+        assert_eq!(n.fhn_initial_voltage, fhn_constants.initial_voltage);
+        assert_eq!(n.fhn_initial_recovery, fhn_constants.initial_recovery);
+        assert_eq!(n.fhn_rk4_sub_steps, fhn_constants.rk4_sub_steps);
+        assert_eq!(n.fhn_isi_cv_min_spikes, fhn_constants.isi_cv_min_spikes);
+        assert_eq!(n.fhn_isi_cv_min_mean_isi, fhn_constants.isi_cv_min_mean_isi);
+    }
+
+    #[test]
+    fn model_signature_includes_runtime_time_base() {
+        let result = evaluate_preset(
+            &fixture_mid_modulated_lateralized(),
+            &Goal::new(GoalKind::Focus),
+            &canonical_config(4.0, BrainType::Adhd),
+        );
+        let sig = &result.model_signature;
+        let signature_json =
+            serde_json::to_value(sig).expect("signature serialization should succeed");
+
+        assert_eq!(sig.audio_sample_rate_hz, SAMPLE_RATE);
+        assert_eq!(sig.neural_decimation_factor, DECIMATION_FACTOR);
+        assert_eq!(sig.neural_sample_rate_hz.to_bits(), NEURAL_SR.to_bits());
+
+        assert_eq!(
+            signature_json["audio_sample_rate_hz"].as_u64(),
+            Some(SAMPLE_RATE as u64)
+        );
+        assert_eq!(
+            signature_json["neural_decimation_factor"].as_u64(),
+            Some(DECIMATION_FACTOR as u64)
+        );
+        assert_eq!(
+            signature_json["neural_sample_rate_hz"].as_f64(),
+            Some(NEURAL_SR)
+        );
+    }
+
+    #[test]
+    fn model_signature_includes_wilson_cowan_effective_parameters() {
+        let result = evaluate_preset(
+            &fixture_mid_modulated_lateralized(),
+            &Goal::new(GoalKind::Focus),
+            &canonical_config(4.0, BrainType::Adhd),
+        );
+        let n = &result.model_signature.numeric_params;
+
+        let wc = match n.tonotopic_params.band_model_types[2] {
+            crate::model_signature::BandModelTypeSnapshot::WilsonCowan {
+                target_hz,
+                tau_e,
+                tau_i,
+                w_ee,
+                w_ie,
+                w_ei,
+                w_ii,
+                h_e,
+                h_i,
+                sigmoid_a,
+                sigmoid_theta,
+                input_scale,
+                input_offset,
+                adaptive_entrainment_range_hz,
+            } => (
+                target_hz,
+                tau_e,
+                tau_i,
+                w_ee,
+                w_ie,
+                w_ei,
+                w_ii,
+                h_e,
+                h_i,
+                sigmoid_a,
+                sigmoid_theta,
+                input_scale,
+                input_offset,
+                adaptive_entrainment_range_hz,
+            ),
+            _ => panic!("band 2 expected Wilson-Cowan"),
+        };
+
+        assert_eq!(wc.0, 14.0);
+        assert_eq!(wc.3, 16.0); // w_ee
+        assert_eq!(wc.4, 15.0); // w_ie
+        assert_eq!(wc.5, 15.0); // w_ei
+        assert_eq!(wc.6, 3.0); // w_ii
+        assert_eq!(wc.7, 1.5); // h_e
+        assert_eq!(wc.8, 0.0); // h_i
+        assert_eq!(wc.9, 1.3); // sigmoid_a
+        assert_eq!(wc.10, 4.0); // sigmoid_theta
+        assert_eq!(wc.12, 1.0); // input_offset
+
+        // Effective input scale must be the runtime WC scale (JR input_scale * 0.01).
+        let expected_input_scale = BrainType::Adhd.params().jansen_rit.input_scale * 0.01;
+        assert_eq!(wc.11, expected_input_scale);
+
+        // Tau values are derived from target_hz by for_frequency(...)
+        let tau_sum = 1.0 / (2.45 * 14.0);
+        assert_eq!(wc.1, tau_sum * 0.45);
+        assert_eq!(wc.2, tau_sum * 0.55);
+    }
+
+    #[test]
+    fn model_signature_includes_wilson_cowan_entrainment_range() {
+        let result = evaluate_preset(
+            &fixture_bright_modulated_symmetric(),
+            &Goal::new(GoalKind::Flow),
+            &ablation_config(12.0, BrainType::Normal),
+        );
+        let n = &result.model_signature.numeric_params;
+
+        assert_eq!(n.wc_adaptive_entrainment_range_hz, 5.0);
+        match n.bilateral_params.left.band_model_types[2] {
+            crate::model_signature::BandModelTypeSnapshot::WilsonCowan {
+                adaptive_entrainment_range_hz,
+                ..
+            } => assert_eq!(adaptive_entrainment_range_hz, 5.0),
+            _ => panic!("left band 2 expected Wilson-Cowan"),
+        }
+    }
+
     /// The detailed evaluation path must carry the same scalar result as the
     /// legacy summary API so single-preset diagnostics cannot drift from the
     /// canonical optimizer/matrix score.
@@ -1072,15 +1726,27 @@ mod tests {
     /// Bounded sanity assertions for the Priority 28 Phase 1 comfort
     /// metrics. Used by all integration paths so that any preset that
     /// reaches `extract_features_v1` produces well-formed values.
-    fn assert_priority28_comfort_metrics_sane(features: &crate::acoustic_score::AcousticFeatureVector) {
-        let lufs_i = features.lufs_integrated.expect("lufs_integrated must be present");
+    fn assert_priority28_comfort_metrics_sane(
+        features: &crate::acoustic_score::AcousticFeatureVector,
+    ) {
+        let lufs_i = features
+            .lufs_integrated
+            .expect("lufs_integrated must be present");
         let lufs_l = features.lufs_left.expect("lufs_left must be present");
         let lufs_r = features.lufs_right.expect("lufs_right must be present");
-        let asym = features.lufs_asymmetry_lu.expect("lufs_asymmetry_lu must be present");
-        let tp = features.true_peak_dbfs.expect("true_peak_dbfs must be present");
+        let asym = features
+            .lufs_asymmetry_lu
+            .expect("lufs_asymmetry_lu must be present");
+        let tp = features
+            .true_peak_dbfs
+            .expect("true_peak_dbfs must be present");
         let plr = features.plr_db.expect("plr_db must be present");
-        let tilt = features.spectral_tilt_db_per_oct.expect("spectral tilt must be present");
-        let hf = features.hf_fraction_above_8khz.expect("hf fraction must be present");
+        let tilt = features
+            .spectral_tilt_db_per_oct
+            .expect("spectral tilt must be present");
+        let hf = features
+            .hf_fraction_above_8khz
+            .expect("hf fraction must be present");
 
         // Loudness must be finite and within the BS.1770 representable range.
         for (name, v) in [
@@ -1094,8 +1760,14 @@ mod tests {
                 "{name} = {v:.3} must be in plausible LUFS range"
             );
         }
-        assert!((0.0..=80.0).contains(&asym), "asymmetry must be ≥ 0 and < 80 LU, got {asym:.3}");
-        assert!((-120.0..=12.0).contains(&tp), "true peak must be in dBFS range, got {tp:.3}");
+        assert!(
+            (0.0..=80.0).contains(&asym),
+            "asymmetry must be ≥ 0 and < 80 LU, got {asym:.3}"
+        );
+        assert!(
+            (-120.0..=12.0).contains(&tp),
+            "true peak must be in dBFS range, got {tp:.3}"
+        );
         // Steady masker rendered for ≥4 s should have a moderate PLR; allow
         // a generous envelope here since this is just a sanity check, not a
         // tight bound.
@@ -1108,7 +1780,10 @@ mod tests {
             (-20.0..=20.0).contains(&tilt),
             "spectral tilt must be in plausible range, got {tilt:.3}"
         );
-        assert!((0.0..=1.0).contains(&hf), "hf fraction must be in [0, 1], got {hf:.3}");
+        assert!(
+            (0.0..=1.0).contains(&hf),
+            "hf fraction must be in [0, 1], got {hf:.3}"
+        );
         // Asymmetry equals abs difference between channels.
         assert!(
             (asym - (lufs_l - lufs_r).abs()).abs() < 1e-6,
@@ -1168,7 +1843,12 @@ mod tests {
     #[test]
     fn priority28_comfort_metrics_do_not_change_scoring() {
         let preset = make_modulated_preset();
-        for &kind in &[GoalKind::Shield, GoalKind::Isolation, GoalKind::Sleep, GoalKind::Focus] {
+        for &kind in &[
+            GoalKind::Shield,
+            GoalKind::Isolation,
+            GoalKind::Sleep,
+            GoalKind::Focus,
+        ] {
             let goal = Goal::new(kind);
 
             // Baseline: acoustic scoring enabled, fusion enabled (the
@@ -1273,9 +1953,9 @@ mod tests {
         let eval = |g: &[f64]| -> (f64, f64) {
             let f = g.iter().sum();
             let v = (g[0] - 0.3).abs().max(0.0).max(0.1) - 0.1
-                + (g[1] - 0.2).abs().max(0.0).max(0.1) - 0.1;
-            let v = ((g[0] - 0.3).abs() - 0.1).max(0.0)
-                + ((g[1] - 0.2).abs() - 0.1).max(0.0);
+                + (g[1] - 0.2).abs().max(0.0).max(0.1)
+                - 0.1;
+            let v = ((g[0] - 0.3).abs() - 0.1).max(0.0) + ((g[1] - 0.2).abs() - 0.1).max(0.0);
             (f, v)
         };
 
@@ -1357,14 +2037,8 @@ mod tests {
 
         let bounds = Preset::bounds();
         let discrete_dims = Preset::discrete_gene_indices();
-        let mut de = DifferentialEvolution::with_discrete(
-            bounds,
-            4,
-            0.7,
-            0.8,
-            424242,
-            discrete_dims,
-        );
+        let mut de =
+            DifferentialEvolution::with_discrete(bounds, 4, 0.7, 0.8, 424242, discrete_dims);
         let spread = [0.0_f32; crate::preset::MAX_OBJECTS];
 
         // Initial population evaluation — full pipeline + violation derive.
@@ -1378,14 +2052,23 @@ mod tests {
                 .as_ref()
                 .expect("acoustic_score must be present in constrained mode");
             let violation = goal.comfort_violation(&acoustic.features);
-            assert!(violation.is_finite(), "violation must be finite, got {violation}");
-            assert!((0.0..=1.0).contains(&violation), "violation must be ≤ 1, got {violation}");
+            assert!(
+                violation.is_finite(),
+                "violation must be finite, got {violation}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&violation),
+                "violation must be ≤ 1, got {violation}"
+            );
             de.report_constrained(idx, result.score, violation);
         }
 
         // ε₀ from 70th percentile of initial-pop violations (per spec §28f).
         let eps_0 = de.suggest_eps_from_population(0.70);
-        assert!(eps_0.is_finite(), "ε₀ must be finite after initial evaluations");
+        assert!(
+            eps_0.is_finite(),
+            "ε₀ must be finite after initial evaluations"
+        );
         de.enable_eps_constrained(eps_0, 2); // t_c = 2 (covers 3 generations)
         assert!(de.is_constrained());
 
@@ -1413,7 +2096,10 @@ mod tests {
         if let Some(strict) = de.best_strict() {
             assert!(strict.violation.is_finite());
             assert!(strict.neural_fitness.is_finite());
-            assert!(strict.violation <= 1e-9, "Some(strict) must satisfy violation ≤ 1e-9");
+            assert!(
+                strict.violation <= 1e-9,
+                "Some(strict) must satisfy violation ≤ 1e-9"
+            );
         }
     }
 
@@ -1563,7 +2249,10 @@ mod tests {
 
         let (best1, restarts1) = run();
         let (best2, restarts2) = run();
-        assert_eq!(best1, best2, "diversified DE must be deterministic at fixed seed");
+        assert_eq!(
+            best1, best2,
+            "diversified DE must be deterministic at fixed seed"
+        );
         assert_eq!(restarts1, restarts2, "restart count must be deterministic");
         assert!(
             best1.is_finite(),

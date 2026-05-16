@@ -8,6 +8,10 @@ use crate::auditory::{
     GammatoneFilterbank, PhysiologicalThalamicGate, ThalamicGate,
 };
 use crate::brain_type::BrainType;
+use crate::model_signature::{
+    AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
+    NumericParamsSnapshot, PipelineVariant, ReproducibilitySeeds, ScoringProfile,
+};
 use crate::movement::MovementController;
 use crate::neural::{
     simulate_bilateral, BilateralResult, FastInhibParams, FhnModel, FhnResult, PerformanceVector,
@@ -160,6 +164,11 @@ pub struct SimulationConfig {
     ///
     /// Default `false` → legacy weighted-sum behaviour is preserved.
     pub acoustic_constraints_enabled: bool,
+    /// Explicit model version for reproducible scientific baselines.
+    pub model_version: ModelVersion,
+    /// Optional run seed when an outer command has an explicit reproducibility seed.
+    /// Does not affect simulation behavior by itself; metadata only.
+    pub reproducibility_seed: Option<u64>,
 
     // ── Priority 18 — Theta-Alpha Coexistence parameters ───────────────
     //
@@ -168,7 +177,6 @@ pub struct SimulationConfig {
     // without recompilation. Defaults match the historical hardcoded values
     // exactly, so legacy callers (those that build `SimulationConfig` via
     // `..Default::default()`) get bit-identical behaviour.
-
     /// Priority 18a — Stochastic noise σ on JR input drive `p`.
     ///
     /// Per Ableidinger, Buckwar & Hinterleitner (2017), noise on the
@@ -238,6 +246,8 @@ impl Default for SimulationConfig {
             acoustic_scoring_enabled: false,
             acoustic_score_fusion_enabled: false,
             acoustic_constraints_enabled: false,
+            model_version: ModelVersion::LegacyV1,
+            reproducibility_seed: None,
             jr_stochastic_sigma: 15.0,
             cet_b_slow_rate: 5.0,
             cet_b_slow_gain: 10.0,
@@ -245,7 +255,51 @@ impl Default for SimulationConfig {
     }
 }
 
+impl SimulationConfig {
+    pub fn model_signature(&self) -> ModelSignature {
+        ModelSignature {
+            version: self.model_version,
+            pipeline_variant: PipelineVariant::EvaluateCanonical,
+            scoring_profile: ScoringProfile::LegacyV1,
+            normalization_mode: NormalizationMode::GlobalPerEar,
+            brain_type: self.brain_type,
+            audio_sample_rate_hz: SAMPLE_RATE,
+            neural_decimation_factor: DECIMATION_FACTOR,
+            neural_sample_rate_hz: NEURAL_SR,
+            auditory_flags: AuditoryFeatureFlags {
+                assr_enabled: self.assr_enabled,
+                thalamic_gate_enabled: self.thalamic_gate_enabled,
+                physiological_thalamic_gate_enabled: self.physiological_thalamic_gate_enabled,
+                cet_enabled: self.cet_enabled,
+                habituation_enabled: self.habituation_enabled,
+                acoustic_scoring_enabled: self.acoustic_scoring_enabled,
+                acoustic_score_fusion_enabled: self.acoustic_score_fusion_enabled,
+                acoustic_constraints_enabled: self.acoustic_constraints_enabled,
+            },
+            neural_flags: NeuralFeatureFlags {
+                stochastic_jr_enabled: self.stochastic_jr_enabled,
+            },
+            numeric_params: NumericParamsSnapshot::from_runtime(
+                self.brain_type,
+                self.jr_stochastic_sigma,
+                self.cet_b_slow_rate,
+                self.cet_b_slow_gain,
+                self.habituation_enabled,
+                self.cet_enabled,
+            ),
+            warmup_discard_secs: self.warmup_discard_secs,
+            duration_secs: self.duration_secs,
+            seeds: ReproducibilitySeeds {
+                primary_seed: self.reproducibility_seed,
+                disturbance_left_spike_seed: None,
+                disturbance_right_spike_seed: None,
+            },
+        }
+    }
+}
+
 pub struct SimulationResult {
+    pub model_signature: ModelSignature,
     pub score: f64,
     pub fhn_firing_rate: f64,
     pub fhn_isi_cv: f64,
@@ -392,11 +446,11 @@ pub fn compute_source_balance_db_range(preset: &Preset) -> f64 {
     if active_volumes.len() <= 1 {
         return 0.0;
     }
-    let max = active_volumes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min = active_volumes
+    let max = active_volumes
         .iter()
         .cloned()
-        .fold(f64::INFINITY, f64::min);
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min = active_volumes.iter().cloned().fold(f64::INFINITY, f64::min);
     if !(max.is_finite() && min.is_finite()) || min < VOLUME_FLOOR as f64 {
         return 0.0;
     }
@@ -916,6 +970,7 @@ pub fn evaluate_preset_detailed(
     let norm_bands = jr_result.band_powers.normalized();
 
     let summary = SimulationResult {
+        model_signature: config.model_signature(),
         score,
         fhn_firing_rate: fhn_result.firing_rate,
         fhn_isi_cv: fhn_result.isi_cv,
@@ -955,6 +1010,19 @@ mod tests {
     fn neural_sr_is_1000() {
         assert_eq!(NEURAL_SR, 1000.0);
         assert_eq!(SAMPLE_RATE as f64 / DECIMATION_FACTOR as f64, 1000.0);
+    }
+
+    #[test]
+    fn default_config_uses_legacy_v1_model_version() {
+        let cfg = SimulationConfig::default();
+        assert_eq!(cfg.model_version, ModelVersion::LegacyV1);
+    }
+
+    #[test]
+    fn model_version_supports_reserved_candidate_v2() {
+        let json = serde_json::to_string(&ModelVersion::CandidateV2)
+            .expect("candidate_v2 model version should serialize");
+        assert_eq!(json, "\"candidate_v2\"");
     }
 
     // ---------------------------------------------------------------
@@ -1065,19 +1133,12 @@ mod tests {
     /// pairs. Used by §28b source-balance tests.
     fn preset_with_volumes(volumes: &[(bool, f32)]) -> crate::preset::Preset {
         let mut preset = crate::preset::Preset::default();
-        for (i, &(active, vol)) in volumes
-            .iter()
-            .take(crate::preset::MAX_OBJECTS)
-            .enumerate()
-        {
+        for (i, &(active, vol)) in volumes.iter().take(crate::preset::MAX_OBJECTS).enumerate() {
             preset.objects[i].active = active;
             preset.objects[i].color = 1;
             preset.objects[i].volume = vol;
         }
-        preset.source_count = volumes
-            .iter()
-            .filter(|(a, v)| *a && *v > 1e-4)
-            .count() as u32;
+        preset.source_count = volumes.iter().filter(|(a, v)| *a && *v > 1e-4).count() as u32;
         preset
     }
 
@@ -1142,7 +1203,10 @@ mod tests {
             (r - 4.86).abs() < 0.1,
             "shield_v5 source balance should be ~4.86 dB, got {r:.4}"
         );
-        assert!(r < 6.0, "shield_v5 should be within Shield's 6 dB threshold");
+        assert!(
+            r < 6.0,
+            "shield_v5 should be within Shield's 6 dB threshold"
+        );
     }
 
     /// Pin the imbalance-detection contract using volumes from the
@@ -1172,7 +1236,10 @@ mod tests {
         let p = preset_with_volumes(&[(true, 1.0), (true, 1e-3)]);
         let r = compute_source_balance_db_range(&p);
         assert!(r.is_finite());
-        assert!((r - 60.0).abs() < 0.5, "1000× ratio should be ~60 dB, got {r:.3}");
+        assert!(
+            (r - 60.0).abs() < 0.5,
+            "1000× ratio should be ~60 dB, got {r:.3}"
+        );
     }
 
     #[test]
