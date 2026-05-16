@@ -1335,6 +1335,22 @@ fn surrogate_csv_header() -> String {
             "entrainment_ratio",
             "ei_stability_cv",
             "brightness",
+            "aperiodic_exponent",
+            "aperiodic_offset",
+            "periodic_peak_count",
+            "primary_peak_center_hz",
+            "primary_peak_bandwidth_hz",
+            "primary_peak_height_above_aperiodic_log10",
+            "assr_dominant_modulation_hz",
+            "assr_effective_amplitude_gain",
+            "assr_phase_consistency_heuristic",
+            "assr_implied_latency_jitter_ms_heuristic",
+            "assr_expected_plv_ceiling",
+            "estimated_arousal",
+            "estimated_arousal_score",
+            "arousal_score_span",
+            "arousal_local_derivative",
+            "arousal_max_abs_slope",
             "broadband_level_db",
             "speech_band_ratio",
             "modulation_depth",
@@ -1391,6 +1407,11 @@ fn surrogate_csv_row(
         .unwrap_or(0);
     let acoustic = result.acoustic_score.as_ref();
     let features = acoustic.map(|a| &a.features);
+    let diagnostics = result.scientific_diagnostics.as_ref();
+    let spectral = diagnostics.map(|d| &d.spectral_parameterization);
+    let primary_peak = primary_peak_for_export(spectral);
+    let assr_diag = diagnostics.map(|d| &d.assr);
+    let arousal_diag = diagnostics.map(|d| &d.arousal_sensitivity);
     let violation = acoustic
         .map(|a| Goal::new(goal_kind).comfort_violation(&a.features))
         .unwrap_or(0.0);
@@ -1462,6 +1483,24 @@ fn surrogate_csv_row(
         fmt_opt(result.performance.entrainment_ratio),
         fmt_opt(result.performance.ei_stability),
         format!("{:.6}", result.brightness),
+        fmt_opt(spectral.map(|s| s.aperiodic_exponent)),
+        fmt_opt(spectral.map(|s| s.aperiodic_offset)),
+        spectral
+            .map(|s| s.peaks.len().to_string())
+            .unwrap_or_default(),
+        fmt_opt(primary_peak.map(|p| p.center_hz)),
+        fmt_opt(primary_peak.map(|p| p.bandwidth_hz)),
+        fmt_opt(primary_peak.map(|p| p.power_above_aperiodic)),
+        fmt_opt(assr_diag.and_then(|a| a.dominant_modulation_hz)),
+        fmt_opt(assr_diag.and_then(|a| a.effective_amplitude_gain)),
+        fmt_opt(assr_diag.and_then(|a| a.phase_consistency_heuristic)),
+        fmt_opt(assr_diag.and_then(|a| a.implied_latency_jitter_ms_heuristic)),
+        fmt_opt(assr_diag.and_then(|a| a.expected_plv_ceiling)),
+        fmt_opt(arousal_diag.map(|a| a.estimated_arousal)),
+        fmt_opt(arousal_diag.map(|a| a.estimated_score)),
+        fmt_opt(arousal_diag.map(|a| a.score_span)),
+        fmt_opt(arousal_diag.map(|a| a.local_derivative)),
+        fmt_opt(arousal_diag.map(|a| a.max_abs_slope)),
         fmt_opt(features.and_then(|f| f.broadband_level_db)),
         fmt_opt(features.and_then(|f| f.speech_band_ratio)),
         fmt_opt(features.and_then(|f| f.modulation_depth)),
@@ -1486,6 +1525,27 @@ fn surrogate_csv_row(
         csv_escape_field(&signature_json),
     ]);
     cols.join(",")
+}
+
+fn primary_peak_for_export(
+    spectral: Option<&crate::neural::SpectralParameterization>,
+) -> Option<&crate::neural::aperiodic::SpectralPeak> {
+    spectral.and_then(|s| {
+        s.peaks.iter().max_by(|a, b| {
+            a.power_above_aperiodic
+                .total_cmp(&b.power_above_aperiodic)
+                // Tie-break deterministically by lower center frequency.
+                .then_with(|| b.center_hz.total_cmp(&a.center_hz))
+        })
+    })
+}
+
+fn evaluate_preset_for_dataset_export(
+    preset: &Preset,
+    goal: &Goal,
+    config: &SimulationConfig,
+) -> SimulationResult {
+    evaluate_preset_detailed(preset, goal, config).summary
 }
 
 fn preset_from_genome_with_seed_context(genome: &[f64], seed_ctx: &SeedPresetContext) -> Preset {
@@ -3479,6 +3539,54 @@ fn run_evaluate(
         }
         println!();
 
+        if let Some(science) = result.scientific_diagnostics.as_ref() {
+            println!("  Scientific Diagnostics (score-inert):");
+            println!(
+                "    Aperiodic fit ({}-{} Hz): exponent={:.3}, offset={:.3}",
+                science.spectral_parameterization.fit_min_hz,
+                science.spectral_parameterization.fit_max_hz,
+                science.spectral_parameterization.aperiodic_exponent,
+                science.spectral_parameterization.aperiodic_offset
+            );
+            if science.spectral_parameterization.peaks.is_empty() {
+                println!("    Periodic peaks: none detected");
+            } else {
+                println!(
+                    "    Periodic peaks: {} detected",
+                    science.spectral_parameterization.peaks.len()
+                );
+                for peak in science.spectral_parameterization.peaks.iter().take(3) {
+                    println!(
+                        "      peak @ {:>5.2} Hz  bw {:>5.2} Hz  height_above_fit_log10 {:>8.5}",
+                        peak.center_hz, peak.bandwidth_hz, peak.power_above_aperiodic
+                    );
+                }
+            }
+            if let Some(mod_hz) = science.assr.dominant_modulation_hz {
+                println!(
+                    "    ASSR (dominant {:.2} Hz): effective_gain={:.3}  phase_consistency={:.3}  jitter={:.3} ms  plv_ceiling={:.3}",
+                    mod_hz,
+                    science.assr.effective_amplitude_gain.unwrap_or(0.0),
+                    science.assr.phase_consistency_heuristic.unwrap_or(0.0),
+                    science.assr.implied_latency_jitter_ms_heuristic.unwrap_or(0.0),
+                    science.assr.expected_plv_ceiling.unwrap_or(0.0),
+                );
+            } else {
+                println!("    ASSR: N/A (no modulation target)");
+            }
+
+            let ar = &science.arousal_sensitivity;
+            println!(
+                "    Arousal sensitivity: estimated={:.3}, estimated_score={:.4}, local_dScore/dA={:.4}, span={:.4}, max|slope|={:.4}",
+                ar.estimated_arousal,
+                ar.estimated_score,
+                ar.local_derivative,
+                ar.score_span,
+                ar.max_abs_slope
+            );
+        }
+        println!();
+
         let brightness_label = if result.brightness > 0.7 {
             "bright (white-like)"
         } else if result.brightness > 0.4 {
@@ -4158,7 +4266,7 @@ fn run_generate_data(
                     let preset = Preset::from_genome(genome);
                     let goal = Goal::new(goal_kind);
                     let config = build_generate_data_config(duration, bt, phys_gate, seed);
-                    let result = evaluate_preset(&preset, &goal, &config);
+                    let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
 
                     results.lock().unwrap().push((
                         preset_idx,
@@ -4624,11 +4732,44 @@ mod tests {
         assert!(cols.contains(&"score"));
         assert!(cols.contains(&"violation"));
         assert!(cols.contains(&"speech_privacy"));
+        assert!(cols.contains(&"aperiodic_exponent"));
+        assert!(cols.contains(&"assr_dominant_modulation_hz"));
+        assert!(cols.contains(&"assr_effective_amplitude_gain"));
+        assert!(cols.contains(&"assr_phase_consistency_heuristic"));
+        assert!(cols.contains(&"estimated_arousal"));
+        assert!(cols.contains(&"arousal_score_span"));
         assert!(cols.contains(&"is_feasible"));
         assert!(cols.contains(&"model_signature_schema_version"));
         assert!(cols.contains(&"model_signature_json"));
         assert_eq!(cols[cols.len() - 2], "model_signature_schema_version");
         assert_eq!(cols[cols.len() - 1], "model_signature_json");
+    }
+
+    fn parse_csv_fields(line: &str) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut current = String::new();
+        let mut chars = line.chars().peekable();
+        let mut in_quotes = false;
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    if in_quotes && chars.peek() == Some(&'"') {
+                        current.push('"');
+                        let _ = chars.next();
+                    } else {
+                        in_quotes = !in_quotes;
+                    }
+                }
+                ',' if !in_quotes => {
+                    fields.push(current);
+                    current = String::new();
+                }
+                _ => current.push(ch),
+            }
+        }
+        fields.push(current);
+        fields
     }
 
     #[test]
@@ -4727,6 +4868,151 @@ mod tests {
             row.contains("\"\"neural_sample_rate_hz\"\":1000.0")
                 || row.contains("\"\"neural_sample_rate_hz\"\": 1000.0"),
             "signature payload should carry neural sample rate provenance"
+        );
+    }
+
+    #[test]
+    fn dataset_export_path_populates_stage2_diagnostic_columns() {
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.8;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 40.0;
+        preset.objects[0].bass_mod.param_b = 0.9;
+        let genome = preset.to_genome();
+
+        let config = build_generate_data_config(3.0, BrainType::Normal, false, 12345);
+        let goal_kind = GoalKind::Focus;
+        let goal = Goal::new(goal_kind);
+        let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
+        assert!(
+            result.scientific_diagnostics.is_some(),
+            "dataset export evaluation path should include Stage 2 diagnostics"
+        );
+
+        let meta = CsvExampleMeta {
+            example_id: "ex_stage2".to_string(),
+            run_id: "run_stage2".to_string(),
+            parent_example_id: String::new(),
+            stage: "generate_data".to_string(),
+            source: "random".to_string(),
+            seed_eval: "12345".to_string(),
+            created_at: "2026-05-16T00:00:00Z".to_string(),
+        };
+        let row = surrogate_csv_row(
+            &meta,
+            &genome,
+            goal_kind,
+            BrainType::Normal,
+            &config,
+            &result,
+        );
+        let header = surrogate_csv_header();
+        let header_cols: Vec<&str> = header.split(',').collect();
+        let row_cols = parse_csv_fields(&row);
+        assert_eq!(
+            header_cols.len(),
+            row_cols.len(),
+            "CSV row width must match header width"
+        );
+
+        let idx = |name: &str| {
+            header_cols
+                .iter()
+                .position(|c| *c == name)
+                .expect("missing csv column")
+        };
+
+        assert!(
+            !row_cols[idx("aperiodic_exponent")].is_empty(),
+            "aperiodic_exponent should be populated"
+        );
+        assert!(
+            !row_cols[idx("assr_dominant_modulation_hz")].is_empty(),
+            "assr_dominant_modulation_hz should be populated"
+        );
+        assert!(
+            !row_cols[idx("assr_effective_amplitude_gain")].is_empty(),
+            "assr_effective_amplitude_gain should be populated"
+        );
+        assert!(
+            !row_cols[idx("arousal_local_derivative")].is_empty(),
+            "arousal_local_derivative should be populated"
+        );
+    }
+
+    #[test]
+    fn surrogate_csv_primary_peak_prefers_strongest_detected_peak() {
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.8;
+        let genome = preset.to_genome();
+
+        let config = build_generate_data_config(3.0, BrainType::Normal, false, 777);
+        let goal_kind = GoalKind::Focus;
+        let goal = Goal::new(goal_kind);
+        let mut result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
+
+        let diagnostics = result
+            .scientific_diagnostics
+            .as_mut()
+            .expect("dataset export path should include diagnostics");
+        diagnostics.spectral_parameterization.peaks = vec![
+            crate::neural::aperiodic::SpectralPeak {
+                center_hz: 8.0,
+                bandwidth_hz: 2.0,
+                power_above_aperiodic: 0.12,
+            },
+            crate::neural::aperiodic::SpectralPeak {
+                center_hz: 20.0,
+                bandwidth_hz: 3.0,
+                power_above_aperiodic: 0.35,
+            },
+        ];
+        assert!(
+            diagnostics.spectral_parameterization.peaks[0].center_hz
+                < diagnostics.spectral_parameterization.peaks[1].center_hz,
+            "test setup should keep the peak list frequency-sorted"
+        );
+        let chosen =
+            primary_peak_for_export(Some(&diagnostics.spectral_parameterization)).unwrap();
+        assert_eq!(chosen.center_hz, 20.0);
+
+        let meta = CsvExampleMeta {
+            example_id: "ex_primary_peak".to_string(),
+            run_id: "run_primary_peak".to_string(),
+            parent_example_id: String::new(),
+            stage: "generate_data".to_string(),
+            source: "test".to_string(),
+            seed_eval: "777".to_string(),
+            created_at: "2026-05-16T00:00:00Z".to_string(),
+        };
+
+        let row = surrogate_csv_row(
+            &meta,
+            &genome,
+            goal_kind,
+            BrainType::Normal,
+            &config,
+            &result,
+        );
+        let header = surrogate_csv_header();
+        let header_cols: Vec<&str> = header.split(',').collect();
+        let row_cols = parse_csv_fields(&row);
+        let idx = |name: &str| {
+            header_cols
+                .iter()
+                .position(|c| *c == name)
+                .expect("missing csv column")
+        };
+
+        assert_eq!(row_cols[idx("primary_peak_center_hz")], "20.000000");
+        assert_eq!(row_cols[idx("primary_peak_bandwidth_hz")], "3.000000");
+        assert_eq!(
+            row_cols[idx("primary_peak_height_above_aperiodic_log10")],
+            "0.350000"
         );
     }
 

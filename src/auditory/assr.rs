@@ -16,8 +16,103 @@
 /// band signals (1 kHz sample rate) between the cochlear filterbank and the
 /// cortical neural models.
 use rustfft::{num_complex::Complex, FftPlanner};
+use serde::{Deserialize, Serialize};
 
 use crate::preset::Preset;
+
+/// Stage 2 diagnostic-only ASSR observability bundle.
+///
+/// These fields are not score inputs. They expose the model's current
+/// assumptions about modulation-rate transmission and timing precision.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AssrDiagnostics {
+    pub assr_enabled: bool,
+    pub dominant_modulation_hz: Option<f64>,
+    pub effective_amplitude_gain: Option<f64>,
+    pub phase_consistency_heuristic: Option<f64>,
+    pub implied_latency_jitter_ms_heuristic: Option<f64>,
+    pub expected_plv_ceiling: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AssrModulationSummary {
+    pub dominant_modulation_hz: Option<f64>,
+    pub effective_amplitude_gain: Option<f64>,
+}
+
+/// Expected PLV ceiling under a Gaussian latency-jitter model.
+///
+/// PLV_ceiling = exp(-0.5 * (2π f σ_t)^2), where σ_t is jitter std in seconds.
+pub fn expected_plv_ceiling_from_latency_jitter(modulation_hz: f64, latency_jitter_ms: f64) -> f64 {
+    if !modulation_hz.is_finite()
+        || !latency_jitter_ms.is_finite()
+        || modulation_hz <= 0.0
+        || latency_jitter_ms < 0.0
+    {
+        return 0.0;
+    }
+    let sigma_t = latency_jitter_ms * 1e-3;
+    let phase_sigma = 2.0 * std::f64::consts::PI * modulation_hz * sigma_t;
+    (-0.5 * phase_sigma * phase_sigma).exp().clamp(0.0, 1.0)
+}
+
+/// Heuristic latency-jitter curve (Stage 2 diagnostics only).
+///
+/// Not a calibrated biomarker. This is an explicit modeling prior that can
+/// be replaced once empirical calibration data exists.
+pub fn implied_latency_jitter_ms_heuristic(modulation_hz: f64) -> f64 {
+    if !modulation_hz.is_finite() || modulation_hz <= 0.0 {
+        return 0.0;
+    }
+    let f = modulation_hz.max(0.5);
+    // Low modulation rates are modeled as less temporally precise; around
+    // 40 Hz the jitter prior tightens.
+    (3.5 + 12.0 / (1.0 + (f / 28.0).powf(1.5))).max(0.0)
+}
+
+/// Diagnostics wrapper that reports the effective ASSR amplitude path plus
+/// heuristic temporal-consistency terms for the current modulation rate.
+pub fn diagnostics_for_modulation(
+    modulation: AssrModulationSummary,
+    assr_enabled: bool,
+) -> AssrDiagnostics {
+    let freq = match modulation.dominant_modulation_hz {
+        Some(f) if f.is_finite() && f > 0.0 => f,
+        _ => {
+            return AssrDiagnostics {
+                assr_enabled,
+                dominant_modulation_hz: None,
+                effective_amplitude_gain: None,
+                phase_consistency_heuristic: None,
+                implied_latency_jitter_ms_heuristic: None,
+                expected_plv_ceiling: None,
+            }
+        }
+    };
+
+    let effective_amplitude_gain = if assr_enabled {
+        modulation.effective_amplitude_gain.or(Some(1.0))
+    } else {
+        Some(1.0)
+    };
+
+    let jitter_ms = if assr_enabled {
+        implied_latency_jitter_ms_heuristic(freq)
+    } else {
+        0.0
+    };
+    let expected_plv = expected_plv_ceiling_from_latency_jitter(freq, jitter_ms);
+    let phase_consistency = if assr_enabled { expected_plv } else { 1.0 };
+
+    AssrDiagnostics {
+        assr_enabled,
+        dominant_modulation_hz: Some(freq),
+        effective_amplitude_gain,
+        phase_consistency_heuristic: Some(phase_consistency),
+        implied_latency_jitter_ms_heuristic: Some(jitter_ms),
+        expected_plv_ceiling: Some(expected_plv),
+    }
+}
 
 /// ASSR transfer function that attenuates modulation frequencies based on
 /// their empirical cortical penetration strength.
@@ -144,6 +239,62 @@ impl AssrTransfer {
         }
     }
 
+    fn active_modulators(preset: &Preset) -> Vec<(f64, f64)> {
+        let mut mods = Vec::new();
+        for obj in &preset.objects {
+            if !obj.active {
+                continue;
+            }
+            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
+                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
+                    let freq = modcfg.param_a as f64;
+                    let depth = modcfg.param_b as f64;
+                    let vol = obj.volume as f64;
+                    let weight = depth * vol;
+                    if freq.is_finite() && freq > 0.0 && weight.is_finite() && weight > 0.0 {
+                        mods.push((freq, weight));
+                    }
+                }
+            }
+        }
+        mods
+    }
+
+    pub fn summarize_preset_modulation(&self, preset: &Preset) -> AssrModulationSummary {
+        let modulators = Self::active_modulators(preset);
+        if modulators.is_empty() {
+            return AssrModulationSummary {
+                dominant_modulation_hz: None,
+                effective_amplitude_gain: None,
+            };
+        }
+
+        let mut dominant = None;
+        let mut dominant_weight = f64::NEG_INFINITY;
+        let mut weighted_gain_sum = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
+
+        for (freq, weight) in modulators {
+            if weight > dominant_weight {
+                dominant_weight = weight;
+                dominant = Some(freq);
+            }
+            weighted_gain_sum += self.gain(freq) * weight;
+            weight_sum += weight;
+        }
+
+        let effective = if weight_sum > 1e-10 {
+            Some((weighted_gain_sum / weight_sum).clamp(0.0, 1.0))
+        } else {
+            None
+        };
+
+        AssrModulationSummary {
+            dominant_modulation_hz: dominant,
+            effective_amplitude_gain: effective,
+        }
+    }
+
     /// Compute an input_scale modifier based on the preset's modulation frequencies.
     ///
     /// Scans all active NeuralLfo modulators, computes ASSR gain at each frequency,
@@ -157,45 +308,9 @@ impl AssrTransfer {
     /// The modifier scales how strongly amplitude modulation drives the cortical
     /// model, reflecting the auditory pathway's frequency-dependent transmission.
     pub fn compute_input_scale_modifier(&self, preset: &Preset) -> f64 {
-        if !self.enabled {
-            return 1.0;
-        }
-
-        let mut weighted_gain_sum = 0.0_f64;
-        let mut weight_sum = 0.0_f64;
-
-        for obj in &preset.objects {
-            if !obj.active {
-                continue;
-            }
-
-            // Check bass_mod and satellite_mod for entrainment modulators:
-            // NeuralLfo (kind=4) and Isochronic (kind=5) both produce AM at
-            // a defined frequency. Isochronic tones have sharper transients
-            // (square-wave envelope) which produce stronger ASSR per Schwarz
-            // & Taylor (2005), but the ASSR frequency-dependent gain curve
-            // applies equally to both modulator types.
-            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
-                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
-                    let freq = modcfg.param_a as f64;
-                    let depth = modcfg.param_b as f64;
-                    let vol = obj.volume as f64;
-                    let weight = depth * vol;
-                    weighted_gain_sum += self.gain(freq) * weight;
-                    weight_sum += weight;
-                }
-            }
-        }
-
-        if weight_sum < 1e-10 {
-            return 1.0; // no NeuralLfo modulators → no ASSR effect
-        }
-
-        // Weighted average ASSR gain across all modulators
-        let avg_gain = weighted_gain_sum / weight_sum;
-
-        // Scale: avg_gain is already in [min_gain, 1.0] from self.gain()
-        avg_gain
+        self.summarize_preset_modulation(preset)
+            .effective_amplitude_gain
+            .unwrap_or(1.0)
     }
 }
 
@@ -315,6 +430,123 @@ mod tests {
         assert!(
             g10 > g5,
             "Secondary peak: gain at 10 Hz ({g10}) should exceed 5 Hz ({g5})"
+        );
+    }
+
+    #[test]
+    fn diagnostics_separate_amplitude_and_phase_fields() {
+        let d = diagnostics_for_modulation(
+            AssrModulationSummary {
+                dominant_modulation_hz: Some(40.0),
+                effective_amplitude_gain: Some(AssrTransfer::new().gain(40.0)),
+            },
+            true,
+        );
+        assert_eq!(d.dominant_modulation_hz, Some(40.0));
+        assert!(d.effective_amplitude_gain.is_some());
+        assert!(d.phase_consistency_heuristic.is_some());
+        assert!(d.implied_latency_jitter_ms_heuristic.is_some());
+        assert!(d.expected_plv_ceiling.is_some());
+    }
+
+    #[test]
+    fn diagnostics_40hz_has_higher_amplitude_gain_than_low_rate() {
+        let low = diagnostics_for_modulation(
+            AssrModulationSummary {
+                dominant_modulation_hz: Some(4.0),
+                effective_amplitude_gain: Some(AssrTransfer::new().gain(4.0)),
+            },
+            true,
+        );
+        let high = diagnostics_for_modulation(
+            AssrModulationSummary {
+                dominant_modulation_hz: Some(40.0),
+                effective_amplitude_gain: Some(AssrTransfer::new().gain(40.0)),
+            },
+            true,
+        );
+        assert!(
+            high.effective_amplitude_gain.unwrap_or(0.0)
+                > low.effective_amplitude_gain.unwrap_or(0.0),
+            "expected 40 Hz gain ({:?}) > 4 Hz gain ({:?})",
+            high.effective_amplitude_gain,
+            low.effective_amplitude_gain
+        );
+    }
+
+    #[test]
+    fn plv_ceiling_decreases_with_frequency_for_fixed_jitter() {
+        let low = expected_plv_ceiling_from_latency_jitter(5.0, 5.0);
+        let high = expected_plv_ceiling_from_latency_jitter(40.0, 5.0);
+        assert!(low > high, "expected PLV ceiling to drop with frequency");
+    }
+
+    #[test]
+    fn plv_ceiling_decreases_with_higher_jitter() {
+        let low_jitter = expected_plv_ceiling_from_latency_jitter(40.0, 2.0);
+        let high_jitter = expected_plv_ceiling_from_latency_jitter(40.0, 10.0);
+        assert!(
+            low_jitter > high_jitter,
+            "expected PLV ceiling to drop as jitter increases"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_deterministic_and_finite() {
+        let summary = AssrModulationSummary {
+            dominant_modulation_hz: Some(18.0),
+            effective_amplitude_gain: Some(AssrTransfer::new().gain(18.0)),
+        };
+        let a = diagnostics_for_modulation(summary, true);
+        let b = diagnostics_for_modulation(summary, true);
+        assert_eq!(a, b);
+        assert!(a.effective_amplitude_gain.unwrap().is_finite());
+        assert!(a.phase_consistency_heuristic.unwrap().is_finite());
+        assert!(a.implied_latency_jitter_ms_heuristic.unwrap().is_finite());
+        assert!(a.expected_plv_ceiling.unwrap().is_finite());
+    }
+
+    #[test]
+    fn diagnostics_effective_gain_matches_single_modulator_modifier() {
+        let assr = AssrTransfer::new();
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 1.0;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 40.0;
+        preset.objects[0].bass_mod.param_b = 0.8;
+
+        let summary = assr.summarize_preset_modulation(&preset);
+        let diag = diagnostics_for_modulation(summary, true);
+        assert_eq!(diag.dominant_modulation_hz, Some(40.0));
+        assert_eq!(
+            diag.effective_amplitude_gain.unwrap().to_bits(),
+            assr.compute_input_scale_modifier(&preset).to_bits()
+        );
+    }
+
+    #[test]
+    fn diagnostics_effective_gain_matches_weighted_multi_modulator_modifier() {
+        let assr = AssrTransfer::new();
+        let mut preset = Preset::default();
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.8;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 40.0;
+        preset.objects[0].bass_mod.param_b = 0.7;
+        preset.objects[1].active = true;
+        preset.objects[1].volume = 0.6;
+        preset.objects[1].satellite_mod.kind = 5;
+        preset.objects[1].satellite_mod.param_a = 8.0;
+        preset.objects[1].satellite_mod.param_b = 0.9;
+
+        let summary = assr.summarize_preset_modulation(&preset);
+        let diag = diagnostics_for_modulation(summary, true);
+        assert_eq!(diag.dominant_modulation_hz, Some(40.0));
+        assert_eq!(
+            diag.effective_amplitude_gain.unwrap().to_bits(),
+            assr.compute_input_scale_modifier(&preset).to_bits(),
+            "diagnostic effective gain must match the pipeline-applied weighted modifier"
         );
     }
 

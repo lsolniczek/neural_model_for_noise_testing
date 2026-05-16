@@ -1,9 +1,11 @@
+pub mod aperiodic;
 pub mod fhn;
 pub mod jansen_rit;
 pub mod performance;
 mod tests;
 pub mod wilson_cowan;
 
+pub use aperiodic::SpectralParameterization;
 pub use fhn::{FhnModel, FhnResult};
 pub use jansen_rit::{
     simulate_bilateral, simulate_tonotopic, BandPowers, BilateralResult, FastInhibParams,

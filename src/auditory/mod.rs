@@ -5,7 +5,7 @@ pub mod physiological_thalamic_gate;
 pub mod room_impulse;
 pub mod thalamic_gate;
 
-pub use assr::AssrTransfer;
+pub use assr::{diagnostics_for_modulation, AssrDiagnostics, AssrModulationSummary, AssrTransfer};
 pub use crossover::{ButterworthCrossover, DEFAULT_CET_CUTOFF_HZ};
 pub use gammatone::{BandGroupOutput, GammatoneFilterbank, BAND_LABELS};
 pub use physiological_thalamic_gate::PhysiologicalThalamicGate;

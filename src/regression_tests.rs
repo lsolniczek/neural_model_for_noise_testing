@@ -1187,6 +1187,72 @@ mod tests {
     }
 
     #[test]
+    fn stage2_scientific_diagnostics_are_score_inert_and_present_in_detailed_path() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Flow);
+        let config = canonical_config(4.0, BrainType::Normal);
+
+        let scalar = evaluate_preset(&preset, &goal, &config);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+
+        assert_eq!(scalar.score.to_bits(), detailed.summary.score.to_bits());
+        assert!(scalar.scientific_diagnostics.is_none());
+        let diagnostics = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("detailed evaluation should carry stage2 diagnostics");
+        assert!(diagnostics
+            .spectral_parameterization
+            .aperiodic_exponent
+            .is_finite());
+        assert!(diagnostics
+            .spectral_parameterization
+            .aperiodic_offset
+            .is_finite());
+        assert_eq!(
+            diagnostics.arousal_sensitivity.estimated_score.to_bits(),
+            detailed.summary.score.to_bits()
+        );
+    }
+
+    #[test]
+    fn stage2_arousal_sensitivity_diagnostics_are_finite_and_deterministic() {
+        let preset = fixture_bright_modulated_symmetric();
+        let goal = Goal::new(GoalKind::Ignition);
+        let config = canonical_config(4.0, BrainType::Adhd);
+
+        let d1 = evaluate_preset_detailed(&preset, &goal, &config);
+        let d2 = evaluate_preset_detailed(&preset, &goal, &config);
+        let a1 = d1
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics")
+            .arousal_sensitivity
+            .clone();
+        let a2 = d2
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics")
+            .arousal_sensitivity
+            .clone();
+
+        assert_eq!(a1.sweep.len(), 5);
+        assert_eq!(a1.sweep, a2.sweep);
+        assert!(a1.local_derivative.is_finite());
+        assert!(a1.score_span.is_finite());
+        assert!(a1.max_abs_slope.is_finite());
+        for point in &a1.sweep {
+            assert!(point.arousal.is_finite());
+            assert!(point.score.is_finite());
+        }
+        assert_eq!(a1.sweep[0].arousal.to_bits(), 0.0f64.to_bits());
+        assert_eq!(a1.sweep[4].arousal.to_bits(), 1.0f64.to_bits());
+    }
+
+    #[test]
     fn model_signature_includes_wilson_cowan_effective_parameters() {
         let result = evaluate_preset(
             &fixture_mid_modulated_lateralized(),

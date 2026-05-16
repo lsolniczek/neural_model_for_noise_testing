@@ -4,8 +4,9 @@ use crate::acoustic_score::{extract_score_result_v1, AcousticScoreResult, Render
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 use crate::auditory::{
-    apply_rir, generate_rir, AssrTransfer, ButterworthCrossover, EnvironmentParams,
-    GammatoneFilterbank, PhysiologicalThalamicGate, ThalamicGate,
+    apply_rir, diagnostics_for_modulation, generate_rir, AssrDiagnostics, AssrModulationSummary,
+    AssrTransfer, ButterworthCrossover, EnvironmentParams, GammatoneFilterbank,
+    PhysiologicalThalamicGate, ThalamicGate,
 };
 use crate::brain_type::BrainType;
 use crate::model_signature::{
@@ -14,11 +15,13 @@ use crate::model_signature::{
 };
 use crate::movement::MovementController;
 use crate::neural::{
-    simulate_bilateral, BilateralResult, FastInhibParams, FhnModel, FhnResult, PerformanceVector,
+    aperiodic, simulate_bilateral, BilateralResult, FastInhibParams, FhnModel, FhnResult,
+    PerformanceVector, SpectralParameterization,
 };
 use crate::preset::Preset;
 use crate::scoring::Goal;
 use noise_generator_core::NoiseEngine;
+use serde::{Deserialize, Serialize};
 
 use rustfft::{num_complex::Complex, FftPlanner};
 
@@ -29,6 +32,9 @@ pub(crate) const DECIMATION_FACTOR: usize = 48;
 pub(crate) const NEURAL_SR: f64 = SAMPLE_RATE as f64 / DECIMATION_FACTOR as f64;
 /// Default neural-analysis warm-up discard window (seconds).
 pub(crate) const DEFAULT_WARMUP_DISCARD_SECS: f32 = 2.0;
+const DIAGNOSTIC_PSD_MIN_HZ: f64 = 2.0;
+const DIAGNOSTIC_PSD_MAX_HZ: f64 = 40.0;
+const AROUSAL_SWEEP_GRID: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 
 /// Validate that the rendered duration leaves a non-empty analysis window
 /// after the neural warm-up discard.
@@ -321,6 +327,8 @@ pub struct SimulationResult {
     pub alpha_asymmetry: f64,
     /// Performance vector: entrainment, E/I stability, spectral centroid.
     pub performance: PerformanceVector,
+    /// Stage 2 diagnostics-only observability payload (not used for scoring).
+    pub scientific_diagnostics: Option<ScientificDiagnostics>,
     /// Optional acoustic-scoring payload reserved for later rollout phases.
     pub acoustic_score: Option<AcousticScoreResult>,
 }
@@ -349,12 +357,36 @@ pub(crate) struct AuditoryPreparedState {
     pub arousal: f64,
     pub thalamic_band_shifts: [f64; 4],
     pub target_lfo_freq: Option<f64>,
+    pub assr_effective_gain: Option<f64>,
 }
 
 pub(crate) struct CanonicalCorticalStageOutput {
     pub bilateral: BilateralResult,
     pub fhn: FhnResult,
     pub performance: PerformanceVector,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArousalSweepPoint {
+    pub arousal: f64,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArousalSensitivityDiagnostics {
+    pub estimated_arousal: f64,
+    pub estimated_score: f64,
+    pub sweep: Vec<ArousalSweepPoint>,
+    pub local_derivative: f64,
+    pub max_abs_slope: f64,
+    pub score_span: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScientificDiagnostics {
+    pub spectral_parameterization: SpectralParameterization,
+    pub assr: AssrDiagnostics,
+    pub arousal_sensitivity: ArousalSensitivityDiagnostics,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -486,7 +518,7 @@ pub fn evaluate_preset(
     goal: &Goal,
     config: &SimulationConfig,
 ) -> SimulationResult {
-    evaluate_preset_detailed(preset, goal, config).summary
+    evaluate_preset_detailed_internal(preset, goal, config, false).summary
 }
 
 pub(crate) fn render_preset_stereo_dry(preset: &Preset, duration_secs: f32) -> RenderedStereoAudio {
@@ -552,23 +584,21 @@ pub(crate) fn render_preset_ear_signals(
 }
 
 fn extract_target_lfo_frequency_from_preset(preset: &Preset) -> Option<f64> {
-    preset
-        .objects
-        .iter()
-        .filter(|obj| obj.active)
-        .flat_map(|obj| {
-            let vol = obj.volume as f64;
-            let mut lfos = Vec::new();
-            // NeuralLfo (kind=4) and Isochronic (kind=5) both drive entrainment.
-            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
-                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
-                    lfos.push((modcfg.param_a as f64, modcfg.param_b as f64 * vol));
-                }
-            }
-            lfos
-        })
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        .map(|(freq, _strength)| freq)
+    AssrTransfer::new()
+        .summarize_preset_modulation(preset)
+        .dominant_modulation_hz
+}
+
+fn compute_thalamic_band_shifts_for_arousal(config: &SimulationConfig, arousal: f64) -> [f64; 4] {
+    if config.physiological_thalamic_gate_enabled {
+        let gate = PhysiologicalThalamicGate::new(arousal);
+        gate.band_offset_shifts()
+    } else if config.thalamic_gate_enabled {
+        let gate = ThalamicGate::new(arousal);
+        gate.band_offset_shifts()
+    } else {
+        [0.0; 4]
+    }
 }
 
 pub(crate) fn prepare_canonical_auditory_state(
@@ -681,9 +711,12 @@ pub(crate) fn prepare_canonical_auditory_state(
     }
 
     // 5e. (Optional) ASSR attenuation on AC component only.
+    let mut assr_effective_gain = None;
     if config.assr_enabled {
         let assr = AssrTransfer::new();
-        let assr_mod = assr.compute_input_scale_modifier(preset);
+        let assr_summary = assr.summarize_preset_modulation(preset);
+        let assr_mod = assr_summary.effective_amplitude_gain.unwrap_or(1.0);
+        assr_effective_gain = assr_summary.effective_amplitude_gain;
         if assr_mod < 1.0 - 1e-10 {
             for bands in [&mut left_bands_dec, &mut right_bands_dec] {
                 for band in bands.iter_mut() {
@@ -739,15 +772,7 @@ pub(crate) fn prepare_canonical_auditory_state(
         0.5
     };
 
-    let thalamic_band_shifts = if config.physiological_thalamic_gate_enabled {
-        let gate = PhysiologicalThalamicGate::new(arousal);
-        gate.band_offset_shifts()
-    } else if config.thalamic_gate_enabled {
-        let gate = ThalamicGate::new(arousal);
-        gate.band_offset_shifts()
-    } else {
-        [0.0; 4]
-    };
+    let thalamic_band_shifts = compute_thalamic_band_shifts_for_arousal(config, arousal);
 
     AuditoryPreparedState {
         rendered_audio,
@@ -761,6 +786,7 @@ pub(crate) fn prepare_canonical_auditory_state(
         arousal,
         thalamic_band_shifts,
         target_lfo_freq: extract_target_lfo_frequency_from_preset(preset),
+        assr_effective_gain,
     }
 }
 
@@ -862,6 +888,173 @@ pub(crate) fn run_canonical_cortical_stage(
     }
 }
 
+fn compute_neural_score(goal: &Goal, cortical: &CanonicalCorticalStageOutput) -> f64 {
+    goal.evaluate_full(
+        &cortical.fhn,
+        &cortical.bilateral.combined,
+        cortical.bilateral.alpha_asymmetry,
+        cortical.performance.plv,
+        cortical.performance.envelope_plv,
+    )
+}
+
+fn compute_scalar_score(
+    goal: &Goal,
+    config: &SimulationConfig,
+    cortical: &CanonicalCorticalStageOutput,
+    acoustic: Option<&AcousticScoreResult>,
+) -> f64 {
+    let neural_score = compute_neural_score(goal, cortical);
+    if !config.acoustic_score_fusion_enabled {
+        return neural_score;
+    }
+    if let Some(acoustic) = acoustic {
+        if let Some(fused) = goal.evaluate_with_acoustic_fusion(neural_score, acoustic) {
+            return fused.fused_score;
+        }
+    }
+    neural_score
+}
+
+fn max_abs_slope(sweep: &[ArousalSweepPoint]) -> f64 {
+    if sweep.len() < 2 {
+        return 0.0;
+    }
+    let mut sorted = sweep.to_vec();
+    sorted.sort_by(|a, b| {
+        a.arousal
+            .partial_cmp(&b.arousal)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut max_abs = 0.0_f64;
+    for pair in sorted.windows(2) {
+        let dx = (pair[1].arousal - pair[0].arousal).max(1e-9);
+        let slope = (pair[1].score - pair[0].score) / dx;
+        max_abs = max_abs.max(slope.abs());
+    }
+    max_abs
+}
+
+fn diagnostic_score_at_arousal(
+    goal: &Goal,
+    config: &SimulationConfig,
+    auditory: &AuditoryPreparedState,
+    acoustic_score: Option<&AcousticScoreResult>,
+    arousal: f64,
+) -> f64 {
+    let mut sweep_auditory = auditory.clone();
+    sweep_auditory.arousal = arousal.clamp(0.0, 1.0);
+    sweep_auditory.thalamic_band_shifts =
+        compute_thalamic_band_shifts_for_arousal(config, sweep_auditory.arousal);
+    let sweep_cortical = run_canonical_cortical_stage(&sweep_auditory, config);
+    compute_scalar_score(goal, config, &sweep_cortical, acoustic_score)
+}
+
+fn local_derivative_at_arousal(
+    goal: &Goal,
+    config: &SimulationConfig,
+    auditory: &AuditoryPreparedState,
+    acoustic_score: Option<&AcousticScoreResult>,
+    estimated_arousal: f64,
+) -> f64 {
+    let delta = 0.05_f64;
+    let center = estimated_arousal.clamp(0.0, 1.0);
+    let left = (center - delta).max(0.0);
+    let right = (center + delta).min(1.0);
+
+    if (right - left).abs() < 1e-12 {
+        return 0.0;
+    }
+
+    if center <= delta {
+        let s0 = diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, center);
+        let s1 = diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, right);
+        return (s1 - s0) / (right - center).max(1e-9);
+    }
+
+    if center >= 1.0 - delta {
+        let s0 = diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, left);
+        let s1 = diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, center);
+        return (s1 - s0) / (center - left).max(1e-9);
+    }
+
+    let s_left = diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, left);
+    let s_right = diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, right);
+    (s_right - s_left) / (right - left).max(1e-9)
+}
+
+fn build_scientific_diagnostics(
+    goal: &Goal,
+    config: &SimulationConfig,
+    auditory: &AuditoryPreparedState,
+    cortical: &CanonicalCorticalStageOutput,
+    acoustic_score: Option<&AcousticScoreResult>,
+    estimated_score: f64,
+) -> ScientificDiagnostics {
+    let spectral_parameterization = aperiodic::parameterize_signal_psd(
+        &cortical.bilateral.combined.eeg,
+        NEURAL_SR,
+        DIAGNOSTIC_PSD_MIN_HZ,
+        DIAGNOSTIC_PSD_MAX_HZ,
+    );
+    let assr = diagnostics_for_modulation(
+        AssrModulationSummary {
+            dominant_modulation_hz: auditory.target_lfo_freq,
+            effective_amplitude_gain: auditory.assr_effective_gain,
+        },
+        config.assr_enabled,
+    );
+
+    let mut sweep = Vec::with_capacity(AROUSAL_SWEEP_GRID.len());
+    for arousal in AROUSAL_SWEEP_GRID {
+        let sweep_score =
+            diagnostic_score_at_arousal(goal, config, auditory, acoustic_score, arousal);
+        sweep.push(ArousalSweepPoint {
+            arousal,
+            score: if sweep_score.is_finite() {
+                sweep_score
+            } else {
+                0.0
+            },
+        });
+    }
+    let local_derivative =
+        local_derivative_at_arousal(goal, config, auditory, acoustic_score, auditory.arousal);
+    let max_abs_slope = max_abs_slope(&sweep);
+    let mut min_score = f64::INFINITY;
+    let mut max_score = f64::NEG_INFINITY;
+    for point in &sweep {
+        min_score = min_score.min(point.score);
+        max_score = max_score.max(point.score);
+    }
+    let score_span = if min_score.is_finite() && max_score.is_finite() {
+        (max_score - min_score).max(0.0)
+    } else {
+        0.0
+    };
+
+    ScientificDiagnostics {
+        spectral_parameterization,
+        assr,
+        arousal_sensitivity: ArousalSensitivityDiagnostics {
+            estimated_arousal: auditory.arousal,
+            estimated_score,
+            sweep,
+            local_derivative: if local_derivative.is_finite() {
+                local_derivative
+            } else {
+                0.0
+            },
+            max_abs_slope: if max_abs_slope.is_finite() {
+                max_abs_slope
+            } else {
+                0.0
+            },
+            score_span,
+        },
+    }
+}
+
 /// Canonical detailed evaluation path used by the human-facing `evaluate`
 /// command. Returns the same scalar summary as `evaluate_preset()` plus the
 /// full neural results needed for diagnosis, without re-running a second
@@ -870,6 +1063,15 @@ pub fn evaluate_preset_detailed(
     preset: &Preset,
     goal: &Goal,
     config: &SimulationConfig,
+) -> DetailedSimulationResult {
+    evaluate_preset_detailed_internal(preset, goal, config, true)
+}
+
+fn evaluate_preset_detailed_internal(
+    preset: &Preset,
+    goal: &Goal,
+    config: &SimulationConfig,
+    include_scientific_diagnostics: bool,
 ) -> DetailedSimulationResult {
     validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
         .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
@@ -903,29 +1105,29 @@ pub fn evaluate_preset_detailed(
     let jr_result = &cortical.bilateral.combined;
 
     // 9. Score: neural model + asymmetry penalty + carrier PLV bonus + envelope PLV bonus.
-    let neural_score = goal.evaluate_full(
-        &cortical.fhn,
-        jr_result,
-        cortical.bilateral.alpha_asymmetry,
-        cortical.performance.plv,
-        cortical.performance.envelope_plv,
-    );
-    let score = if config.acoustic_score_fusion_enabled {
+    let neural_score = compute_neural_score(goal, &cortical);
+    let score = compute_scalar_score(goal, config, &cortical, acoustic_score.as_ref());
+    if config.acoustic_score_fusion_enabled {
         if let Some(acoustic) = acoustic_score.as_mut() {
             if let Some(fused) = goal.evaluate_with_acoustic_fusion(neural_score, acoustic) {
                 acoustic.acoustic_goal_score = Some(fused.acoustic_goal_score);
                 acoustic.comfort_score = Some(fused.comfort_score);
                 acoustic.legacy_nmm_score = Some(neural_score);
                 acoustic.fused_score_preview = Some(fused.fused_score);
-                fused.fused_score
-            } else {
-                neural_score
             }
-        } else {
-            neural_score
         }
+    }
+    let scientific_diagnostics = if include_scientific_diagnostics {
+        Some(build_scientific_diagnostics(
+            goal,
+            config,
+            &auditory,
+            &cortical,
+            acoustic_score.as_ref(),
+            score,
+        ))
     } else {
-        neural_score
+        None
     };
     let norm_bands = jr_result.band_powers.normalized();
 
@@ -946,6 +1148,7 @@ pub fn evaluate_preset_detailed(
         right_dominant_freq: cortical.bilateral.right_dominant_freq,
         alpha_asymmetry: cortical.bilateral.alpha_asymmetry,
         performance: cortical.performance,
+        scientific_diagnostics,
         acoustic_score,
     };
 
@@ -1700,5 +1903,62 @@ mod tests {
             total_power.is_finite() && total_power >= 0.0,
             "total power finite & nonneg"
         );
+    }
+
+    #[test]
+    fn stage2_local_derivative_is_centered_on_estimated_arousal() {
+        let preset = synthetic_5hz_pink_preset();
+        let goal = Goal::new(crate::scoring::GoalKind::Focus);
+        let config = SimulationConfig {
+            duration_secs: 4.0,
+            ..SimulationConfig::default()
+        };
+        let auditory = prepare_canonical_auditory_state(&preset, &config);
+        let delta = 0.05;
+        let center = auditory.arousal.clamp(0.0, 1.0);
+        let left = (center - delta).max(0.0);
+        let right = (center + delta).min(1.0);
+        let deriv = local_derivative_at_arousal(&goal, &config, &auditory, None, center);
+        assert!(deriv.is_finite(), "local derivative must be finite");
+
+        if center > delta && center < 1.0 - delta {
+            let s_left = diagnostic_score_at_arousal(&goal, &config, &auditory, None, left);
+            let s_right = diagnostic_score_at_arousal(&goal, &config, &auditory, None, right);
+            let expected_centered = (s_right - s_left) / (right - left);
+            assert!(
+                (deriv - expected_centered).abs() < 1e-12,
+                "local derivative should use centered finite difference around estimated arousal"
+            );
+        }
+    }
+
+    #[test]
+    fn stage2_local_derivative_uses_one_sided_difference_near_bounds() {
+        let preset = synthetic_5hz_pink_preset();
+        let goal = Goal::new(crate::scoring::GoalKind::Focus);
+        let config = SimulationConfig {
+            duration_secs: 4.0,
+            ..SimulationConfig::default()
+        };
+        let auditory = prepare_canonical_auditory_state(&preset, &config);
+        let delta = 0.05;
+
+        let center_low = 0.01_f64;
+        let right_low = (center_low + delta).min(1.0_f64);
+        let deriv_low = local_derivative_at_arousal(&goal, &config, &auditory, None, center_low);
+        let s_low0 = diagnostic_score_at_arousal(&goal, &config, &auditory, None, center_low);
+        let s_low1 = diagnostic_score_at_arousal(&goal, &config, &auditory, None, right_low);
+        let expected_low = (s_low1 - s_low0) / (right_low - center_low);
+        assert!((deriv_low - expected_low).abs() < 1e-12);
+        assert!(deriv_low.is_finite());
+
+        let center_high = 0.99_f64;
+        let left_high = (center_high - delta).max(0.0_f64);
+        let deriv_high = local_derivative_at_arousal(&goal, &config, &auditory, None, center_high);
+        let s_high0 = diagnostic_score_at_arousal(&goal, &config, &auditory, None, left_high);
+        let s_high1 = diagnostic_score_at_arousal(&goal, &config, &auditory, None, center_high);
+        let expected_high = (s_high1 - s_high0) / (center_high - left_high);
+        assert!((deriv_high - expected_high).abs() < 1e-12);
+        assert!(deriv_high.is_finite());
     }
 }
