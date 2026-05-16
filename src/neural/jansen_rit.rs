@@ -210,12 +210,12 @@ pub struct JansenRitModel {
     //   dy_slow_1/dt = B_slow · b_slow · C_slow · S(v_pyr)
     //                  − 2·b_slow · y_slow_1 − b_slow² · y_slow_0
     //
-    // The slow PSP `y_slow_0` is subtracted from the EEG output:
-    //   eeg = y[1] − y[2] − y[3] − y_slow_0
+    // In the current architecture, this slow path modulates excitatory gain
+    // over time and is not directly subtracted from the EEG readout.
     //
     // This is additive to the existing 8-state Wendling system: when
     // `b_slow_gain == 0.0` (default), the slow ODE evaluates to zero,
-    // y_slow_0 stays at zero forever, the EEG subtraction is a no-op,
+    // y_slow_0 stays at zero forever, gain modulation is disabled,
     // and the model is bitwise-identical to its pre-CET behaviour.
     //
     // Refs:
@@ -692,7 +692,7 @@ impl JansenRitModel {
                 }
             }
             // EEG = pyramidal − inhibition. GABA_B acts via gain modulation,
-            // NOT via subtraction from v_pyr.
+            // not as a direct subtraction term on v_pyr.
             // y_slow[0] is zero when slow_enabled == false → bitwise identical.
             eeg[i] = y[1] - y[2] - y[3];
             y3_trace[i] = y[3];
@@ -740,9 +740,9 @@ impl JansenRitModel {
         // y3/y7 = fast inhibitory (GABA-A), zero-initialised → JR95 compat
         let mut y = [0.001_f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-        // Slow GABA_B (CET 13b) — additive parallel population. Stays at zero
-        // when disabled, making the EEG subtraction below a no-op (bitwise
-        // regression-safe per IEEE 754: x - 0.0 == x).
+        // Slow GABA_B (CET 13b) parallel state. It stays at zero when disabled;
+        // in the current architecture it modulates excitatory gain and is not
+        // directly subtracted from the EEG readout.
         let mut y_slow = [0.0_f64; 2];
         let slow_enabled = self.b_slow_gain > 0.0;
 
@@ -1277,16 +1277,12 @@ pub fn simulate_bilateral(
         arousal,
     );
 
-    // Phase 2: Apply callosal coupling (INHIBITORY).
+    // Phase 2: Apply effective net-inhibitory callosal coupling.
     //
-    // Per Innocenti (1986) and Bloom & Hynd (2005), corpus callosum
-    // projections primarily excite inhibitory interneurons in the target
-    // hemisphere, creating net interhemispheric inhibition. When one
-    // hemisphere is strongly active, it suppresses the other.
-    //
-    // The coupled EEG subtracts a delayed, attenuated version of the
-    // contralateral EEG. This is justified because callosal input is
-    // ~10-15% of convergent input — a perturbative inhibitory effect.
+    // The model subtracts a delayed, attenuated contralateral EEG term as a
+    // systems-level approximation of net interhemispheric inhibition.
+    // This is an effective coupling term, not a literal fiber-type model
+    // of the corpus callosum.
     //
     // Ref: Aboitiz F et al. (1992). Callosal axon diameters vary (0.4-5 μm),
     // giving conduction velocities of 3-60 m/s and delays of 5-50 ms.
@@ -1308,7 +1304,7 @@ pub fn simulate_bilateral(
             0.0
         };
 
-        // Inhibitory coupling: subtract contralateral signal
+        // Effective net-inhibitory coupling: subtract contralateral signal.
         rh_coupled[i] = rh_eeg[i] - k * delayed_lh;
         lh_coupled[i] = lh_eeg[i] - k * delayed_rh;
     }
@@ -1966,9 +1962,10 @@ mod tests {
     // and Ghitza (2011), cortical envelope tracking depends on a slow
     // inhibitory time constant (~200 ms / b_slow ≈ 5 /s) that the canonical
     // Wendling 4-population model lacks. We add a parallel 2-state slow
-    // population [y8, y9] driven by pyramidal firing, contributing to the
-    // EEG via subtraction. Default b_slow_gain = 0.0 → bitwise-identical
-    // to current model (zero regression guarantee).
+    // population [y8, y9] driven by pyramidal firing; in the current
+    // architecture this path modulates excitatory gain over time and is
+    // not directly subtracted from EEG. Default b_slow_gain = 0.0 →
+    // bitwise-identical to current model (zero regression guarantee).
     // ---------------------------------------------------------------
 
     #[test]
@@ -2299,12 +2296,10 @@ mod tests {
         };
 
         // Test corrected params (C_slow=2, b_slow=10)
-        // NOTE: Even with reduced C_slow, the GABA_B DC subtraction from v_pyr
-        // kills the circuit. The fix requires either:
-        // A) Gain modulation architecture (y_slow modulates A, not v_pyr)
-        // B) Exact offset compensation via fixed-point iteration
-        // For now, test with C_slow=2, b_slow=10 + manual offset bump large
-        // enough to overwhelm the GABA_B DC.
+        // Historical note: the earlier subtraction-based experiment killed
+        // the circuit. The current implementation uses gain modulation.
+        // This stress test keeps the old offset compensation context for
+        // regression visibility only.
         let mut jr2 = JansenRitModel::new(SR);
         jr2.set_slow_inhib(10.0, 10.0, 2.0);
         // Over-compensate: add 10.0 to input_offset (empirically enough to keep alive)

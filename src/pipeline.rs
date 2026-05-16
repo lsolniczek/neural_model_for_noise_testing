@@ -336,6 +336,27 @@ pub struct DetailedSimulationResult {
     pub acoustic_render: Option<RenderedStereoAudio>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AuditoryPreparedState {
+    pub rendered_audio: RenderedStereoAudio,
+    pub left_bands_dec: [Vec<f64>; 4],
+    pub right_bands_dec: [Vec<f64>; 4],
+    pub left_energy: [f64; 4],
+    pub right_energy: [f64; 4],
+    pub band_energy_fractions: [f64; 4],
+    pub cet_envelope_ref: Option<Vec<f64>>,
+    pub brightness: f64,
+    pub arousal: f64,
+    pub thalamic_band_shifts: [f64; 4],
+    pub target_lfo_freq: Option<f64>,
+}
+
+pub(crate) struct CanonicalCorticalStageOutput {
+    pub bilateral: BilateralResult,
+    pub fhn: FhnResult,
+    pub performance: PerformanceVector,
+}
+
 /// Compute spectral brightness from audio via FFT.
 ///
 /// Returns a value in [0, 1] where 0 = very dark (all energy < 200 Hz)
@@ -530,66 +551,42 @@ pub(crate) fn render_preset_ear_signals(
     }
 }
 
-/// Canonical detailed evaluation path used by the human-facing `evaluate`
-/// command. Returns the same scalar summary as `evaluate_preset()` plus the
-/// full neural results needed for diagnosis, without re-running a second
-/// shadow pipeline from `main.rs`.
-pub fn evaluate_preset_detailed(
-    preset: &Preset,
-    goal: &Goal,
-    config: &SimulationConfig,
-) -> DetailedSimulationResult {
-    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
-        .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
-    if config.acoustic_score_fusion_enabled && !config.acoustic_scoring_enabled {
-        panic!("invalid SimulationConfig: acoustic score fusion requires acoustic scoring");
-    }
-    // Priority 28 Phase 2 invariants — see `acoustic_constraints_enabled`
-    // doc comment. Constraints need the comfort metrics to compute the
-    // violation, and they cannot coexist with fusion (double-count).
-    if config.acoustic_constraints_enabled && !config.acoustic_scoring_enabled {
-        panic!("invalid SimulationConfig: acoustic constraints require acoustic scoring");
-    }
-    if config.acoustic_constraints_enabled && config.acoustic_score_fusion_enabled {
-        panic!(
-            "invalid SimulationConfig: acoustic constraints are incompatible with acoustic score fusion (would double-count comfort)"
-        );
-    }
+fn extract_target_lfo_frequency_from_preset(preset: &Preset) -> Option<f64> {
+    preset
+        .objects
+        .iter()
+        .filter(|obj| obj.active)
+        .flat_map(|obj| {
+            let vol = obj.volume as f64;
+            let mut lfos = Vec::new();
+            // NeuralLfo (kind=4) and Isochronic (kind=5) both drive entrainment.
+            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
+                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
+                    lfos.push((modcfg.param_a as f64, modcfg.param_b as f64 * vol));
+                }
+            }
+            lfos
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(freq, _strength)| freq)
+}
 
+pub(crate) fn prepare_canonical_auditory_state(
+    preset: &Preset,
+    config: &SimulationConfig,
+) -> AuditoryPreparedState {
     let rendered_audio = render_preset_ear_signals(preset, config.duration_secs);
     let sr = rendered_audio.sample_rate_hz as f64;
-    let mut acoustic_score = config
-        .acoustic_scoring_enabled
-        .then(|| extract_score_result_v1(&rendered_audio));
-    // Priority 28 §28b — per-source loudness equity. Computed from the
-    // preset itself (volume-only proxy) and stitched into the acoustic
-    // feature vector when scoring is enabled. Independent of the audio
-    // render — see `compute_source_balance_db_range` doc for the
-    // approximation note.
-    if let Some(payload) = acoustic_score.as_mut() {
-        payload.features.source_balance_db_range = Some(compute_source_balance_db_range(preset));
-        payload.features.active_source_count = Some(compute_active_source_count(preset));
-    }
-    let acoustic_render = config
-        .acoustic_scoring_enabled
-        .then(|| rendered_audio.clone());
-    let left = rendered_audio.left;
-    let right = rendered_audio.right;
+    let left = rendered_audio.left.clone();
+    let right = rendered_audio.right.clone();
 
-    // 4. Cochlear model: tonotopic band-grouped processing
-    //    Groups 32 gammatone channels into 4 frequency bands, preserving
-    //    spectral energy distribution for the cortical model.
+    // 4. Cochlear model: tonotopic band-grouped processing.
     let mut filterbank_l = GammatoneFilterbank::new(sr);
     let mut filterbank_r = GammatoneFilterbank::new(sr);
-
     let bands_l = filterbank_l.process_to_band_groups(&left);
     let bands_r = filterbank_r.process_to_band_groups(&right);
 
     // 5. Normalise each ear's band signals to [0, 1] using GLOBAL max.
-    //    Per Patterson et al. (1992) and Glasberg & Moore (2002), inter-band
-    //    energy ratios carry critical spectral information. Global normalization
-    //    preserves these ratios: Brown noise keeps dominant low-band energy,
-    //    White noise keeps flat distribution across bands.
     let mut left_bands: [Vec<f64>; 4] = [
         vec![0.0; bands_l.signals[0].len()],
         vec![0.0; bands_l.signals[1].len()],
@@ -603,7 +600,6 @@ pub fn evaluate_preset_detailed(
         vec![0.0; bands_r.signals[3].len()],
     ];
 
-    // Find global max across ALL bands for each ear
     let global_max_l = (0..4)
         .map(|b| bands_l.signals[b].iter().cloned().fold(0.0_f64, f64::max))
         .fold(0.0_f64, f64::max);
@@ -627,28 +623,24 @@ pub fn evaluate_preset_detailed(
         right_bands[b] = bands_r.signals[b].iter().map(|x| x * norm_r).collect();
     }
 
-    // Average energy fractions for display (the bilateral model uses per-ear fractions)
-    let mut energy_fractions = [0.0_f64; 4];
+    // Average energy fractions for display.
+    let mut band_energy_fractions = [0.0_f64; 4];
     for b in 0..4 {
-        energy_fractions[b] = (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
+        band_energy_fractions[b] =
+            (bands_l.energy_fractions[b] + bands_r.energy_fractions[b]) * 0.5;
     }
-    let ef_sum: f64 = energy_fractions.iter().sum();
+    let ef_sum: f64 = band_energy_fractions.iter().sum();
     if ef_sum > 1e-30 {
-        for ef in &mut energy_fractions {
+        for ef in &mut band_energy_fractions {
             *ef /= ef_sum;
         }
     }
 
-    // 5b. Spectral brightness from audio FFT (psychoacoustic complement)
+    // 5b. Spectral brightness from audio FFT (psychoacoustic complement).
     let brightness = spectral_brightness(&left, sr);
 
     // 5c. Decimate band signals from 48 kHz → 1 kHz for neural models.
-    //     Neural models operate at 0.5–50 Hz; feeding 48 kHz wastes ~98% of
-    //     compute on samples that carry no additional information.
-    // Discard initial warm-up samples from decimated signals so the neural
-    // models only analyse the settled portion of the auditory response.
     let discard_samples = (config.warmup_discard_secs as f64 * NEURAL_SR) as usize;
-
     let trim = |signal: &[f64]| -> Vec<f64> {
         let dec = decimate(signal, DECIMATION_FACTOR);
         let skip = discard_samples.min(dec.len());
@@ -669,12 +661,6 @@ pub fn evaluate_preset_detailed(
     ];
 
     // 5d. (Optional) Cortical Envelope Tracking crossover (Priority 13a).
-    //     When CET is enabled, split each band into a SLOW (≤10 Hz) path and
-    //     a FAST (>10 Hz) path before ASSR. The slow path bypasses the ASSR
-    //     attenuation in the next step so 1–8 Hz envelope modulations reach
-    //     JR undamped. Both paths recombine into the band signal that drives
-    //     JR. Refs: Doelling et al. (2014), Ghitza (2011), Ding & Simon (2014).
-    //     Stored separately so 5e (ASSR) can scale only the fast path.
     let mut cet_slow_left: Option<[Vec<f64>; 4]> = None;
     let mut cet_slow_right: Option<[Vec<f64>; 4]> = None;
     if config.cet_enabled {
@@ -685,8 +671,6 @@ pub fn evaluate_preset_detailed(
             let mut xover_r = ButterworthCrossover::cet_default(NEURAL_SR);
             let (sl, fl) = xover_l.process_signal(&left_bands_dec[b]);
             let (sr_l, fr) = xover_r.process_signal(&right_bands_dec[b]);
-            // Replace the band with the FAST path so the ASSR block below
-            // attenuates only the carrier modulation. Stash the slow path.
             left_bands_dec[b] = fl;
             right_bands_dec[b] = fr;
             slow_l[b] = sl;
@@ -696,14 +680,7 @@ pub fn evaluate_preset_detailed(
         cet_slow_right = Some(slow_r);
     }
 
-    // 5e. (Optional) ASSR: attenuate modulation (AC) in band signals.
-    //     Per Picton et al. (2003), ASSR models frequency-dependent transmission
-    //     of amplitude modulation through the auditory pathway.
-    //     IMPORTANT: Only scale the AC component, not the DC mean.
-    //     DC (mean drive level) is the thalamic gate's domain — ASSR should not
-    //     shift the cortical operating point, only reduce modulation strength.
-    //     When CET is enabled, this only acts on the FAST path (slow path was
-    //     extracted in 5d above).
+    // 5e. (Optional) ASSR attenuation on AC component only.
     if config.assr_enabled {
         let assr = AssrTransfer::new();
         let assr_mod = assr.compute_input_scale_modifier(preset);
@@ -724,15 +701,7 @@ pub fn evaluate_preset_detailed(
         }
     }
 
-    // 5f. (CET only) Recombine slow path with the (now ASSR-attenuated) fast
-    //     path to produce the final band signal that drives JR. The slow
-    //     envelope reaches JR with full amplitude — exactly the architectural
-    //     fix the precheck identified.
-    //
-    // Also build the *envelope reference* used by 13c envelope-phase PLV:
-    // an energy-weighted average of the slow paths across all 4 bands and
-    // both ears. This is the cortex's slow drive — what JR is supposed to
-    // track. We'll bandpass it to 2-9 Hz inside compute_envelope_plv.
+    // 5f. Recombine CET slow path and build envelope reference.
     let cet_envelope_ref: Option<Vec<f64>> =
         if let (Some(slow_l), Some(slow_r)) = (&cet_slow_left, &cet_slow_right) {
             for b in 0..4 {
@@ -759,23 +728,7 @@ pub fn evaluate_preset_detailed(
             None
         };
 
-    // 5e. (Optional) Thalamic gate — modulates cortical operating point.
-    //     Dark, reverberant, gentle presets → low arousal → lower input_offset
-    //     → JR model shifts toward bifurcation → theta/delta possible.
-    //     Per Steriade et al. (1993): thalamic burst mode is frequency-selective.
-    //     Low bands (delta/theta) shift fully toward bifurcation.
-    //     High bands (beta/gamma) stay in tonic mode for fast rhythms.
-    //
-    // Two implementations available:
-    //   - heuristic ThalamicGate (linear arousal → shift, default)
-    //   - PhysiologicalThalamicGate (Priority 9: HH TC cell with T-current
-    //     and K⁺ leak as the wake↔sleep knob — Bazhenov 2002 / Paul 2016 /
-    //     Destexhe 1996). Sigmoidal shape derived from ion-channel dynamics.
-    //
-    // The physiological gate takes precedence when both flags are set.
-    // Compute arousal from preset properties. Used for both:
-    // 1. Thalamic gate band_offset shifts (existing)
-    // 2. GABA_B gain modulation scaling (new — Priority 18)
+    // 5g. Thalamic gating control signals.
     let arousal = if config.physiological_thalamic_gate_enabled || config.thalamic_gate_enabled {
         if config.physiological_thalamic_gate_enabled {
             PhysiologicalThalamicGate::compute_arousal(preset, brightness)
@@ -783,7 +736,7 @@ pub fn evaluate_preset_detailed(
             ThalamicGate::compute_arousal(preset, brightness)
         }
     } else {
-        0.5 // neutral arousal when gate is disabled
+        0.5
     };
 
     let thalamic_band_shifts = if config.physiological_thalamic_gate_enabled {
@@ -796,17 +749,31 @@ pub fn evaluate_preset_detailed(
         [0.0; 4]
     };
 
-    // 6. Bilateral cortical model: 2×4 parallel Jansen-Rit models
-    //    Left hemisphere (fast, α/β) ← mainly right ear (contralateral)
-    //    Right hemisphere (slow, δ/θ) ← mainly left ear (contralateral)
-    //    Coupled through corpus callosum with ~10ms delay, ~10% strength.
+    AuditoryPreparedState {
+        rendered_audio,
+        left_bands_dec,
+        right_bands_dec,
+        left_energy: bands_l.energy_fractions,
+        right_energy: bands_r.energy_fractions,
+        band_energy_fractions,
+        cet_envelope_ref,
+        brightness,
+        arousal,
+        thalamic_band_shifts,
+        target_lfo_freq: extract_target_lfo_frequency_from_preset(preset),
+    }
+}
+
+pub(crate) fn run_canonical_cortical_stage(
+    auditory: &AuditoryPreparedState,
+    config: &SimulationConfig,
+) -> CanonicalCorticalStageOutput {
     let neural_params = config.brain_type.params();
     let mut bilateral = config.brain_type.bilateral_params();
-    // Apply thalamic gate: per-band offset shifts toward bifurcation at low arousal.
     for b in 0..4 {
-        if thalamic_band_shifts[b].abs() > 1e-10 {
-            bilateral.left.band_offsets[b] += thalamic_band_shifts[b];
-            bilateral.right.band_offsets[b] += thalamic_band_shifts[b];
+        if auditory.thalamic_band_shifts[b].abs() > 1e-10 {
+            bilateral.left.band_offsets[b] += auditory.thalamic_band_shifts[b];
+            bilateral.right.band_offsets[b] += auditory.thalamic_band_shifts[b];
         }
     }
 
@@ -818,31 +785,17 @@ pub fn evaluate_preset_detailed(
         c7: neural_params.jansen_rit.c7,
     };
 
-    // input_scale is no longer modified by ASSR — ASSR operates on signal AC only.
-    //
-    // CET 13b — Slow GABA_B (CET-relevant slow inhibitory loop).
-    // Per Moran & Friston (2011) canonical microcircuit and Ghitza (2011)
-    // cascaded oscillator: CET requires a slow inhibitory feedback that
-    // canonical Wendling-JR lacks. When `cet_enabled = true`, we enable the
-    // additive parallel slow population in JR with the configured params.
-    //
-    // Priority 18b — `cet_b_slow_gain` and `cet_b_slow_rate` are now
-    // configurable via `SimulationConfig`. Defaults (10.0, 5.0) reproduce
-    // the historical hardcoded constants and so preserve bit-identical
-    // legacy behaviour. The Ursino-recommended retuning for theta-alpha
-    // coexistence is approximately (gain ≈ 18, rate ≈ 25); see the doc
-    // comments on those fields.
     let (b_slow_gain, b_slow_rate, c_slow) = if config.cet_enabled {
         (config.cet_b_slow_gain, config.cet_b_slow_rate, 30.0)
     } else {
         (0.0, 0.0, 0.0)
     };
 
-    let bi_result = simulate_bilateral(
-        &left_bands_dec,
-        &right_bands_dec,
-        &bands_l.energy_fractions,
-        &bands_r.energy_fractions,
+    let bilateral_result = simulate_bilateral(
+        &auditory.left_bands_dec,
+        &auditory.right_bands_dec,
+        &auditory.left_energy,
+        &auditory.right_energy,
         &bilateral,
         neural_params.jansen_rit.c,
         neural_params.jansen_rit.input_scale,
@@ -859,10 +812,6 @@ pub fn evaluate_preset_detailed(
         } else {
             0.0
         },
-        // Priority 18a — JR stochastic noise σ on input drive `p`.
-        // Default 15.0 (preserved by SimulationConfig::default) gives
-        // bit-identical legacy behaviour. Disabled (σ = 0) when the
-        // top-level stochastic flag is off.
         if config.stochastic_jr_enabled {
             config.jr_stochastic_sigma
         } else {
@@ -871,13 +820,10 @@ pub fn evaluate_preset_detailed(
         b_slow_gain,
         b_slow_rate,
         c_slow,
-        arousal,
+        auditory.arousal,
     );
 
-    let jr_result = &bi_result.combined;
-
-    // 7. FHN: single-neuron driven by combined bilateral EEG oscillations.
-    //    Uses the same decimated sample rate as the JR output.
+    let jr_result = &bilateral_result.combined;
     let fhn = FhnModel::with_params(
         NEURAL_SR,
         neural_params.fhn.a,
@@ -885,12 +831,6 @@ pub fn evaluate_preset_detailed(
         neural_params.fhn.epsilon,
         neural_params.fhn.time_scale,
     );
-
-    // Scale EEG for FHN input using percentile-based normalization.
-    // Per FitzHugh (1961) and Izhikevich (2003), neuron firing rate depends
-    // monotonically on input current amplitude. Max-normalization destroys
-    // this by collapsing all amplitudes to [-1,1]. Percentile scaling
-    // preserves relative amplitude: strong EEG → higher current → more spikes.
     let fhn_input: Vec<f64> = {
         let mut abs_values: Vec<f64> = jr_result.eeg.iter().map(|x| x.abs()).collect();
         abs_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
@@ -905,50 +845,70 @@ pub fn evaluate_preset_detailed(
     };
     let fhn_result = fhn.simulate(&fhn_input, neural_params.fhn.input_scale);
 
-    // 8. Performance Vector — diagnostic metrics for preset evaluation.
-    //    Extract the STRONGEST NeuralLFO frequency from the preset.
-    //    "Strongest" = highest (depth × volume) product, which is the actual
-    //    entrainment driver — not just the first one found.
-    //    Recognizes both NeuralLfo (kind=4) and Isochronic (kind=5) as
-    //    entrainment modulators. Isochronic tones produce stronger cortical
-    //    FFR due to sharp transients (Chaieb et al. 2015).
-    let target_lfo_freq = preset
-        .objects
-        .iter()
-        .filter(|obj| obj.active)
-        .flat_map(|obj| {
-            let vol = obj.volume as f64;
-            let mut lfos = Vec::new();
-            // NeuralLfo (kind=4) and Isochronic (kind=5) both drive entrainment
-            for modcfg in [&obj.bass_mod, &obj.satellite_mod] {
-                if (modcfg.kind == 4 || modcfg.kind == 5) && modcfg.param_a > 0.5 {
-                    lfos.push((modcfg.param_a as f64, modcfg.param_b as f64 * vol));
-                }
-            }
-            lfos
-        })
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) // strongest by depth*volume
-        .map(|(freq, _strength)| freq);
-
-    // Detrend EEG for spectral analysis
     let eeg_mean = jr_result.eeg.iter().sum::<f64>() / jr_result.eeg.len() as f64;
     let eeg_detrended: Vec<f64> = jr_result.eeg.iter().map(|x| x - eeg_mean).collect();
-
     let performance = PerformanceVector::compute_with_envelope(
         &eeg_detrended,
         &jr_result.fast_inhib_trace,
         NEURAL_SR,
-        target_lfo_freq,
-        cet_envelope_ref.as_deref(),
+        auditory.target_lfo_freq,
+        auditory.cet_envelope_ref.as_deref(),
     );
+
+    CanonicalCorticalStageOutput {
+        bilateral: bilateral_result,
+        fhn: fhn_result,
+        performance,
+    }
+}
+
+/// Canonical detailed evaluation path used by the human-facing `evaluate`
+/// command. Returns the same scalar summary as `evaluate_preset()` plus the
+/// full neural results needed for diagnosis, without re-running a second
+/// shadow pipeline from `main.rs`.
+pub fn evaluate_preset_detailed(
+    preset: &Preset,
+    goal: &Goal,
+    config: &SimulationConfig,
+) -> DetailedSimulationResult {
+    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
+        .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
+    if config.acoustic_score_fusion_enabled && !config.acoustic_scoring_enabled {
+        panic!("invalid SimulationConfig: acoustic score fusion requires acoustic scoring");
+    }
+    // Priority 28 Phase 2 invariants — see `acoustic_constraints_enabled`
+    // doc comment. Constraints need the comfort metrics to compute the
+    // violation, and they cannot coexist with fusion (double-count).
+    if config.acoustic_constraints_enabled && !config.acoustic_scoring_enabled {
+        panic!("invalid SimulationConfig: acoustic constraints require acoustic scoring");
+    }
+    if config.acoustic_constraints_enabled && config.acoustic_score_fusion_enabled {
+        panic!(
+            "invalid SimulationConfig: acoustic constraints are incompatible with acoustic score fusion (would double-count comfort)"
+        );
+    }
+    let auditory = prepare_canonical_auditory_state(preset, config);
+    let mut acoustic_score = config
+        .acoustic_scoring_enabled
+        .then(|| extract_score_result_v1(&auditory.rendered_audio));
+    if let Some(payload) = acoustic_score.as_mut() {
+        payload.features.source_balance_db_range = Some(compute_source_balance_db_range(preset));
+        payload.features.active_source_count = Some(compute_active_source_count(preset));
+    }
+    let acoustic_render = config
+        .acoustic_scoring_enabled
+        .then(|| auditory.rendered_audio.clone());
+
+    let cortical = run_canonical_cortical_stage(&auditory, config);
+    let jr_result = &cortical.bilateral.combined;
 
     // 9. Score: neural model + asymmetry penalty + carrier PLV bonus + envelope PLV bonus.
     let neural_score = goal.evaluate_full(
-        &fhn_result,
+        &cortical.fhn,
         jr_result,
-        bi_result.alpha_asymmetry,
-        performance.plv,
-        performance.envelope_plv,
+        cortical.bilateral.alpha_asymmetry,
+        cortical.performance.plv,
+        cortical.performance.envelope_plv,
     );
     let score = if config.acoustic_score_fusion_enabled {
         if let Some(acoustic) = acoustic_score.as_mut() {
@@ -972,27 +932,27 @@ pub fn evaluate_preset_detailed(
     let summary = SimulationResult {
         model_signature: config.model_signature(),
         score,
-        fhn_firing_rate: fhn_result.firing_rate,
-        fhn_isi_cv: fhn_result.isi_cv,
+        fhn_firing_rate: cortical.fhn.firing_rate,
+        fhn_isi_cv: cortical.fhn.isi_cv,
         dominant_freq: jr_result.dominant_freq,
         delta_power: norm_bands.delta,
         theta_power: norm_bands.theta,
         alpha_power: norm_bands.alpha,
         beta_power: norm_bands.beta,
         gamma_power: norm_bands.gamma,
-        brightness,
-        band_energy_fractions: energy_fractions,
-        left_dominant_freq: bi_result.left_dominant_freq,
-        right_dominant_freq: bi_result.right_dominant_freq,
-        alpha_asymmetry: bi_result.alpha_asymmetry,
-        performance,
+        brightness: auditory.brightness,
+        band_energy_fractions: auditory.band_energy_fractions,
+        left_dominant_freq: cortical.bilateral.left_dominant_freq,
+        right_dominant_freq: cortical.bilateral.right_dominant_freq,
+        alpha_asymmetry: cortical.bilateral.alpha_asymmetry,
+        performance: cortical.performance,
         acoustic_score,
     };
 
     DetailedSimulationResult {
         summary,
-        fhn: fhn_result,
-        bilateral: bi_result,
+        fhn: cortical.fhn,
+        bilateral: cortical.bilateral,
         acoustic_render,
     }
 }

@@ -195,6 +195,8 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 | `--acoustic-score` | flag | `false` | Print the Phase 2/3 acoustic analysis block during single goal / single brain `evaluate`. This exposes non-speech acoustic features plus intelligibility/privacy metrics, but does **not** change the scalar NMM score or matrix output |
 | `--acoustic-score-fusion` | flag | `false` | Enable the Phase 5 fused scalar score for `shield` and `isolation` during `evaluate` only. This implies acoustic analysis, leaves `optimize` and surrogate behavior unchanged, and keeps all other goals on the exact legacy NMM score path |
 
+Note: these are CLI defaults. `SimulationConfig::default()` in code is not identical (`assr_enabled=true` there), so programmatic callers should set flags explicitly when they need CLI-equivalent behavior.
+
 #### Examples
 
 ```bash
@@ -290,7 +292,7 @@ The two PLV terms are additive on different perceptual axes: `plv_weight·PLV` r
 
 ### disturb
 
-Inject an acoustic spike into the neural simulation and measure recovery dynamics. Tests how resilient a preset's neural entrainment is to sudden disruptions.
+Inject an acoustic spike into the neural simulation and measure recovery dynamics. By default this runs the **canonical** pipeline path; use `--legacy-ablated` for the historical ablated disturbance path.
 
 ```bash
 cargo run --release -- disturb <PRESET_PATH> [OPTIONS]
@@ -311,12 +313,26 @@ cargo run --release -- disturb <PRESET_PATH> [OPTIONS]
 | `--spike-duration` | float | `0.05` | Duration of the spike (seconds) |
 | `--spike-gain` | float | `0.8` | Spike amplitude (0.0-1.0) |
 | `--duration` | float | `15.0` | Total simulation duration (seconds) |
+| `--assr` | flag | `false` | Enable ASSR in canonical disturbance mode |
+| `--no-assr` | flag | `false` | Disable ASSR in canonical disturbance mode |
+| `--thalamic-gate` | flag | `true` | Enable heuristic thalamic gate in canonical disturbance mode |
+| `--no-thalamic-gate` | flag | `false` | Disable heuristic thalamic gate in canonical disturbance mode |
+| `--cet` | flag | `true` | Enable CET in canonical disturbance mode |
+| `--no-cet` | flag | `false` | Disable CET in canonical disturbance mode |
+| `--phys-gate` | flag | `false` | Enable physiological thalamic gate in canonical disturbance mode |
+| `--jr-sigma` | float | `15.0` | JR stochastic sigma in canonical disturbance mode |
+| `--gaba-b-rate` | float | `5.0` | CET slow inhibitory decay rate in canonical disturbance mode |
+| `--gaba-b-gain` | float | `10.0` | CET slow inhibitory gain in canonical disturbance mode |
+| `--legacy-ablated` | flag | `false` | Run legacy ablated disturbance path (dry render + per-band normalization + canonical features disabled) |
 
 #### Examples
 
 ```bash
 # Basic disturbance test
 cargo run --release -- disturb presets/balanced_theta_smr.json
+
+# Explicitly run the historical ablated disturbance path
+cargo run --release -- disturb presets/balanced_theta_smr.json --legacy-ablated
 
 # Strong spike, early injection
 cargo run --release -- disturb presets/my_preset.json --spike-gain 1.0 --spike-time 3.0
@@ -329,6 +345,8 @@ cargo run --release -- disturb presets/my_preset.json --duration 20 --spike-time
 ```
 
 Neural-analysis commands require `--duration > 2.0`, because the first 2.0 seconds are discarded as warm-up before analysis.
+
+Canonical disturbance metadata is labeled `pipeline_variant = "disturb_canonical"`. Legacy mode is labeled `pipeline_variant = "disturb_legacy_ablated"`.
 
 #### Output
 
@@ -534,7 +552,7 @@ cargo test surrogate::tests
 cargo test neural::fhn::tests
 
 # Jansen-Rit model — sigmoid, ODE structure, band powers, Wendling extension,
-# inhibitory callosal coupling, stochastic drive, habituation
+# effective net-inhibitory callosal coupling, stochastic drive, habituation
 cargo test neural::jansen_rit::tests
 
 # Wilson-Cowan model — adaptive frequency tracking (±5 Hz Arnold tongue), E-I oscillation

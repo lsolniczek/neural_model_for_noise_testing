@@ -27,6 +27,7 @@ impl fmt::Display for ModelVersion {
 #[serde(rename_all = "snake_case")]
 pub enum PipelineVariant {
     EvaluateCanonical,
+    DisturbCanonical,
     DisturbLegacyAblated,
 }
 

@@ -469,6 +469,54 @@ enum Commands {
         /// Total simulation duration (seconds)
         #[arg(long, default_value_t = 15.0)]
         duration: f32,
+
+        /// Enable ASSR transfer function in canonical disturbance mode.
+        #[arg(long, default_value_t = false)]
+        assr: bool,
+
+        /// Disable ASSR transfer function in canonical disturbance mode.
+        #[arg(long = "no-assr", conflicts_with = "assr", default_value_t = false)]
+        no_assr: bool,
+
+        /// Enable heuristic thalamic gate in canonical disturbance mode.
+        #[arg(long = "thalamic-gate", default_value_t = true)]
+        thalamic_gate: bool,
+
+        /// Disable heuristic thalamic gate in canonical disturbance mode.
+        #[arg(
+            long = "no-thalamic-gate",
+            conflicts_with = "thalamic_gate",
+            default_value_t = false
+        )]
+        no_thalamic_gate: bool,
+
+        /// Enable Cortical Envelope Tracking in canonical disturbance mode.
+        #[arg(long, default_value_t = true)]
+        cet: bool,
+
+        /// Disable Cortical Envelope Tracking in canonical disturbance mode.
+        #[arg(long = "no-cet", conflicts_with = "cet", default_value_t = false)]
+        no_cet: bool,
+
+        /// Enable the physiological thalamic gate in canonical disturbance mode.
+        #[arg(long = "phys-gate", default_value_t = false)]
+        phys_gate: bool,
+
+        /// Priority 18a — stochastic JR sigma in canonical disturbance mode.
+        #[arg(long, default_value_t = 15.0)]
+        jr_sigma: f64,
+
+        /// Priority 18b — CET slow inhibitory decay rate in canonical disturbance mode.
+        #[arg(long, default_value_t = 5.0)]
+        gaba_b_rate: f64,
+
+        /// Priority 18b — CET slow inhibitory gain in canonical disturbance mode.
+        #[arg(long, default_value_t = 10.0)]
+        gaba_b_gain: f64,
+
+        /// Run the historical ablated disturbance path.
+        #[arg(long = "legacy-ablated", default_value_t = false)]
+        legacy_ablated: bool,
     },
 
     /// Run neural model validation tests (frequency tracking, bifurcation, etc.)
@@ -556,6 +604,7 @@ fn print_model_signature(signature: &model_signature::ModelSignature) {
         "  Pipeline path:  {}",
         match signature.pipeline_variant {
             model_signature::PipelineVariant::EvaluateCanonical => "evaluate_canonical",
+            model_signature::PipelineVariant::DisturbCanonical => "disturb_canonical",
             model_signature::PipelineVariant::DisturbLegacyAblated => "disturb_legacy_ablated",
         }
     );
@@ -619,6 +668,48 @@ fn build_generate_data_config(
         physiological_thalamic_gate_enabled: phys_gate,
         reproducibility_seed: Some(seed),
         ..SimulationConfig::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_disturb_config(
+    duration: f32,
+    brain_type: BrainType,
+    spike_time: f64,
+    spike_duration: f64,
+    spike_gain: f64,
+    flags: EvaluateFeatureFlags,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
+    legacy_ablated: bool,
+) -> disturb::DisturbConfig {
+    disturb::DisturbConfig {
+        mode: if legacy_ablated {
+            disturb::DisturbanceMode::LegacyAblated
+        } else {
+            disturb::DisturbanceMode::Canonical
+        },
+        spike_time_s: spike_time,
+        spike_duration_s: spike_duration,
+        spike_gain,
+        brain_type,
+        duration_secs: duration,
+        warmup_discard_secs: 2.0,
+        window_s: 0.5,
+        hop_s: 0.05,
+        assr_enabled: flags.assr,
+        thalamic_gate_enabled: flags.thalamic_gate,
+        physiological_thalamic_gate_enabled: flags.phys_gate,
+        cet_enabled: flags.cet,
+        habituation_enabled: true,
+        stochastic_jr_enabled: true,
+        reproducibility_seed: None,
+        jr_stochastic_sigma: jr_sigma,
+        cet_b_slow_rate: gaba_b_rate,
+        cet_b_slow_gain: gaba_b_gain,
+        acoustic_scoring_enabled: false,
+        model_version: model_signature::ModelVersion::LegacyV1,
     }
 }
 
@@ -1886,7 +1977,27 @@ fn main() {
             spike_duration,
             spike_gain,
             duration,
+            assr,
+            no_assr,
+            thalamic_gate,
+            no_thalamic_gate,
+            cet,
+            no_cet,
+            phys_gate,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
+            legacy_ablated,
         } => {
+            let flags = resolve_evaluate_feature_flags(
+                assr,
+                no_assr,
+                thalamic_gate,
+                no_thalamic_gate,
+                cet,
+                no_cet,
+                phys_gate,
+            );
             run_disturb_cmd(
                 &preset,
                 &brain_type,
@@ -1894,6 +2005,11 @@ fn main() {
                 spike_duration,
                 spike_gain,
                 duration,
+                flags,
+                jr_sigma,
+                gaba_b_rate,
+                gaba_b_gain,
+                legacy_ablated,
             );
         }
         Commands::Validate => {
@@ -3638,6 +3754,11 @@ fn run_disturb_cmd(
     spike_duration: f64,
     spike_gain: f64,
     duration: f32,
+    flags: EvaluateFeatureFlags,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
+    legacy_ablated: bool,
 ) {
     ensure_analysis_window_or_exit(
         "disturb",
@@ -3688,18 +3809,18 @@ fn run_disturb_cmd(
         std::process::exit(1);
     }
 
-    let config = disturb::DisturbConfig {
-        spike_time_s: spike_time,
-        spike_duration_s: spike_duration,
+    let config = build_disturb_config(
+        duration,
+        bt,
+        spike_time,
+        spike_duration,
         spike_gain,
-        brain_type: bt,
-        duration_secs: duration,
-        warmup_discard_secs: 2.0,
-        window_s: 0.5,
-        hop_s: 0.05,
-        acoustic_scoring_enabled: false,
-        model_version: model_signature::ModelVersion::LegacyV1,
-    };
+        flags,
+        jr_sigma,
+        gaba_b_rate,
+        gaba_b_gain,
+        legacy_ablated,
+    );
 
     let start = Instant::now();
     let result = disturb::run_disturb(&preset, &config);
@@ -4184,6 +4305,93 @@ mod tests {
     }
 
     #[test]
+    fn build_disturb_config_defaults_to_canonical_mode() {
+        let flags = EvaluateFeatureFlags {
+            assr: false,
+            thalamic_gate: true,
+            cet: true,
+            phys_gate: false,
+        };
+        let cfg = build_disturb_config(
+            6.0,
+            BrainType::Normal,
+            4.0,
+            0.05,
+            0.8,
+            flags,
+            15.0,
+            5.0,
+            10.0,
+            false,
+        );
+        assert_eq!(cfg.mode, disturb::DisturbanceMode::Canonical);
+        assert!(!cfg.assr_enabled);
+        assert!(cfg.thalamic_gate_enabled);
+        assert!(cfg.cet_enabled);
+        assert!(!cfg.physiological_thalamic_gate_enabled);
+        assert_eq!(cfg.jr_stochastic_sigma, 15.0);
+    }
+
+    #[test]
+    fn build_disturb_config_legacy_flag_switches_mode() {
+        let flags = EvaluateFeatureFlags {
+            assr: true,
+            thalamic_gate: false,
+            cet: false,
+            phys_gate: true,
+        };
+        let cfg = build_disturb_config(
+            6.0,
+            BrainType::Aging,
+            3.5,
+            0.02,
+            0.4,
+            flags,
+            100.0,
+            25.0,
+            18.0,
+            true,
+        );
+        assert_eq!(cfg.mode, disturb::DisturbanceMode::LegacyAblated);
+        assert!(cfg.assr_enabled);
+        assert!(!cfg.thalamic_gate_enabled);
+        assert!(!cfg.cet_enabled);
+        assert!(cfg.physiological_thalamic_gate_enabled);
+        assert_eq!(cfg.jr_stochastic_sigma, 100.0);
+        assert_eq!(cfg.cet_b_slow_rate, 25.0);
+        assert_eq!(cfg.cet_b_slow_gain, 18.0);
+    }
+
+    #[test]
+    fn disturb_cli_defaults_to_canonical_mode() {
+        let cli = Cli::try_parse_from([
+            "neural-preset-optimizer",
+            "disturb",
+            "presets/the_shield_v1.json",
+        ])
+        .expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Disturb { legacy_ablated, .. } => assert!(!legacy_ablated),
+            _ => panic!("expected disturb command"),
+        }
+    }
+
+    #[test]
+    fn disturb_cli_legacy_ablated_flag_is_honored() {
+        let cli = Cli::try_parse_from([
+            "neural-preset-optimizer",
+            "disturb",
+            "presets/the_shield_v1.json",
+            "--legacy-ablated",
+        ])
+        .expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Disturb { legacy_ablated, .. } => assert!(legacy_ablated),
+            _ => panic!("expected disturb command"),
+        }
+    }
+
+    #[test]
     fn build_optimize_config_enables_fusion_implies_acoustic_scoring() {
         // Pass legacy P18 defaults (15.0, 5.0, 10.0) so the resulting
         // config is bit-identical to pre-P18 behaviour.
@@ -4574,10 +4782,10 @@ mod tests {
         let exported_audio_sr = exported["meta"]["model_signature"]["audio_sample_rate_hz"]
             .as_u64()
             .expect("meta.model_signature.audio_sample_rate_hz should be u64");
-        let exported_neural_decimation =
-            exported["meta"]["model_signature"]["neural_decimation_factor"]
-                .as_u64()
-                .expect("meta.model_signature.neural_decimation_factor should be u64");
+        let exported_neural_decimation = exported["meta"]["model_signature"]
+            ["neural_decimation_factor"]
+            .as_u64()
+            .expect("meta.model_signature.neural_decimation_factor should be u64");
         let exported_neural_sr = exported["meta"]["model_signature"]["neural_sample_rate_hz"]
             .as_f64()
             .expect("meta.model_signature.neural_sample_rate_hz should be f64");
@@ -4591,7 +4799,10 @@ mod tests {
             exported_neural_decimation,
             crate::pipeline::DECIMATION_FACTOR as u64
         );
-        assert_eq!(exported_neural_sr.to_bits(), crate::pipeline::NEURAL_SR.to_bits());
+        assert_eq!(
+            exported_neural_sr.to_bits(),
+            crate::pipeline::NEURAL_SR.to_bits()
+        );
         assert!((exported_score - fake_cached_fitness).abs() > 1e-6);
 
         let _ = std::fs::remove_file(output_path);

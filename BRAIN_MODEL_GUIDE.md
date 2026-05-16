@@ -1,6 +1,6 @@
 # Working with the Brain Model — Practical Guide
 
-A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 15 major model improvements including global normalization, inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR (Ableidinger 2017 velocity noise), Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, GABA_B gain modulation in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search), DSP integration of isochronic tones, RandomPulse, color tint, and tone generator (binaural beats), and the Priority 18 GABA_B architecture fix (gain modulation replacing PSP subtraction).
+A field guide for designing presets against the bilateral Jansen-Rit + FHN neural simulator. This document captures what's load-bearing, what's noise, and where the model's preferences diverge from what real human listeners want. Updated after 15 major model improvements including global normalization, effective net-inhibitory bilateral coupling, thalamic gating, ASSR DC/AC separation, habituation, stochastic JR (Ableidinger 2017 velocity noise), Cortical Envelope Tracking (CET — Priority 13: slow/fast crossover, GABA_B gain modulation in JR, envelope-phase PLV), the physiological thalamic gate (Priority 9: HH TC cell with ion-channel burst↔tonic mode switch), surrogate-assisted optimization (Priority 14: MLP pre-screening for ~10x faster DE search), DSP integration of isochronic tones, RandomPulse, color tint, and tone generator (binaural beats), and the Priority 18 GABA_B architecture fix (gain modulation replacing PSP subtraction).
 
 ---
 
@@ -13,6 +13,10 @@ For `evaluate`, the current defaults are:
 - `--cet` ON
 - `--assr` OFF
 - `--phys-gate` OFF
+
+For `disturb`, the current CLI default is the **canonical** path with the same flag defaults as `evaluate`. Use `--legacy-ablated` to run the historical ablated path.
+
+Important default-layer note: these are CLI defaults. `SimulationConfig::default()` in code is not identical (`assr_enabled=true` there), so programmatic callers should set flags explicitly when they need CLI-equivalent behavior.
 
 Use the default `evaluate` config for broad diagnosis. Add `--assr` when you want `evaluate` to match the default `optimize` scoring stack exactly.
 
@@ -83,7 +87,7 @@ Always test at **300s minimum** before considering a preset done. The 10s snapsh
 2. **Score below ~0.05 is noise.** Differences smaller than that are model jitter, not real improvements.
 3. **Noise color is now CRITICAL.** Global max normalization (replacing per-band) means the model sees genuine spectral differences. SSN is the best *neural* carrier for dual-band goals (Flow, Shield, Focus) but carries a product-level cost — its speech-range energy engages bottom-up attention and causes cognitive fatigue over 5+ minute sessions. Use SSN where the neural spec requires it, use Pink/Brown where single-band targets allow cognitively restful alternatives.
 4. **Reverb is the PRIMARY arousal lever.** The thalamic gate maps reverb (and brightness, modulation rate) to arousal, which determines whether the model can access theta/delta or stays in beta.
-5. **Hemispheres differentiate, not synchronize.** Inhibitory corpus callosum coupling means asymmetric placement creates hemispheric contrast, not bilateral locking.
+5. **Hemispheres differentiate, not synchronize.** Effective net-inhibitory callosal coupling means asymmetric placement creates hemispheric contrast, not bilateral locking.
 6. **For ADHD: multiple gentle drivers > one aggressive driver.** ADHD amplifies everything — moderate modulation (depth 0.30-0.40) from 4-5 sources beats max modulation from 2 sources.
 7. **Design sound-first, measure second.** Build a preset from a perceptually-good base, then measure what neural state it induces. Do NOT start from a goal and let the optimizer search blank-slate. See the Preset Design Framework below — it's the single most important workflow recommendation in this guide.
 
@@ -107,7 +111,7 @@ Build each preset as a stack, layer by layer. **Measure after each layer with `e
 
 #### Layer 0 — Carrier stack (branch point, not a step)
 
-**The most important discipline in the framework, and the easiest to get wrong.** Layer 0 makes structural commitments — carrier color, source count, symmetry, volume ratios — that later layers *cannot undo*. Reverb, drivers, movement, and resilience can shape the response; they cannot make Pink behave like SSN, and they cannot make symmetric passive input produce a unified bilateral state if stochastic JR + inhibitory callosal coupling splits it apart.
+**The most important discipline in the framework, and the easiest to get wrong.** Layer 0 makes structural commitments — carrier color, source count, symmetry, volume ratios — that later layers *cannot undo*. Reverb, drivers, movement, and resilience can shape the response; they cannot make Pink behave like SSN, and they cannot make symmetric passive input produce a unified bilateral state if stochastic JR + effective net-inhibitory callosal coupling splits it apart.
 
 **Split Layer 0 into 0a and 0b. Test the anchor alone before any satellites.**
 
@@ -150,7 +154,7 @@ The anchor is structurally decoupled from sources in the engine: it has its own 
 **Structural vs shapeable pathologies.** After building a candidate, measure at zero-point (no modulation, no movement, light reverb ~0.25) and classify what you see:
 
 - **Shapeable** (advance to Layer 1): wrong arousal, too much theta, flat spectrum, mild asymmetry, dominant frequency off by a few Hz, weak entrainment. Later layers fix these.
-- **Structural** (branch — do *not* advance): hemispheric split where left locks into one attractor and right into another via inhibitory coupling; HF tonotopic band below ~8% when you need speech masking (Pink's −3 dB/oct rolloff is fundamental, no amount of shaping fixes it); source-count/placement choices that make later shaping mathematically impossible. No later layer will fix these — they are properties of the carrier, not the treatment.
+- **Structural** (branch — do *not* advance): hemispheric split where left locks into one attractor and right into another via effective net-inhibitory coupling; HF tonotopic band below ~8% when you need speech masking (Pink's −3 dB/oct rolloff is fundamental, no amount of shaping fixes it); source-count/placement choices that make later shaping mathematically impossible. No later layer will fix these — they are properties of the carrier, not the treatment.
 
 **Rule: Layer 0 is a branch point, not a single step.** Generate **2–4 structurally different Layer 0 candidates** (different carriers, different source counts, different symmetries), measure each at zero-point, and pick the one whose baseline has only shapeable pathologies. Iterating Layers 1–4 on a structurally broken foundation is the single most common way to waste time with this framework. The skill is in branching back to Layer 0 when the foundation is wrong, not in shaping harder.
 
@@ -158,7 +162,7 @@ The anchor is structurally decoupled from sources in the engine: it has its own 
 
 - **Carriers:** 3–5 sources for the broadband bed. **SSN (6)** is the best carrier *for the NMM's neural metrics* because its speech-shaped tonotopic profile (Low-mid 73% + Mid-high 20%) is the only color that simultaneously feeds right-hemi JR α (via Low-mid at band 1 = 9.5 Hz) AND left-hemi WC(14) β (via Mid-high at band 2). This dual-band coverage is structurally unique and makes SSN *structurally required* for goals with dual-band targets (Flow's α+β coupling, Shield's bilateral masking). **But SSN has a perceptual cost:** its speech-range energy (500 Hz–4 kHz) engages involuntary bottom-up attention — the brain keeps trying to parse it — causing cognitive fatigue over 5+ minute sessions. Use **Pink (1)** for habituation-first presets or when the spec allows relaxing β toward a cognitively restful profile. Use **Brown (2)** for LF-warm restful masking. Do not reach for **White (0)** reflexively; its uniform power spectrum is rarely optimal anymore.
 - **Anchor:** low-volume non-localized baseline (0.03–0.10) to fill gaps the directional sources miss. **SSN at 0.05–0.10** for speech-band masking; **Pink (1) or Brown (2) at 0.03** for warmth. The color enum is `0=White, 1=Pink, 2=Brown, 3=Green, 4=Grey, 5=Black, 6=SSN, 7=Blue` (canonical source: `NoiseColor::from_u8` in `noise_generator_dsp/crates/core/src/lib.rs:176–188`).
-- **Source count and symmetry:** more sources is not automatically better. **3 asymmetrically-placed sources often produce cleaner bilateral convergence than 4 symmetric sources**, because 65% contralateral routing pushes both hemispheres in the same direction. Symmetric passive placement + stochastic JR + inhibitory callosum is how you *get* hemispheric split — and that split is structural, not shapeable.
+- **Source count and symmetry:** more sources is not automatically better. **3 asymmetrically-placed sources often produce cleaner bilateral convergence than 4 symmetric sources**, because 65% contralateral routing pushes both hemispheres in the same direction. Symmetric passive placement + stochastic JR + effective net-inhibitory callosal coupling is how you *get* hemispheric split — and that split is structural, not shapeable.
 - **Master gain:** set for comfort. Does not affect the score.
 - **No modulation, no movement.** Everything is Flat/Static at Layer 0. Reverb sits at a neutral ~0.25 placeholder; Layer 3 tunes it.
 
@@ -166,7 +170,7 @@ The anchor is structurally decoupled from sources in the engine: it has its own 
 
 #### Layer 1 — Spatial field (sonic depth + incidental delta)
 
-- Place sources with stereo balance in mind. Slight asymmetry is welcome; hemispheric differentiation is a bonus from inhibitory callosal coupling, not a goal in itself.
+- Place sources with stereo balance in mind. Slight asymmetry is welcome; hemispheric differentiation is a bonus from effective net-inhibitory callosal coupling, not a goal in itself.
 - Add **figure-8 or pendulum movement** at speed 1.5–5 rad/s on 2–3 sources. Movement is doing triple duty: sonic interest, delta via HRTF envelope variation, and anti-habituation.
 - Use `z < -2` for sources that should blend into ambience; `z > +1` for foreground character.
 - **Measurement goal:** you've probably shifted mass toward slower bands and raised delta without trying. Quantify how much. If delta jumped from 2% to 15% just from movement, that's most of your slow-wave budget right there.
@@ -270,7 +274,7 @@ Audio --> Cochlear filterbank (32 gammatone channels, 4 tonotopic bands)
       --> Band-dependent thalamic gate (arousal-driven input_offset shift)
         -->  [--phys-gate only] Physiological gate: HH TC cell (Bazhenov 2002) with
              T-type Ca2+ and K+ leak. Sigmoidal burst↔tonic switch replaces linear ramp
-      --> Bilateral Jansen-Rit cortical model (inhibitory corpus callosum coupling)
+      --> Bilateral Jansen-Rit cortical model (effective net-inhibitory callosal coupling)
         -->  [CET only] Slow GABA_B parallel population (B_slow=10 mV, b_slow=5/s, τ≈200 ms)
       --> Wilson-Cowan adaptive frequency tracking (within +/-5 Hz Arnold tongue)
       --> FitzHugh-Nagumo single-neuron probe
@@ -349,9 +353,9 @@ Max normalization of EEG-to-FHN coupling was replaced with 95th percentile scali
 
 ### Inhibitory bilateral coupling
 
-The corpus callosum coupling changed from excitatory (+k) to inhibitory (-k). Previously, hemispheres synchronized — when one went alpha, the other followed. Now they **differentiate**: when one hemisphere is driven hard, it actively suppresses the same activity in the other hemisphere.
+The effective callosal coupling term changed from excitatory (+k) to net-inhibitory (-k). Previously, hemispheres synchronized — when one went alpha, the other followed. Now they **differentiate**: when one hemisphere is driven hard, it actively suppresses the same activity in the other hemisphere.
 
-This means asymmetric placement creates **more** hemispheric contrast than before, not less. A source placed hard left doesn't just drive the right hemisphere — it also inhibits that pattern in the left hemisphere via the inhibitory coupling.
+This means asymmetric placement creates **more** hemispheric contrast than before, not less. A source placed hard left doesn't just drive the right hemisphere — it also inhibits that pattern in the left hemisphere via effective net-inhibitory coupling.
 
 ### Band-dependent thalamic gate
 
@@ -445,9 +449,9 @@ The enum is `0=White, 1=Pink, 2=Brown, 3=Green, 4=Grey, 5=Black, 6=SSN, 7=Blue` 
 
 For warmth at the anchor position in SSN-based presets, **Pink or Brown at 0.03–0.05** remain the right choices.
 
-### 3. Asymmetric spatial placement (enhanced by inhibitory coupling)
+### 3. Asymmetric spatial placement (enhanced by effective net-inhibitory coupling)
 
-The bilateral JR model has 65% contralateral input routing. With the new **inhibitory** corpus callosum coupling, asymmetric placement is even more powerful than before: a lateralized source both drives the contralateral hemisphere AND suppresses that pattern in the ipsilateral hemisphere. The hemispheres actively differentiate.
+The bilateral JR model has 65% contralateral input routing. With the new **effective net-inhibitory** callosal coupling term, asymmetric placement is even more powerful than before: a lateralized source both drives the contralateral hemisphere AND suppresses that pattern in the ipsilateral hemisphere. The hemispheres actively differentiate.
 
 **Rule:** Always have at least one strongly-modulated source positioned off-center (e.g., x = +/-2 to +/-5).
 
@@ -660,7 +664,7 @@ A preset optimized purely for the score will frequently:
 
 ### Symmetry vs. score vs. asymmetry penalty
 
-The optimizer prefers asymmetric placement because inhibitory coupling maximizes hemispheric differentiation. But:
+The optimizer prefers asymmetric placement because effective net-inhibitory coupling maximizes hemispheric differentiation. But:
 - Real listeners prefer stereo-balanced sound
 - Goals with asymmetry penalties (meditation, relaxation) actively score worse with extreme asymmetry
 
@@ -728,9 +732,9 @@ ADHD operates near the JR bifurcation boundary (input_offset=135). Everything is
 
 ### Right-hemisphere theta-lock on ADHD
 
-If you put Breathing pattern 3 on the lead source of an ADHD preset, the right hemisphere can lock at 60%+ theta while the left stays balanced. With inhibitory coupling, this differentiation is even more pronounced than before.
+If you put Breathing pattern 3 on the lead source of an ADHD preset, the right hemisphere can lock at 60%+ theta while the left stays balanced. With effective net-inhibitory coupling, this differentiation is even more pronounced than before.
 
-**Fix:** Add a source on the LEFT side (drives right hemi via 65% contralateral routing) with NeuralLfo at alpha frequency (10 Hz). The inhibitory coupling helps — driving the right hemisphere toward alpha also suppresses theta in the left hemisphere via the inhibitory bilateral link.
+**Fix:** Add a source on the LEFT side (drives right hemi via 65% contralateral routing) with NeuralLfo at alpha frequency (10 Hz). The effective net-inhibitory coupling helps — driving the right hemisphere toward alpha also suppresses theta in the left hemisphere via the effective net-inhibitory bilateral coupling term.
 
 **Rule: to fix a hemisphere, drive it from the opposite side** (65% contralateral routing).
 
@@ -776,7 +780,7 @@ The two scores can diverge: Shield v3 shows entrainment resilience 0.92 (phase-l
 
 - `src/scoring.rs` — Goal definitions, band targets, scoring formulas. `Goal::evaluate_full()` combines band score + FHN score + asymmetry penalty + carrier PLV bonus + envelope PLV bonus (CET). `entrainment_weight()` and `envelope_entrainment_weight()` hold the per-goal weights for the two PLV terms; `asymmetry_penalty()` holds the L/R lateralization penalty. Read this to understand what each goal measures.
 - `src/brain_type.rs` — Brain type parameter definitions (input_offset, input_scale, bilateral params).
-- `src/neural/jansen_rit.rs` — The cortical model. Inhibitory bilateral coupling, stochastic noise (sigma=15), habituation (synaptic depression), and the slow GABA_B parallel population (CET 13b) all live here. The Wendling 4-population state `[y0..y7]` is the canonical core; an additional 2-state slow inhibitory population `[y_slow_0, y_slow_1]` is integrated alongside via RK4 when `b_slow_gain > 0`. EEG = `y[1] - y[2] - y[3] - y_slow_0`.
+- `src/neural/jansen_rit.rs` — The cortical model. Effective net-inhibitory bilateral coupling, stochastic noise (sigma=15), habituation (synaptic depression), and the CET slow GABA_B gain-modulation path all live here. The Wendling 4-population state `[y0..y7]` is the canonical core; an additional 2-state slow inhibitory population `[y_slow_0, y_slow_1]` is integrated alongside via RK4 when `b_slow_gain > 0`. Current implementation note: the slow GABA_B path modulates excitatory gain over time; it is not directly subtracted from the EEG readout.
 - `src/auditory/thalamic_gate.rs` — *Heuristic* band-dependent arousal shift. The reverb→arousal mapping. `band_offset_shifts()` returns `[100%, 70%, 20%, 0%]` of max reduction across bands 0-3. Linear ramp. Default gate used by `--thalamic-gate`.
 - `src/auditory/physiological_thalamic_gate.rs` — **Priority 9:** *Physiological* thalamic gate. Single-compartment Hodgkin-Huxley TC cell with T-type Ca²⁺ (Destexhe 1996), Na⁺/K⁺ (Mainen-Sejnowski 1996), and K⁺ leak (Bazhenov 2002). Arousal → g_KL → membrane potential → burst↔tonic mode switch → sigmoidal shift-vs-arousal. Same `band_offset_shifts()` output with Steriade [100%, 70%, 20%, 0%] proportions. Used by `--phys-gate`. Dramatically improves sleep/relaxation (+0.12 to +0.28) because ion-channel dynamics push harder into burst mode at low arousal than the linear heuristic. Drops focus/deep_work because moderate arousal → burst mode, which is physiologically correct (TC cells don't provide partial relay at intermediate states).
 - `src/auditory/assr.rs` — DC/AC separation logic. ASSR frequency-dependent attenuation of the modulation envelope. When CET is enabled, only acts on the FAST path (slow path bypasses ASSR — Priority 13a).
@@ -830,7 +834,7 @@ These are real phenomena that the model approximates:
 - **Stochastic resonance in noise**: Moss et al. 2004, Faisal et al. 2008
 - **Synaptic depression / habituation**: Tsodyks & Markram 1997 — short-term synaptic plasticity. Implemented as connectivity reduction under sustained activity.
 - **Thalamic gating of cortical input**: Sherman & Guillery 2006 — thalamus modulates cortical input based on arousal state.
-- **Inhibitory callosal projections**: Bloom & Hynd 2005, Yazgan et al. 1995 — corpus callosum contains both excitatory and inhibitory fibers.
+- **Effective net-inhibitory callosal coupling approximation**: Bloom & Hynd 2005, Yazgan et al. 1995 — the model uses a net inhibitory coupling term as a systems-level approximation, not a literal fiber-type claim.
 - **EEG band conventions**: Niedermeyer & Lopes da Silva 2005
 
 The model collapses these into a stochastic simulator. Real brains have all of this plus orders of magnitude more — top-down attention, neuromodulation, individual variability, network dynamics — none of which are captured. Use the model as a hypothesis generator, not a ground truth.

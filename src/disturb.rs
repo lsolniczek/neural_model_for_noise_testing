@@ -4,15 +4,15 @@
 /// into the decimated tonotopic signals at a specified time, then tracks
 /// entrainment ratio and dominant frequency through sliding-window analysis
 /// to measure perturbation impact and recovery dynamics.
-use crate::auditory::GammatoneFilterbank;
 use crate::brain_type::BrainType;
 use crate::model_signature::{
     AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
     NumericParamsSnapshot, PipelineVariant, ReproducibilitySeeds, ScoringProfile,
 };
-use crate::neural::{simulate_bilateral, BilateralResult, FastInhibParams};
+use crate::neural::BilateralResult;
 use crate::pipeline::{
-    decimate, render_preset_stereo_dry, spectral_brightness, validate_analysis_window,
+    decimate, prepare_canonical_auditory_state, render_preset_stereo_dry,
+    run_canonical_cortical_stage, spectral_brightness, validate_analysis_window, SimulationConfig,
     DECIMATION_FACTOR, DEFAULT_WARMUP_DISCARD_SECS, NEURAL_SR, SAMPLE_RATE,
 };
 use crate::preset::Preset;
@@ -95,8 +95,15 @@ pub struct DisturbResult {
 pub const DISTURB_LEFT_SPIKE_SEED: u64 = 0xDEAD_BEEF_CAFE_1234;
 pub const DISTURB_RIGHT_SPIKE_SEED: u64 = 0xCAFE_BABE_DEAD_5678;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisturbanceMode {
+    Canonical,
+    LegacyAblated,
+}
+
 /// Configuration for the disturbance test.
 pub struct DisturbConfig {
+    pub mode: DisturbanceMode,
     pub spike_time_s: f64,
     pub spike_duration_s: f64,
     pub spike_gain: f64,
@@ -105,6 +112,16 @@ pub struct DisturbConfig {
     pub warmup_discard_secs: f32,
     pub window_s: f64,
     pub hop_s: f64,
+    pub assr_enabled: bool,
+    pub thalamic_gate_enabled: bool,
+    pub physiological_thalamic_gate_enabled: bool,
+    pub cet_enabled: bool,
+    pub habituation_enabled: bool,
+    pub stochastic_jr_enabled: bool,
+    pub reproducibility_seed: Option<u64>,
+    pub jr_stochastic_sigma: f64,
+    pub cet_b_slow_rate: f64,
+    pub cet_b_slow_gain: f64,
     pub acoustic_scoring_enabled: bool,
     pub model_version: ModelVersion,
 }
@@ -112,6 +129,7 @@ pub struct DisturbConfig {
 impl Default for DisturbConfig {
     fn default() -> Self {
         DisturbConfig {
+            mode: DisturbanceMode::Canonical,
             spike_time_s: 4.0,
             spike_duration_s: 0.05,
             spike_gain: 0.5,
@@ -120,13 +138,47 @@ impl Default for DisturbConfig {
             warmup_discard_secs: DEFAULT_WARMUP_DISCARD_SECS,
             window_s: 0.5,
             hop_s: 0.05,
+            assr_enabled: false,
+            thalamic_gate_enabled: true,
+            physiological_thalamic_gate_enabled: false,
+            cet_enabled: true,
+            habituation_enabled: true,
+            stochastic_jr_enabled: true,
+            reproducibility_seed: None,
+            jr_stochastic_sigma: 15.0,
+            cet_b_slow_rate: 5.0,
+            cet_b_slow_gain: 10.0,
             acoustic_scoring_enabled: false,
             model_version: ModelVersion::LegacyV1,
         }
     }
 }
 
-// ── Auditory pipeline (shared with evaluate) ────────────────────────────────
+impl DisturbConfig {
+    fn canonical_simulation_config(&self) -> SimulationConfig {
+        SimulationConfig {
+            duration_secs: self.duration_secs,
+            warmup_discard_secs: self.warmup_discard_secs,
+            brain_type: self.brain_type,
+            assr_enabled: self.assr_enabled,
+            thalamic_gate_enabled: self.thalamic_gate_enabled,
+            habituation_enabled: self.habituation_enabled,
+            stochastic_jr_enabled: self.stochastic_jr_enabled,
+            cet_enabled: self.cet_enabled,
+            physiological_thalamic_gate_enabled: self.physiological_thalamic_gate_enabled,
+            acoustic_scoring_enabled: self.acoustic_scoring_enabled,
+            acoustic_score_fusion_enabled: false,
+            acoustic_constraints_enabled: false,
+            model_version: self.model_version,
+            reproducibility_seed: self.reproducibility_seed,
+            jr_stochastic_sigma: self.jr_stochastic_sigma,
+            cet_b_slow_rate: self.cet_b_slow_rate,
+            cet_b_slow_gain: self.cet_b_slow_gain,
+        }
+    }
+}
+
+// ── Legacy-ablated auditory pipeline ────────────────────────────────────────
 
 struct AuditoryOutput {
     left_bands_dec: [Vec<f64>; 4],
@@ -137,8 +189,9 @@ struct AuditoryOutput {
     target_lfo_freq: Option<f64>,
 }
 
-/// Run steps 1-5 of the pipeline: Engine → Audio → Gammatone → Normalize → Decimate.
-fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOutput {
+/// Historical Stage-0 disturbance auditory path:
+/// dry render + per-band-per-ear normalization + decimation.
+fn run_legacy_ablated_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOutput {
     validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
         .unwrap_or_else(|message| panic!("invalid DisturbConfig: {message}"));
 
@@ -148,12 +201,12 @@ fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOut
     let right = rendered.right;
 
     // 4. Gammatone filterbank
-    let mut filterbank_l = GammatoneFilterbank::new(sr);
-    let mut filterbank_r = GammatoneFilterbank::new(sr);
+    let mut filterbank_l = crate::auditory::GammatoneFilterbank::new(sr);
+    let mut filterbank_r = crate::auditory::GammatoneFilterbank::new(sr);
     let bands_l = filterbank_l.process_to_band_groups(&left);
     let bands_r = filterbank_r.process_to_band_groups(&right);
 
-    // 5. Normalise bands
+    // 5. Normalise bands (legacy per-band path)
     let mut left_bands: [Vec<f64>; 4] = [
         vec![0.0; bands_l.signals[0].len()],
         vec![0.0; bands_l.signals[1].len()],
@@ -200,10 +253,22 @@ fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOut
         trim(&right_bands[3]),
     ];
 
-    // Extract target LFO frequency from preset.
-    // Scans for NeuralLfo (kind=4), Isochronic (kind=5) — both drive entrainment.
-    // Bug fix (Priority 15): previously only detected kind==4, missing isochronic.
-    let target_lfo_freq = preset
+    let target_lfo_freq = extract_target_lfo_frequency_from_preset(preset);
+
+    AuditoryOutput {
+        left_bands_dec,
+        right_bands_dec,
+        left_energy: bands_l.energy_fractions,
+        right_energy: bands_r.energy_fractions,
+        brightness,
+        target_lfo_freq,
+    }
+}
+
+// ── Spike injection ─────────────────────────────────────────────────────────
+
+fn extract_target_lfo_frequency_from_preset(preset: &Preset) -> Option<f64> {
+    preset
         .objects
         .iter()
         .filter(|obj| obj.active)
@@ -218,19 +283,20 @@ fn run_auditory_pipeline(preset: &Preset, config: &DisturbConfig) -> AuditoryOut
             lfos
         })
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        .map(|(freq, _)| freq);
-
-    AuditoryOutput {
-        left_bands_dec,
-        right_bands_dec,
-        left_energy: bands_l.energy_fractions,
-        right_energy: bands_r.energy_fractions,
-        brightness,
-        target_lfo_freq,
-    }
+        .map(|(freq, _)| freq)
 }
 
-// ── Spike injection ─────────────────────────────────────────────────────────
+#[derive(Clone, Copy)]
+struct SpikeSpec {
+    time_s: f64,
+    duration_s: f64,
+    gain: f64,
+}
+
+enum AuditoryPerturbation {
+    None,
+    Spike(SpikeSpec),
+}
 
 /// Inject a broadband white noise spike into all 4 tonotopic bands.
 ///
@@ -276,6 +342,35 @@ fn inject_spike(
 
             let noise = next_noise();
             bands[b][sample_idx] += spike_gain * env * noise;
+        }
+    }
+}
+
+fn apply_auditory_perturbation(
+    auditory: &mut crate::pipeline::AuditoryPreparedState,
+    perturbation: AuditoryPerturbation,
+    left_seed: u64,
+    right_seed: u64,
+) {
+    match perturbation {
+        AuditoryPerturbation::None => {}
+        AuditoryPerturbation::Spike(spec) => {
+            inject_spike(
+                &mut auditory.left_bands_dec,
+                spec.time_s,
+                spec.duration_s,
+                spec.gain,
+                NEURAL_SR,
+                left_seed,
+            );
+            inject_spike(
+                &mut auditory.right_bands_dec,
+                spec.time_s,
+                spec.duration_s,
+                spec.gain,
+                NEURAL_SR,
+                right_seed,
+            );
         }
     }
 }
@@ -435,10 +530,63 @@ fn sliding_window_analysis(
 
 /// Run the disturbance test and return full results.
 pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
-    // Phase 1: Auditory pipeline
-    let audio = run_auditory_pipeline(preset, config);
+    match config.mode {
+        DisturbanceMode::Canonical => run_disturb_canonical(preset, config),
+        DisturbanceMode::LegacyAblated => run_disturb_legacy_ablated(preset, config),
+    }
+}
 
-    // Phase 2: Clone and inject spike
+fn run_disturb_canonical(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
+    let sim_config = config.canonical_simulation_config();
+    validate_analysis_window(sim_config.duration_secs, sim_config.warmup_discard_secs)
+        .unwrap_or_else(|message| panic!("invalid DisturbConfig: {message}"));
+
+    let mut auditory = prepare_canonical_auditory_state(preset, &sim_config);
+    let perturbation = if config.spike_gain.abs() <= 1e-15 || config.spike_duration_s <= 0.0 {
+        AuditoryPerturbation::None
+    } else {
+        AuditoryPerturbation::Spike(SpikeSpec {
+            time_s: config.spike_time_s,
+            duration_s: config.spike_duration_s,
+            gain: config.spike_gain,
+        })
+    };
+    apply_auditory_perturbation(
+        &mut auditory,
+        perturbation,
+        DISTURB_LEFT_SPIKE_SEED,
+        DISTURB_RIGHT_SPIKE_SEED,
+    );
+
+    let cortical = run_canonical_cortical_stage(&auditory, &sim_config);
+    let windows = sliding_window_analysis(
+        &cortical.bilateral.combined.eeg,
+        NEURAL_SR,
+        config.window_s,
+        config.hop_s,
+        auditory.target_lfo_freq,
+    );
+
+    let mut model_signature = sim_config.model_signature();
+    model_signature.pipeline_variant = PipelineVariant::DisturbCanonical;
+    model_signature.seeds = ReproducibilitySeeds {
+        primary_seed: sim_config.reproducibility_seed,
+        disturbance_left_spike_seed: Some(DISTURB_LEFT_SPIKE_SEED),
+        disturbance_right_spike_seed: Some(DISTURB_RIGHT_SPIKE_SEED),
+    };
+
+    summarize_disturb_result(
+        model_signature,
+        config,
+        windows,
+        cortical.bilateral,
+        auditory.brightness,
+        auditory.target_lfo_freq,
+    )
+}
+
+fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
+    let audio = run_legacy_ablated_auditory_pipeline(preset, config);
     let mut left_spiked = audio.left_bands_dec.clone();
     let mut right_spiked = audio.right_bands_dec.clone();
 
@@ -456,13 +604,12 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         config.spike_duration_s,
         config.spike_gain,
         NEURAL_SR,
-        DISTURB_RIGHT_SPIKE_SEED, // different seed for independence
+        DISTURB_RIGHT_SPIKE_SEED,
     );
 
-    // Phase 3: Run bilateral JR model on disturbed signals
     let neural_params = config.brain_type.params();
     let bilateral_params = config.brain_type.bilateral_params();
-    let fast_inhib = FastInhibParams {
+    let fast_inhib = crate::neural::FastInhibParams {
         g_fast_gain: neural_params.jansen_rit.g_fast_gain,
         g_fast_rate: neural_params.jansen_rit.g_fast_rate,
         c5: neural_params.jansen_rit.c5,
@@ -470,7 +617,7 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         c7: neural_params.jansen_rit.c7,
     };
 
-    let bi_result = simulate_bilateral(
+    let bi_result = crate::neural::simulate_bilateral(
         &left_spiked,
         &right_spiked,
         &audio.left_energy,
@@ -490,126 +637,12 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         0.5,
     );
 
-    // Phase 4: Sliding-window analysis
     let windows = sliding_window_analysis(
         &bi_result.combined.eeg,
         NEURAL_SR,
         config.window_s,
         config.hop_s,
         audio.target_lfo_freq,
-    );
-
-    // Phase 5: Compute summary metrics
-    let spike_window_time = config.spike_time_s;
-
-    // Baseline: windows before spike
-    let baseline_windows: Vec<&WindowMetrics> = windows
-        .iter()
-        .filter(|w| w.time_s + config.window_s * 0.5 < spike_window_time)
-        .collect();
-
-    let baseline_entrainment = if !baseline_windows.is_empty() {
-        let vals: Vec<f64> = baseline_windows
-            .iter()
-            .filter_map(|w| w.entrainment_ratio)
-            .collect();
-        if vals.is_empty() {
-            None
-        } else {
-            Some(vals.iter().sum::<f64>() / vals.len() as f64)
-        }
-    } else {
-        None
-    };
-
-    let baseline_dominant_freq = if !baseline_windows.is_empty() {
-        baseline_windows
-            .iter()
-            .map(|w| w.dominant_freq)
-            .sum::<f64>()
-            / baseline_windows.len() as f64
-    } else {
-        0.0
-    };
-
-    let baseline_centroid = if !baseline_windows.is_empty() {
-        baseline_windows
-            .iter()
-            .map(|w| w.spectral_centroid)
-            .sum::<f64>()
-            / baseline_windows.len() as f64
-    } else {
-        10.0
-    };
-
-    // Baseline band powers (Priority 15)
-    let baseline_band_powers = mean_band_powers(&baseline_windows);
-
-    // Post-spike windows
-    let post_spike_windows: Vec<&WindowMetrics> = windows
-        .iter()
-        .filter(|w| w.time_s > spike_window_time)
-        .collect();
-
-    // Nadir: minimum entrainment after spike
-    let (nadir_entrainment, nadir_time) = if let Some(base_ent) = baseline_entrainment {
-        let mut min_ent = base_ent;
-        let mut min_time = spike_window_time;
-        for w in &post_spike_windows {
-            if let Some(er) = w.entrainment_ratio {
-                if er < min_ent {
-                    min_ent = er;
-                    min_time = w.time_s;
-                }
-            }
-        }
-        (Some(min_ent), min_time)
-    } else {
-        (None, spike_window_time)
-    };
-
-    // Peak frequency deviation
-    let peak_freq_deviation = post_spike_windows
-        .iter()
-        .map(|w| (w.dominant_freq - baseline_dominant_freq).abs())
-        .fold(0.0_f64, f64::max);
-
-    // Entrainment recovery times (original metrics — kept for backward compat)
-    let recovery_50_ms = compute_recovery_time(
-        &post_spike_windows,
-        baseline_entrainment,
-        0.50,
-        spike_window_time,
-    );
-    let recovery_90_ms = compute_recovery_time(
-        &post_spike_windows,
-        baseline_entrainment,
-        0.90,
-        spike_window_time,
-    );
-
-    // ── Spectral resilience metrics (Priority 15) ──────────────────
-    let bppr = compute_bppr(&baseline_band_powers, &post_spike_windows);
-    let spectral_recovery_50_ms = compute_spectral_recovery(
-        &baseline_band_powers,
-        &baseline_windows,
-        &post_spike_windows,
-        0.50,
-        spike_window_time,
-    );
-    let spectral_recovery_90_ms = compute_spectral_recovery(
-        &baseline_band_powers,
-        &baseline_windows,
-        &post_spike_windows,
-        0.90,
-        spike_window_time,
-    );
-    let scdi_hz = compute_scdi(baseline_centroid, &post_spike_windows);
-    let spectral_resilience = compute_spectral_resilience(
-        bppr,
-        spectral_recovery_50_ms,
-        spectral_recovery_90_ms,
-        scdi_hz,
     );
 
     let model_signature = ModelSignature {
@@ -622,7 +655,6 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         neural_decimation_factor: DECIMATION_FACTOR,
         neural_sample_rate_hz: NEURAL_SR,
         auditory_flags: AuditoryFeatureFlags {
-            // Legacy disturb path keeps these disabled today; Stage 1 will canonicalize.
             assr_enabled: false,
             thalamic_gate_enabled: false,
             physiological_thalamic_gate_enabled: false,
@@ -652,6 +684,123 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         },
     };
 
+    summarize_disturb_result(
+        model_signature,
+        config,
+        windows,
+        bi_result,
+        audio.brightness,
+        audio.target_lfo_freq,
+    )
+}
+
+fn summarize_disturb_result(
+    model_signature: ModelSignature,
+    config: &DisturbConfig,
+    windows: Vec<WindowMetrics>,
+    bilateral: BilateralResult,
+    brightness: f64,
+    target_freq: Option<f64>,
+) -> DisturbResult {
+    let spike_window_time = config.spike_time_s;
+    let baseline_windows: Vec<&WindowMetrics> = windows
+        .iter()
+        .filter(|w| w.time_s + config.window_s * 0.5 < spike_window_time)
+        .collect();
+
+    let baseline_entrainment = if !baseline_windows.is_empty() {
+        let vals: Vec<f64> = baseline_windows
+            .iter()
+            .filter_map(|w| w.entrainment_ratio)
+            .collect();
+        if vals.is_empty() {
+            None
+        } else {
+            Some(vals.iter().sum::<f64>() / vals.len() as f64)
+        }
+    } else {
+        None
+    };
+
+    let baseline_dominant_freq = if !baseline_windows.is_empty() {
+        baseline_windows
+            .iter()
+            .map(|w| w.dominant_freq)
+            .sum::<f64>()
+            / baseline_windows.len() as f64
+    } else {
+        0.0
+    };
+    let baseline_centroid = if !baseline_windows.is_empty() {
+        baseline_windows
+            .iter()
+            .map(|w| w.spectral_centroid)
+            .sum::<f64>()
+            / baseline_windows.len() as f64
+    } else {
+        10.0
+    };
+    let baseline_band_powers = mean_band_powers(&baseline_windows);
+    let post_spike_windows: Vec<&WindowMetrics> = windows
+        .iter()
+        .filter(|w| w.time_s > spike_window_time)
+        .collect();
+
+    let (nadir_entrainment, nadir_time) = if let Some(base_ent) = baseline_entrainment {
+        let mut min_ent = base_ent;
+        let mut min_time = spike_window_time;
+        for w in &post_spike_windows {
+            if let Some(er) = w.entrainment_ratio {
+                if er < min_ent {
+                    min_ent = er;
+                    min_time = w.time_s;
+                }
+            }
+        }
+        (Some(min_ent), min_time)
+    } else {
+        (None, spike_window_time)
+    };
+
+    let peak_freq_deviation = post_spike_windows
+        .iter()
+        .map(|w| (w.dominant_freq - baseline_dominant_freq).abs())
+        .fold(0.0_f64, f64::max);
+    let recovery_50_ms = compute_recovery_time(
+        &post_spike_windows,
+        baseline_entrainment,
+        0.50,
+        spike_window_time,
+    );
+    let recovery_90_ms = compute_recovery_time(
+        &post_spike_windows,
+        baseline_entrainment,
+        0.90,
+        spike_window_time,
+    );
+    let bppr = compute_bppr(&baseline_band_powers, &post_spike_windows);
+    let spectral_recovery_50_ms = compute_spectral_recovery(
+        &baseline_band_powers,
+        &baseline_windows,
+        &post_spike_windows,
+        0.50,
+        spike_window_time,
+    );
+    let spectral_recovery_90_ms = compute_spectral_recovery(
+        &baseline_band_powers,
+        &baseline_windows,
+        &post_spike_windows,
+        0.90,
+        spike_window_time,
+    );
+    let scdi_hz = compute_scdi(baseline_centroid, &post_spike_windows);
+    let spectral_resilience = compute_spectral_resilience(
+        bppr,
+        spectral_recovery_50_ms,
+        spectral_recovery_90_ms,
+        scdi_hz,
+    );
+
     DisturbResult {
         model_signature,
         windows,
@@ -669,9 +818,9 @@ pub fn run_disturb(preset: &Preset, config: &DisturbConfig) -> DisturbResult {
         spectral_recovery_90_ms,
         scdi_hz,
         spectral_resilience,
-        bilateral: bi_result,
-        brightness: audio.brightness,
-        target_freq: audio.target_lfo_freq,
+        bilateral,
+        brightness,
+        target_freq,
     }
 }
 
@@ -895,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn disturb_result_emits_legacy_signature_metadata() {
+    fn disturb_result_emits_canonical_signature_metadata() {
         let preset = crate::preset::Preset::default();
         let config = DisturbConfig {
             duration_secs: 4.0,
@@ -905,11 +1054,38 @@ mod tests {
         assert_eq!(result.model_signature.version, ModelVersion::LegacyV1);
         assert_eq!(
             result.model_signature.pipeline_variant,
-            PipelineVariant::DisturbLegacyAblated
+            PipelineVariant::DisturbCanonical
         );
         assert_eq!(
             result.model_signature.normalization_mode,
-            NormalizationMode::PerBandPerEar
+            NormalizationMode::GlobalPerEar
+        );
+        assert_eq!(
+            result.model_signature.auditory_flags.assr_enabled,
+            config.assr_enabled
+        );
+        assert_eq!(
+            result.model_signature.auditory_flags.thalamic_gate_enabled,
+            config.thalamic_gate_enabled
+        );
+        assert_eq!(
+            result
+                .model_signature
+                .auditory_flags
+                .physiological_thalamic_gate_enabled,
+            config.physiological_thalamic_gate_enabled
+        );
+        assert_eq!(
+            result.model_signature.auditory_flags.cet_enabled,
+            config.cet_enabled
+        );
+        assert_eq!(
+            result.model_signature.auditory_flags.habituation_enabled,
+            config.habituation_enabled
+        );
+        assert_eq!(
+            result.model_signature.neural_flags.stochastic_jr_enabled,
+            config.stochastic_jr_enabled
         );
         assert_eq!(
             result.model_signature.audio_sample_rate_hz,
@@ -934,16 +1110,244 @@ mod tests {
     }
 
     #[test]
-    fn disturb_signature_reports_per_band_normalization_mode() {
+    fn disturb_result_emits_legacy_signature_metadata() {
         let preset = crate::preset::Preset::default();
-        let config = DisturbConfig {
+        let mut config = DisturbConfig {
             duration_secs: 4.0,
             ..DisturbConfig::default()
         };
+        config.mode = DisturbanceMode::LegacyAblated;
         let result = run_disturb(&preset, &config);
+        assert_eq!(
+            result.model_signature.pipeline_variant,
+            PipelineVariant::DisturbLegacyAblated
+        );
         assert_eq!(
             result.model_signature.normalization_mode,
             NormalizationMode::PerBandPerEar
+        );
+    }
+
+    #[test]
+    fn canonical_disturb_zero_spike_matches_canonical_cortical_path() {
+        let mut preset = crate::preset::Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 2;
+        preset.objects[0].volume = 0.8;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 6.0;
+        preset.objects[0].bass_mod.param_b = 0.7;
+
+        let config = DisturbConfig {
+            duration_secs: 4.0,
+            spike_gain: 0.0,
+            ..DisturbConfig::default()
+        };
+        let disturb_result = run_disturb(&preset, &config);
+        let sim_cfg = config.canonical_simulation_config();
+        let eval = crate::pipeline::evaluate_preset_detailed(
+            &preset,
+            &crate::scoring::Goal::new(crate::scoring::GoalKind::Sleep),
+            &sim_cfg,
+        );
+
+        assert_eq!(
+            disturb_result.bilateral.combined.eeg.len(),
+            eval.bilateral.combined.eeg.len()
+        );
+        assert_eq!(
+            disturb_result.bilateral.combined.dominant_freq.to_bits(),
+            eval.bilateral.combined.dominant_freq.to_bits()
+        );
+        for (a, b) in disturb_result
+            .bilateral
+            .combined
+            .eeg
+            .iter()
+            .zip(eval.bilateral.combined.eeg.iter())
+        {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn canonical_and_legacy_disturb_metadata_are_explicitly_distinct() {
+        let mut preset = crate::preset::Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 0;
+        preset.objects[0].volume = 0.85;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 14.0;
+        preset.objects[0].bass_mod.param_b = 0.8;
+
+        let canonical = DisturbConfig {
+            duration_secs: 4.0,
+            ..DisturbConfig::default()
+        };
+        let mut legacy = DisturbConfig {
+            duration_secs: 4.0,
+            ..DisturbConfig::default()
+        };
+        legacy.mode = DisturbanceMode::LegacyAblated;
+
+        let canonical_result = run_disturb(&preset, &canonical);
+        let legacy_result = run_disturb(&preset, &legacy);
+
+        assert_eq!(
+            canonical_result.model_signature.pipeline_variant,
+            PipelineVariant::DisturbCanonical
+        );
+        assert_eq!(
+            legacy_result.model_signature.pipeline_variant,
+            PipelineVariant::DisturbLegacyAblated
+        );
+        assert_eq!(
+            canonical_result.model_signature.normalization_mode,
+            NormalizationMode::GlobalPerEar
+        );
+        assert_eq!(
+            legacy_result.model_signature.normalization_mode,
+            NormalizationMode::PerBandPerEar
+        );
+        assert!(
+            (canonical_result.baseline_dominant_freq - legacy_result.baseline_dominant_freq).abs()
+                > 1e-9
+                || (canonical_result.peak_freq_deviation - legacy_result.peak_freq_deviation).abs()
+                    > 1e-9
+        );
+    }
+
+    fn fixture_disturb_reference_preset() -> crate::preset::Preset {
+        let mut preset = crate::preset::Preset::default();
+        preset.source_count = 2;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 2; // brown
+        preset.objects[0].volume = 0.82;
+        preset.objects[0].x = -2.0;
+        preset.objects[0].reverb_send = 0.75;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 6.0;
+        preset.objects[0].bass_mod.param_b = 0.85;
+        preset.objects[0].satellite_mod.kind = 2;
+        preset.objects[0].satellite_mod.param_a = 3.0;
+        preset.objects[0].satellite_mod.param_b = 0.5;
+
+        preset.objects[1].active = true;
+        preset.objects[1].color = 0; // white
+        preset.objects[1].volume = 0.68;
+        preset.objects[1].x = 2.3;
+        preset.objects[1].bass_mod.kind = 5;
+        preset.objects[1].bass_mod.param_a = 14.0;
+        preset.objects[1].bass_mod.param_b = 0.65;
+        preset
+    }
+
+    #[test]
+    #[ignore]
+    fn print_disturb_stage1_golden_snapshots() {
+        let preset = fixture_disturb_reference_preset();
+        let canonical = DisturbConfig {
+            duration_secs: 6.0,
+            ..DisturbConfig::default()
+        };
+        let mut legacy = DisturbConfig {
+            duration_secs: 6.0,
+            ..DisturbConfig::default()
+        };
+        legacy.mode = DisturbanceMode::LegacyAblated;
+
+        let c = run_disturb(&preset, &canonical);
+        let l = run_disturb(&preset, &legacy);
+        println!(
+            "canonical: baseline_dom={:.15} peak_dev={:.15} bppr={:.15} spectral_resilience={:.15} baseline_centroid={:.15} brightness={:.15}",
+            c.baseline_dominant_freq,
+            c.peak_freq_deviation,
+            c.bppr,
+            c.spectral_resilience,
+            c.baseline_centroid,
+            c.brightness
+        );
+        println!(
+            "legacy: baseline_dom={:.15} peak_dev={:.15} bppr={:.15} spectral_resilience={:.15} baseline_centroid={:.15} brightness={:.15}",
+            l.baseline_dominant_freq,
+            l.peak_freq_deviation,
+            l.bppr,
+            l.spectral_resilience,
+            l.baseline_centroid,
+            l.brightness
+        );
+    }
+
+    #[test]
+    fn disturb_canonical_golden_snapshot_reference_case() {
+        let preset = fixture_disturb_reference_preset();
+        let config = DisturbConfig {
+            duration_secs: 6.0,
+            ..DisturbConfig::default()
+        };
+        let result = run_disturb(&preset, &config);
+
+        assert_eq!(
+            result.model_signature.pipeline_variant,
+            PipelineVariant::DisturbCanonical
+        );
+        assert_eq!(
+            result.model_signature.normalization_mode,
+            NormalizationMode::GlobalPerEar
+        );
+        assert!((result.baseline_dominant_freq - 16.294_642_857_142_858_f64).abs() < 1e-12);
+        assert!((result.baseline_centroid - 20.294_805_734_269_236_f64).abs() < 1e-12);
+        assert!((result.brightness - 0.488_127_418_119_048_f64).abs() < 1e-12);
+    }
+
+    #[test]
+    fn disturb_legacy_ablated_golden_snapshot_reference_case() {
+        let preset = fixture_disturb_reference_preset();
+        let mut config = DisturbConfig {
+            duration_secs: 6.0,
+            ..DisturbConfig::default()
+        };
+        config.mode = DisturbanceMode::LegacyAblated;
+        let result = run_disturb(&preset, &config);
+
+        assert_eq!(
+            result.model_signature.pipeline_variant,
+            PipelineVariant::DisturbLegacyAblated
+        );
+        assert_eq!(
+            result.model_signature.normalization_mode,
+            NormalizationMode::PerBandPerEar
+        );
+        assert!((result.baseline_dominant_freq - 7.840_401_785_714_286_f64).abs() < 1e-12);
+        assert!((result.baseline_centroid - 13.241_578_763_755_339_f64).abs() < 1e-12);
+        assert!((result.brightness - 0.488_127_418_119_048_f64).abs() < 1e-12);
+    }
+
+    #[test]
+    fn disturb_is_deterministic_with_fixed_spike_seeds() {
+        let preset = fixture_disturb_reference_preset();
+        let config = DisturbConfig {
+            duration_secs: 6.0,
+            ..DisturbConfig::default()
+        };
+        let r1 = run_disturb(&preset, &config);
+        let r2 = run_disturb(&preset, &config);
+
+        assert_eq!(r1.windows.len(), r2.windows.len());
+        assert_eq!(
+            r1.baseline_dominant_freq.to_bits(),
+            r2.baseline_dominant_freq.to_bits()
+        );
+        assert_eq!(
+            r1.baseline_centroid.to_bits(),
+            r2.baseline_centroid.to_bits()
+        );
+        assert_eq!(r1.bppr.to_bits(), r2.bppr.to_bits());
+        assert_eq!(
+            r1.spectral_resilience.to_bits(),
+            r2.spectral_resilience.to_bits()
         );
     }
 
