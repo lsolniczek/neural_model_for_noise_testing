@@ -139,6 +139,88 @@ pub struct SimulationConfig {
     /// this only affects Shield and Isolation scoring. All other goals keep
     /// the exact legacy NMM score path even when this flag is set.
     pub acoustic_score_fusion_enabled: bool,
+    /// Enable Priority 28 Phase 2 ε-constrained optimization.
+    ///
+    /// This is a **scoring-path semantics flag**, not a pipeline-side
+    /// computation flag. The pipeline still produces the standard
+    /// `SimulationResult` and the legacy `score` field; the optimizer's
+    /// constrained comparator is the consumer.
+    ///
+    /// Invariants enforced by `evaluate_preset_detailed`:
+    ///   1. `acoustic_constraints_enabled = true` requires
+    ///      `acoustic_scoring_enabled = true` (the comfort-violation
+    ///      function in `Goal::comfort_violation` reads
+    ///      `AcousticFeatureVector` fields, which are populated only when
+    ///      acoustic scoring is enabled).
+    ///   2. `acoustic_constraints_enabled = true` is incompatible with
+    ///      `acoustic_score_fusion_enabled = true` because the latter
+    ///      adds comfort terms to the score, while the former treats
+    ///      comfort as a separate constraint dimension. Combining the
+    ///      two double-counts comfort.
+    ///
+    /// Default `false` → legacy weighted-sum behaviour is preserved.
+    pub acoustic_constraints_enabled: bool,
+
+    // ── Priority 18 — Theta-Alpha Coexistence parameters ───────────────
+    //
+    // Three parameters previously hardcoded inside `evaluate_preset_detailed`.
+    // Promoted to `SimulationConfig` so they can be tuned per-run via CLI
+    // without recompilation. Defaults match the historical hardcoded values
+    // exactly, so legacy callers (those that build `SimulationConfig` via
+    // `..Default::default()`) get bit-identical behaviour.
+
+    /// Priority 18a — Stochastic noise σ on JR input drive `p`.
+    ///
+    /// Per Ableidinger, Buckwar & Hinterleitner (2017), noise on the
+    /// JR system can drive transitions between the alpha attractor
+    /// (~10 Hz limit cycle) and lower-frequency basins (theta/delta).
+    /// Their preferred placement is on the velocity state variables
+    /// (their σ₃, σ₄, σ₅), but our existing implementation places noise
+    /// on the input drive `p` — a different stochastic model that still
+    /// modulates basin escape, just less directly.
+    ///
+    /// Default 15.0 mirrors the pre-Priority-18 hardcoded constant.
+    /// Useful range: 50–300 for breaking single-attractor lock on
+    /// relaxation-family goals (Priority 18a Phase 1 sweep). Only takes
+    /// effect when `stochastic_jr_enabled = true`; otherwise σ is forced
+    /// to 0 so the model is fully deterministic.
+    ///
+    /// **Numerical stability note** (Ableidinger 2017 Fig. 9):
+    /// Euler-Maruyama produces spurious bifurcations at σ ≈ 1000 with
+    /// dt ∈ {1e-3, 2e-3, 5e-3}. Our RK4 integrator at dt = 1 ms is
+    /// adequate for σ ≤ 200; values much larger should be validated
+    /// case-by-case before production use.
+    pub jr_stochastic_sigma: f64,
+
+    /// Priority 18b — Slow inhibitory population decay rate `b_slow` (1/s)
+    /// for the CET parallel slow-GABA loop in JR.
+    ///
+    /// Per Ursino, Cona & Zavaglia (2010): a second inhibitory population
+    /// with a different time constant produces simultaneous multi-band
+    /// rhythms in a single column. At the pre-Priority-18 default of
+    /// 5.0 (τ = 200 ms), the slow population resonates near 0.8 Hz —
+    /// effectively a DC offset, not a theta oscillator. Increasing to
+    /// 25.0 (τ = 40 ms) places the resonance in the theta band (5–8 Hz)
+    /// and produces a more balanced theta/alpha ratio.
+    ///
+    /// Default 5.0 preserves legacy behaviour. Only takes effect when
+    /// `cet_enabled = true`; otherwise forced to 0.0.
+    pub cet_b_slow_rate: f64,
+
+    /// Priority 18b — Slow inhibitory population synaptic gain `B_slow` (mV)
+    /// for the CET parallel slow-GABA loop in JR.
+    ///
+    /// Per Wendling et al. (2002): the gain on the slow inhibitory
+    /// synapse controls whether the column produces alpha (B ≈ 45 in
+    /// their paper's scale), sporadic spikes (B ≈ 38), or gamma (B ≈ 8).
+    /// Our parameterisation uses a smaller absolute gain because the
+    /// slow population is additive on top of the standard Wendling-JR
+    /// fast inhibition; recommended range when retuning for theta is
+    /// 12–20 mV.
+    ///
+    /// Default 10.0 preserves legacy behaviour. Only takes effect when
+    /// `cet_enabled = true`; otherwise forced to 0.0.
+    pub cet_b_slow_gain: f64,
 }
 
 impl Default for SimulationConfig {
@@ -155,6 +237,10 @@ impl Default for SimulationConfig {
             physiological_thalamic_gate_enabled: false,
             acoustic_scoring_enabled: false,
             acoustic_score_fusion_enabled: false,
+            acoustic_constraints_enabled: false,
+            jr_stochastic_sigma: 15.0,
+            cet_b_slow_rate: 5.0,
+            cet_b_slow_gain: 10.0,
         }
     }
 }
@@ -247,6 +333,76 @@ pub(crate) fn spectral_brightness(audio: &[f32], sample_rate: f64) -> f64 {
     brightness
 }
 
+/// **HEURISTIC** — per-source volume range, in dB.
+///
+/// Returns `20·log10(max_volume / min_volume)` over the preset's
+/// active objects (`active=true` and `volume > 1e-4`). Encodes the
+/// user-facing `feedback_balanced_cocoon` rule: "active sources within
+/// ~6 dB of each other; no single source should dominate".
+///
+/// Returns `0.0` when zero or one source is effectively active (no
+/// pairwise comparison to make).
+///
+/// **What this is NOT.** It is not a K-weighted measurement of each
+/// source's perceptual SPL. It deliberately ignores color (white,
+/// pink, brown all have different K-weighted SPLs at the same volume
+/// parameter), tint EQ, modulator gain, spread, reverb send, and
+/// tone-source amplitude. Two sources at the same `volume` but
+/// different colors will sound different in practice and this proxy
+/// will not detect that imbalance.
+///
+/// **Why volume-only.**
+///   1. No extra audio rendering required (free at runtime).
+///   2. Directly mirrors the user-facing tuning rule.
+///   3. For the typical Shield / Sleep / Flow color mix (pink, brown,
+///      grey at similar RMS), volume ratios correlate reasonably with
+///      K-weighted SPL ratios.
+///
+/// **Upgrade path.** Render each active source in isolation for ~0.5 s,
+/// apply BS.1770-5 K-weighting, compute mean square per source,
+/// convert to dB and return max−min. This costs ~0.5 s per active
+/// source per evaluation. Worth doing if empirical tuning shows the
+/// volume-only proxy missing audible imbalances.
+/// **HEURISTIC** — Count of *effectively active* sources in the preset.
+///
+/// An object counts as effectively active when both `active=true` and
+/// `volume > 1e-4`. The volume floor matches the
+/// `compute_source_balance_db_range` helper so the two metrics agree on
+/// "what is active". Used by `Goal::comfort_violation` to penalise
+/// cocoon goals that collapse to 1–2 sources (which trivially satisfy
+/// the per-source loudness-equity constraint but defeat the design
+/// intent of a multi-source spatial cocoon).
+pub fn compute_active_source_count(preset: &Preset) -> u32 {
+    const VOLUME_FLOOR: f32 = 1e-4;
+    preset
+        .objects
+        .iter()
+        .filter(|obj| obj.active && obj.volume > VOLUME_FLOOR)
+        .count() as u32
+}
+
+pub fn compute_source_balance_db_range(preset: &Preset) -> f64 {
+    const VOLUME_FLOOR: f32 = 1e-4;
+    let active_volumes: Vec<f64> = preset
+        .objects
+        .iter()
+        .filter(|obj| obj.active && obj.volume > VOLUME_FLOOR)
+        .map(|obj| obj.volume as f64)
+        .collect();
+    if active_volumes.len() <= 1 {
+        return 0.0;
+    }
+    let max = active_volumes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min = active_volumes
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    if !(max.is_finite() && min.is_finite()) || min < VOLUME_FLOOR as f64 {
+        return 0.0;
+    }
+    20.0 * (max / min).log10()
+}
+
 /// Evaluate a preset against a goal.
 ///
 /// This is the core function the optimizer calls for each candidate.
@@ -306,6 +462,9 @@ pub(crate) fn render_preset_ear_signals(
     duration_secs: f32,
 ) -> RenderedStereoAudio {
     let rendered = render_preset_stereo_dry(preset, duration_secs);
+    if preset.room.uses_image_source() {
+        return rendered;
+    }
     let env_params = EnvironmentParams::from_index(preset.environment);
     if env_params.is_anechoic() {
         rendered
@@ -331,12 +490,32 @@ pub fn evaluate_preset_detailed(
     if config.acoustic_score_fusion_enabled && !config.acoustic_scoring_enabled {
         panic!("invalid SimulationConfig: acoustic score fusion requires acoustic scoring");
     }
+    // Priority 28 Phase 2 invariants — see `acoustic_constraints_enabled`
+    // doc comment. Constraints need the comfort metrics to compute the
+    // violation, and they cannot coexist with fusion (double-count).
+    if config.acoustic_constraints_enabled && !config.acoustic_scoring_enabled {
+        panic!("invalid SimulationConfig: acoustic constraints require acoustic scoring");
+    }
+    if config.acoustic_constraints_enabled && config.acoustic_score_fusion_enabled {
+        panic!(
+            "invalid SimulationConfig: acoustic constraints are incompatible with acoustic score fusion (would double-count comfort)"
+        );
+    }
 
     let rendered_audio = render_preset_ear_signals(preset, config.duration_secs);
     let sr = rendered_audio.sample_rate_hz as f64;
     let mut acoustic_score = config
         .acoustic_scoring_enabled
         .then(|| extract_score_result_v1(&rendered_audio));
+    // Priority 28 §28b — per-source loudness equity. Computed from the
+    // preset itself (volume-only proxy) and stitched into the acoustic
+    // feature vector when scoring is enabled. Independent of the audio
+    // render — see `compute_source_balance_db_range` doc for the
+    // approximation note.
+    if let Some(payload) = acoustic_score.as_mut() {
+        payload.features.source_balance_db_range = Some(compute_source_balance_db_range(preset));
+        payload.features.active_source_count = Some(compute_active_source_count(preset));
+    }
     let acoustic_render = config
         .acoustic_scoring_enabled
         .then(|| rendered_audio.clone());
@@ -587,14 +766,20 @@ pub fn evaluate_preset_detailed(
 
     // input_scale is no longer modified by ASSR — ASSR operates on signal AC only.
     //
-    // CET 13b — Slow GABA_B (CET-relevant slow inhibitory loop, τ ≈ 200 ms).
+    // CET 13b — Slow GABA_B (CET-relevant slow inhibitory loop).
     // Per Moran & Friston (2011) canonical microcircuit and Ghitza (2011)
     // cascaded oscillator: CET requires a slow inhibitory feedback that
     // canonical Wendling-JR lacks. When `cet_enabled = true`, we enable the
-    // additive parallel slow population in JR with these parameters.
-    // Default 0.0 → bitwise-identical to pre-CET model.
+    // additive parallel slow population in JR with the configured params.
+    //
+    // Priority 18b — `cet_b_slow_gain` and `cet_b_slow_rate` are now
+    // configurable via `SimulationConfig`. Defaults (10.0, 5.0) reproduce
+    // the historical hardcoded constants and so preserve bit-identical
+    // legacy behaviour. The Ursino-recommended retuning for theta-alpha
+    // coexistence is approximately (gain ≈ 18, rate ≈ 25); see the doc
+    // comments on those fields.
     let (b_slow_gain, b_slow_rate, c_slow) = if config.cet_enabled {
-        (10.0, 5.0, 30.0)
+        (config.cet_b_slow_gain, config.cet_b_slow_rate, 30.0)
     } else {
         (0.0, 0.0, 0.0)
     };
@@ -620,8 +805,12 @@ pub fn evaluate_preset_detailed(
         } else {
             0.0
         },
+        // Priority 18a — JR stochastic noise σ on input drive `p`.
+        // Default 15.0 (preserved by SimulationConfig::default) gives
+        // bit-identical legacy behaviour. Disabled (σ = 0) when the
+        // top-level stochastic flag is off.
         if config.stochastic_jr_enabled {
-            15.0
+            config.jr_stochastic_sigma
         } else {
             0.0
         },
@@ -872,6 +1061,120 @@ mod tests {
         preset
     }
 
+    /// Helper: build a preset with the given vector of (active, volume)
+    /// pairs. Used by §28b source-balance tests.
+    fn preset_with_volumes(volumes: &[(bool, f32)]) -> crate::preset::Preset {
+        let mut preset = crate::preset::Preset::default();
+        for (i, &(active, vol)) in volumes
+            .iter()
+            .take(crate::preset::MAX_OBJECTS)
+            .enumerate()
+        {
+            preset.objects[i].active = active;
+            preset.objects[i].color = 1;
+            preset.objects[i].volume = vol;
+        }
+        preset.source_count = volumes
+            .iter()
+            .filter(|(a, v)| *a && *v > 1e-4)
+            .count() as u32;
+        preset
+    }
+
+    // ── Priority 28 §28b — compute_source_balance_db_range ────────────
+
+    #[test]
+    fn source_balance_zero_for_empty_preset() {
+        let p = crate::preset::Preset::default();
+        assert_eq!(compute_source_balance_db_range(&p), 0.0);
+    }
+
+    #[test]
+    fn source_balance_zero_for_single_active_source() {
+        let p = preset_with_volumes(&[(true, 0.5)]);
+        assert_eq!(compute_source_balance_db_range(&p), 0.0);
+    }
+
+    #[test]
+    fn source_balance_zero_for_equal_volumes() {
+        let p = preset_with_volumes(&[(true, 0.3), (true, 0.3), (true, 0.3)]);
+        assert!(compute_source_balance_db_range(&p).abs() < 1e-12);
+    }
+
+    #[test]
+    fn source_balance_matches_log_ratio() {
+        // 0.5 / 0.25 = 2× → 6.02 dB
+        let p = preset_with_volumes(&[(true, 0.5), (true, 0.25)]);
+        let r = compute_source_balance_db_range(&p);
+        assert!(
+            (r - 6.0).abs() < 0.05,
+            "2× volume ratio should be ~6 dB, got {r:.4}"
+        );
+    }
+
+    #[test]
+    fn source_balance_ignores_inactive_sources() {
+        // 0.5 active and 0.05 inactive → only 0.5 counts → 0 dB
+        let p = preset_with_volumes(&[(true, 0.5), (false, 0.05)]);
+        assert_eq!(compute_source_balance_db_range(&p), 0.0);
+    }
+
+    #[test]
+    fn source_balance_ignores_below_volume_floor() {
+        // active but vol < 1e-4 is treated as silent
+        let p = preset_with_volumes(&[(true, 0.5), (true, 1e-6)]);
+        assert_eq!(compute_source_balance_db_range(&p), 0.0);
+    }
+
+    #[test]
+    fn source_balance_seed_shield_v5_within_six_db() {
+        // Seed preset volumes from presets/normal_set_shield_v5.json:
+        // 0.35, 0.35, 0.35, 0.20, 0.22 → 20·log10(0.35/0.20) ≈ 4.86 dB
+        let p = preset_with_volumes(&[
+            (true, 0.35),
+            (true, 0.35),
+            (true, 0.35),
+            (true, 0.20),
+            (true, 0.22),
+        ]);
+        let r = compute_source_balance_db_range(&p);
+        assert!(
+            (r - 4.86).abs() < 0.1,
+            "shield_v5 source balance should be ~4.86 dB, got {r:.4}"
+        );
+        assert!(r < 6.0, "shield_v5 should be within Shield's 6 dB threshold");
+    }
+
+    /// Pin the imbalance-detection contract using volumes from the
+    /// optimized preset that motivated §28b: vols 0.28, 0.28, 0.11, 0.51
+    /// → range 20·log10(0.51/0.11) ≈ 13.3 dB, well past any goal threshold.
+    #[test]
+    fn source_balance_dominant_source_violates_six_db() {
+        let p = preset_with_volumes(&[
+            (true, 0.28),
+            (true, 0.28),
+            (false, 0.0), // skipped (vol 0)
+            (true, 0.11),
+            (true, 0.51),
+        ]);
+        let r = compute_source_balance_db_range(&p);
+        assert!(
+            (r - 13.3).abs() < 0.1,
+            "dominant-source preset should be ~13.3 dB, got {r:.4}"
+        );
+        assert!(r > 6.0, "must violate Shield's 6 dB threshold");
+        assert!(r > 8.0, "must violate even the looser 8 dB threshold");
+    }
+
+    #[test]
+    fn source_balance_finite_under_extreme_volume_ratio() {
+        // Two sources with volumes 1.0 and 1e-3 → range ≈ 60 dB.
+        let p = preset_with_volumes(&[(true, 1.0), (true, 1e-3)]);
+        let r = compute_source_balance_db_range(&p);
+        assert!(r.is_finite());
+        assert!((r - 60.0).abs() < 0.5, "1000× ratio should be ~60 dB, got {r:.3}");
+    }
+
     #[test]
     fn render_preset_ear_signals_short_silence_is_finite() {
         let rendered = render_preset_ear_signals(&crate::preset::Preset::default(), 0.25);
@@ -901,6 +1204,58 @@ mod tests {
         };
 
         let _ = evaluate_preset_detailed(&preset, &goal, &config);
+    }
+
+    #[test]
+    #[should_panic(expected = "acoustic constraints require acoustic scoring")]
+    fn acoustic_constraints_require_acoustic_scoring() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            acoustic_scoring_enabled: false,
+            acoustic_constraints_enabled: true,
+            ..SimulationConfig::default()
+        };
+        let _ = evaluate_preset_detailed(&preset, &goal, &config);
+    }
+
+    #[test]
+    #[should_panic(expected = "acoustic constraints are incompatible with acoustic score fusion")]
+    fn acoustic_constraints_incompatible_with_fusion() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            acoustic_scoring_enabled: true,
+            acoustic_score_fusion_enabled: true,
+            acoustic_constraints_enabled: true,
+            ..SimulationConfig::default()
+        };
+        let _ = evaluate_preset_detailed(&preset, &goal, &config);
+    }
+
+    #[test]
+    fn acoustic_constraints_with_scoring_alone_is_ok() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            acoustic_scoring_enabled: true,
+            acoustic_score_fusion_enabled: false,
+            acoustic_constraints_enabled: true,
+            ..SimulationConfig::default()
+        };
+        // Must not panic — this is the production constrained-mode config.
+        let result = evaluate_preset_detailed(&preset, &goal, &config);
+        // Acoustic features must be populated so comfort_violation has data.
+        let acoustic = result
+            .summary
+            .acoustic_score
+            .as_ref()
+            .expect("acoustic_score must be populated when scoring is enabled");
+        assert!(acoustic.features.lufs_integrated.is_some());
+        assert!(acoustic.features.spectral_tilt_db_per_oct.is_some());
     }
 
     // ---------------------------------------------------------------
@@ -993,6 +1348,153 @@ mod tests {
         assert_eq!(config.duration_secs, 12.0);
         assert_eq!(config.warmup_discard_secs, DEFAULT_WARMUP_DISCARD_SECS);
         assert_eq!(config.brain_type, BrainType::Normal);
+    }
+
+    /// **Priority 18 backward-compat pin.** The new SimulationConfig
+    /// fields (`jr_stochastic_sigma`, `cet_b_slow_rate`, `cet_b_slow_gain`)
+    /// must default to the historical hardcoded constants, otherwise
+    /// every existing call site that builds `SimulationConfig` via
+    /// `..Default::default()` would silently shift behaviour.
+    #[test]
+    fn priority18_default_params_match_pre_p18_constants() {
+        let config = SimulationConfig::default();
+        assert_eq!(
+            config.jr_stochastic_sigma, 15.0,
+            "default JR sigma must match pre-P18 hardcoded constant"
+        );
+        assert_eq!(
+            config.cet_b_slow_rate, 5.0,
+            "default CET b_slow rate must match pre-P18 hardcoded constant"
+        );
+        assert_eq!(
+            config.cet_b_slow_gain, 10.0,
+            "default CET B_slow gain must match pre-P18 hardcoded constant"
+        );
+    }
+
+    /// Changing `jr_stochastic_sigma` must change the EEG output (sanity
+    /// check that the new field is wired through, not silently ignored).
+    #[test]
+    fn priority18_jr_sigma_change_alters_output() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config_legacy = SimulationConfig {
+            duration_secs: 3.0,
+            ..SimulationConfig::default()
+        };
+        let config_high = SimulationConfig {
+            duration_secs: 3.0,
+            jr_stochastic_sigma: 200.0,
+            ..SimulationConfig::default()
+        };
+
+        let r_legacy = evaluate_preset(&preset, &goal, &config_legacy);
+        let r_high = evaluate_preset(&preset, &goal, &config_high);
+
+        // High sigma should noticeably alter band powers vs default sigma=15.
+        // We don't pin direction (depends on attractor structure), only that
+        // some metric moved by more than measurement noise.
+        let any_band_changed = (r_legacy.delta_power - r_high.delta_power).abs() > 1e-6
+            || (r_legacy.theta_power - r_high.theta_power).abs() > 1e-6
+            || (r_legacy.alpha_power - r_high.alpha_power).abs() > 1e-6
+            || (r_legacy.beta_power - r_high.beta_power).abs() > 1e-6;
+        assert!(
+            any_band_changed,
+            "jr_stochastic_sigma must affect band powers; got identical bands at sigma=15 and sigma=200"
+        );
+    }
+
+    /// Changing `cet_b_slow_rate` must change the EEG output (sanity
+    /// check that the new field is wired through, only when CET is on).
+    #[test]
+    fn priority18_b_slow_rate_change_alters_output_with_cet() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config_legacy = SimulationConfig {
+            duration_secs: 3.0,
+            cet_enabled: true,
+            ..SimulationConfig::default()
+        };
+        let config_retuned = SimulationConfig {
+            duration_secs: 3.0,
+            cet_enabled: true,
+            cet_b_slow_rate: 25.0,
+            cet_b_slow_gain: 18.0,
+            ..SimulationConfig::default()
+        };
+
+        let r_legacy = evaluate_preset(&preset, &goal, &config_legacy);
+        let r_retuned = evaluate_preset(&preset, &goal, &config_retuned);
+
+        let any_band_changed = (r_legacy.delta_power - r_retuned.delta_power).abs() > 1e-6
+            || (r_legacy.theta_power - r_retuned.theta_power).abs() > 1e-6
+            || (r_legacy.alpha_power - r_retuned.alpha_power).abs() > 1e-6
+            || (r_legacy.beta_power - r_retuned.beta_power).abs() > 1e-6;
+        assert!(
+            any_band_changed,
+            "cet_b_slow_rate / cet_b_slow_gain must affect band powers when CET is enabled"
+        );
+    }
+
+    /// CET-off path must ignore the new `cet_b_slow_*` parameters
+    /// entirely — they only take effect when `cet_enabled = true`.
+    #[test]
+    fn priority18_b_slow_params_ignored_when_cet_disabled() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config_a = SimulationConfig {
+            duration_secs: 3.0,
+            cet_enabled: false,
+            ..SimulationConfig::default()
+        };
+        let config_b = SimulationConfig {
+            duration_secs: 3.0,
+            cet_enabled: false,
+            cet_b_slow_rate: 25.0,
+            cet_b_slow_gain: 18.0,
+            ..SimulationConfig::default()
+        };
+
+        let r_a = evaluate_preset(&preset, &goal, &config_a);
+        let r_b = evaluate_preset(&preset, &goal, &config_b);
+
+        // CET disabled → both runs should produce bit-identical results.
+        assert_eq!(
+            r_a.delta_power, r_b.delta_power,
+            "CET-off must ignore cet_b_slow_rate"
+        );
+        assert_eq!(r_a.alpha_power, r_b.alpha_power);
+        assert_eq!(r_a.score, r_b.score);
+    }
+
+    /// stochastic_jr_enabled = false must force σ to 0 regardless of
+    /// `jr_stochastic_sigma` value, preserving the deterministic-mode
+    /// invariant (same input → bit-identical output).
+    #[test]
+    fn priority18_stochastic_off_overrides_jr_sigma() {
+        let preset = simple_active_preset();
+        let goal = crate::scoring::Goal::new(crate::scoring::GoalKind::Shield);
+        let config_a = SimulationConfig {
+            duration_secs: 3.0,
+            stochastic_jr_enabled: false,
+            jr_stochastic_sigma: 15.0,
+            ..SimulationConfig::default()
+        };
+        let config_b = SimulationConfig {
+            duration_secs: 3.0,
+            stochastic_jr_enabled: false,
+            jr_stochastic_sigma: 200.0, // would matter if stoch were on
+            ..SimulationConfig::default()
+        };
+
+        let r_a = evaluate_preset(&preset, &goal, &config_a);
+        let r_b = evaluate_preset(&preset, &goal, &config_b);
+
+        assert_eq!(
+            r_a.delta_power, r_b.delta_power,
+            "stochastic_jr_enabled=false must zero σ regardless of jr_stochastic_sigma"
+        );
+        assert_eq!(r_a.score, r_b.score);
     }
 
     #[test]
@@ -1099,6 +1601,7 @@ mod tests {
         p.objects[0] = ObjectConfig {
             active: true,
             color: 1, // pink
+            position_space: 0,
             x: 0.0,
             y: 0.0,
             z: 1.5,

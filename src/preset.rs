@@ -4,7 +4,10 @@
 /// that the optimizer can search over. Handles encoding/decoding
 /// of mixed continuous and discrete parameters.
 use crate::movement::MovementConfig;
-use noise_generator_core::{AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine};
+use noise_generator_core::{
+    AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine, RoomGeometryPreset, RoomMode,
+    WallMaterial,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -26,6 +29,108 @@ pub const MAX_OBJECTS: usize = 8;
 // but intentionally excluded from the optimizer genome for now. That keeps the
 // preset / surrogate contract stable while we validate the DSP control.
 pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 28;
+pub const ANCHOR_COLOR_GENE_IDX: usize = 3;
+pub const ANCHOR_VOLUME_GENE_IDX: usize = 4;
+const ROOM_MODE_MAX: u8 = 1;
+const ROOM_PRESET_MAX: u8 = 3;
+const WALL_MATERIAL_MAX: u8 = 6;
+const OBJECT_POSITION_SPACE_MAX: u8 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomDimensionsConfig {
+    pub width_m: f32,
+    pub depth_m: f32,
+    pub height_m: f32,
+}
+
+impl RoomDimensionsConfig {
+    fn clamp(&mut self) {
+        if self.width_m.is_finite() {
+            self.width_m = self.width_m.clamp(1.5, 20.0);
+        }
+        if self.depth_m.is_finite() {
+            self.depth_m = self.depth_m.clamp(1.5, 20.0);
+        }
+        if self.height_m.is_finite() {
+            self.height_m = self.height_m.clamp(1.5, 10.0);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomMaterialsConfig {
+    pub left: u8,
+    pub right: u8,
+    pub floor: u8,
+    pub ceiling: u8,
+    pub back: u8,
+    pub front: u8,
+}
+
+impl RoomMaterialsConfig {
+    fn clamp(&mut self) {
+        self.left = self.left.min(WALL_MATERIAL_MAX);
+        self.right = self.right.min(WALL_MATERIAL_MAX);
+        self.floor = self.floor.min(WALL_MATERIAL_MAX);
+        self.ceiling = self.ceiling.min(WALL_MATERIAL_MAX);
+        self.back = self.back.min(WALL_MATERIAL_MAX);
+        self.front = self.front.min(WALL_MATERIAL_MAX);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomConfig {
+    #[serde(default)]
+    pub mode: u8, // 0=Legacy, 1=ImageSource
+    #[serde(default)]
+    pub preset: Option<u8>, // 0=Bedroom, 1=Studio, 2=Bathroom, 3=Hallway
+    #[serde(default)]
+    pub dimensions: Option<RoomDimensionsConfig>,
+    #[serde(default)]
+    pub reflectivity: Option<f32>,
+    #[serde(default)]
+    pub materials: Option<RoomMaterialsConfig>,
+}
+
+impl Default for RoomConfig {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            preset: None,
+            dimensions: None,
+            reflectivity: None,
+            materials: None,
+        }
+    }
+}
+
+impl RoomConfig {
+    fn clamp(&mut self) {
+        self.mode = self.mode.min(ROOM_MODE_MAX);
+        if let Some(preset) = &mut self.preset {
+            *preset = (*preset).min(ROOM_PRESET_MAX);
+        }
+        if let Some(dimensions) = &mut self.dimensions {
+            dimensions.clamp();
+        }
+        if let Some(reflectivity) = &mut self.reflectivity {
+            if reflectivity.is_finite() {
+                *reflectivity = reflectivity.clamp(0.0, 1.5);
+            }
+        }
+        if let Some(materials) = &mut self.materials {
+            materials.clamp();
+        }
+    }
+
+    pub fn uses_image_source(&self) -> bool {
+        self.mode == RoomMode::ImageSource as u8
+    }
+
+    fn room_mode(&self) -> RoomMode {
+        RoomMode::from_u8(self.mode)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModConfig {
@@ -121,6 +226,9 @@ impl ModConfig {
 pub struct ObjectConfig {
     pub active: bool,
     pub color: u8, // 0–6
+    /// Coordinate space: 0=WorldMeters, 1=RoomNormalized, 2=RoomMeters.
+    #[serde(default)]
+    pub position_space: u8,
     pub x: f32,
     pub y: f32,
     pub z: f32,
@@ -159,6 +267,7 @@ impl Default for ObjectConfig {
         ObjectConfig {
             active: false,
             color: 0,
+            position_space: 0,
             x: 0.0,
             y: 0.0,
             z: 1.0,
@@ -180,9 +289,24 @@ impl Default for ObjectConfig {
 impl ObjectConfig {
     fn clamp(&mut self) {
         self.color = self.color.min(7); // 0-7: White,Pink,Brown,Green,Grey,Black,SSN,Blue
-        self.x = self.x.clamp(-5.0, 5.0);
-        self.y = self.y.clamp(-3.0, 3.0);
-        self.z = self.z.clamp(-5.0, 5.0);
+        self.position_space = self.position_space.min(OBJECT_POSITION_SPACE_MAX);
+        match self.position_space {
+            1 => {
+                self.x = self.x.clamp(-1.0, 1.0);
+                self.y = self.y.clamp(-1.0, 1.0);
+                self.z = self.z.clamp(-1.0, 1.0);
+            }
+            2 => {
+                self.x = self.x.clamp(-10.0, 10.0);
+                self.y = self.y.clamp(-5.0, 5.0);
+                self.z = self.z.clamp(-10.0, 10.0);
+            }
+            _ => {
+                self.x = self.x.clamp(-5.0, 5.0);
+                self.y = self.y.clamp(-3.0, 3.0);
+                self.z = self.z.clamp(-5.0, 5.0);
+            }
+        }
         self.volume = self.volume.clamp(0.0, 1.0);
         self.reverb_send = self.reverb_send.clamp(0.0, 1.0);
         self.spread = self.spread.clamp(0.0, 1.0);
@@ -213,6 +337,8 @@ pub struct Preset {
     pub anchor_color: u8,  // 0–6
     pub anchor_volume: f32,
     pub environment: u8, // 0–4 (AcousticEnvironment)
+    #[serde(default)]
+    pub room: RoomConfig,
     pub objects: Vec<ObjectConfig>,
 }
 
@@ -225,6 +351,7 @@ impl Default for Preset {
             anchor_color: 2, // Brown
             anchor_volume: 0.0,
             environment: 0,
+            room: RoomConfig::default(),
             objects: (0..MAX_OBJECTS).map(|_| ObjectConfig::default()).collect(),
         }
     }
@@ -239,6 +366,7 @@ impl Preset {
         self.anchor_color = self.anchor_color.min(6);
         self.anchor_volume = self.anchor_volume.clamp(0.0, 1.0);
         self.environment = self.environment.min(4);
+        self.room.clamp();
         for obj in &mut self.objects {
             obj.clamp();
         }
@@ -271,6 +399,26 @@ impl Preset {
             _ => AcousticEnvironment::DeepSanctuary,
         };
         engine.set_acoustic_environment(env);
+        engine.set_room_mode(self.room.room_mode());
+        if let Some(preset) = self.room.preset {
+            engine.set_room_preset(RoomGeometryPreset::from_u8(preset));
+        }
+        if let Some(dimensions) = &self.room.dimensions {
+            engine.set_room_dimensions(dimensions.width_m, dimensions.depth_m, dimensions.height_m);
+        }
+        if let Some(reflectivity) = self.room.reflectivity {
+            engine.set_room_reflectivity(reflectivity);
+        }
+        if let Some(materials) = &self.room.materials {
+            engine.set_wall_materials(
+                WallMaterial::from_u8(materials.left),
+                WallMaterial::from_u8(materials.right),
+                WallMaterial::from_u8(materials.floor),
+                WallMaterial::from_u8(materials.ceiling),
+                WallMaterial::from_u8(materials.back),
+                WallMaterial::from_u8(materials.front),
+            );
+        }
 
         // Flush spatial mode change so that apply_pending_config runs before
         // we set object params (otherwise it re-syncs and overwrites them).
@@ -288,6 +436,11 @@ impl Preset {
                 obj.volume,
                 obj.reverb_send,
             );
+            match obj.position_space {
+                1 => engine.set_object_room_position(i as u32, obj.x, obj.y, obj.z),
+                2 => engine.set_object_room_position_meters(i as u32, obj.x, obj.y, obj.z),
+                _ => {}
+            }
             engine.set_object_spread(i as u32, if obj.active { obj.spread } else { 0.0 });
             engine.set_bass_modulator(
                 i as u32,
@@ -389,6 +542,7 @@ impl Preset {
             anchor_color: g[3].round() as u8,
             anchor_volume: g[4] as f32,
             environment: g[5].round() as u8,
+            room: RoomConfig::default(),
             objects: Vec::with_capacity(MAX_OBJECTS),
         };
 
@@ -397,6 +551,7 @@ impl Preset {
             let obj = ObjectConfig {
                 active: g[base] > 0.5,
                 color: g[base + 1].round() as u8,
+                position_space: 0,
                 x: g[base + 2] as f32,
                 y: g[base + 3] as f32,
                 z: g[base + 4] as f32,
@@ -518,6 +673,26 @@ impl Preset {
 
         b
     }
+
+    /// Optimizer bounds with the global anchor disabled.
+    ///
+    /// This freezes `anchor_volume` at 0.0 so every audible source is rendered
+    /// through the normal object/HRTF path instead of the non-spatial anchor.
+    /// `anchor_color` is also frozen to 0 to avoid wasting a discrete search
+    /// dimension on a muted parameter.
+    pub fn bounds_with_anchor_disabled() -> Vec<(f64, f64)> {
+        let mut b = Self::bounds();
+        b[ANCHOR_COLOR_GENE_IDX] = (0.0, 0.0);
+        b[ANCHOR_VOLUME_GENE_IDX] = (0.0, 0.0);
+        b
+    }
+
+    /// Force the anchor genes to a muted state inside a flat optimizer genome.
+    pub fn disable_anchor_in_genome(genome: &mut [f64]) {
+        assert!(genome.len() >= GENOME_LEN, "genome too short");
+        genome[ANCHOR_COLOR_GENE_IDX] = 0.0;
+        genome[ANCHOR_VOLUME_GENE_IDX] = 0.0;
+    }
 }
 
 #[cfg(test)]
@@ -549,6 +724,13 @@ mod tests {
         for (i, (lo, hi)) in Preset::bounds().iter().enumerate() {
             assert!(lo <= hi, "Gene {i}: min {lo} > max {hi}");
         }
+    }
+
+    #[test]
+    fn anchor_disabled_bounds_freeze_anchor_genes() {
+        let b = Preset::bounds_with_anchor_disabled();
+        assert_eq!(b[ANCHOR_COLOR_GENE_IDX], (0.0, 0.0));
+        assert_eq!(b[ANCHOR_VOLUME_GENE_IDX], (0.0, 0.0));
     }
 
     // ---------------------------------------------------------------
@@ -627,6 +809,8 @@ mod tests {
             serde_json::from_str(include_str!("../presets/normal_set_shield_v3.json"))
                 .expect("legacy preset should deserialize without spread");
         assert!(preset.objects.iter().all(|obj| obj.spread == 0.0));
+        assert!(preset.objects.iter().all(|obj| obj.position_space == 0));
+        assert_eq!(preset.room, RoomConfig::default());
     }
 
     #[test]
@@ -804,6 +988,19 @@ mod tests {
     }
 
     #[test]
+    fn clamp_enforces_room_normalized_position_bounds() {
+        let mut p = Preset::default();
+        p.objects[0].position_space = 1;
+        p.objects[0].x = 100.0;
+        p.objects[0].y = -100.0;
+        p.objects[0].z = 100.0;
+        p.clamp();
+        assert_eq!(p.objects[0].x, 1.0);
+        assert_eq!(p.objects[0].y, -1.0);
+        assert_eq!(p.objects[0].z, 1.0);
+    }
+
+    #[test]
     fn clamp_enforces_mod_params() {
         let mut p = Preset::default();
         p.objects[0].bass_mod = ModConfig {
@@ -858,6 +1055,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn disable_anchor_in_genome_zeros_anchor_fields() {
+        let mut genome = Preset::default().to_genome();
+        genome[ANCHOR_COLOR_GENE_IDX] = 6.0;
+        genome[ANCHOR_VOLUME_GENE_IDX] = 0.73;
+        Preset::disable_anchor_in_genome(&mut genome);
+        assert_eq!(genome[ANCHOR_COLOR_GENE_IDX], 0.0);
+        assert_eq!(genome[ANCHOR_VOLUME_GENE_IDX], 0.0);
+        let decoded = Preset::from_genome(&genome);
+        assert_eq!(decoded.anchor_color, 0);
+        assert_eq!(decoded.anchor_volume, 0.0);
+    }
+
     // ---------------------------------------------------------------
     // Default preset structure
     // ---------------------------------------------------------------
@@ -888,5 +1098,17 @@ mod tests {
 
         assert!((engine.object_spread(0) - 0.65).abs() < 1e-6);
         assert_eq!(engine.object_spread(1), 0.0);
+    }
+
+    #[test]
+    fn apply_to_engine_sets_image_source_room_mode() {
+        let engine = NoiseEngine::new(48_000, 0.8);
+        let mut preset = Preset::default();
+        preset.room.mode = RoomMode::ImageSource as u8;
+        preset.room.preset = Some(2);
+
+        preset.apply_to_engine(&engine);
+
+        assert_eq!(engine.room_mode(), RoomMode::ImageSource);
     }
 }

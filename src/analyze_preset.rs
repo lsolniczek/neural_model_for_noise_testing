@@ -14,6 +14,7 @@ mod tests {
         objects[0] = ObjectConfig {
             active: true,
             color: 2, // brown vol 0.5
+            position_space: 0,
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -43,6 +44,7 @@ mod tests {
         objects[1] = ObjectConfig {
             active: true,
             color: 4, // grey vol 0.7, static at x:1, depth 0.8
+            position_space: 0,
             x: 1.0,
             y: 0.0,
             z: 1.0,
@@ -73,6 +75,7 @@ mod tests {
         objects[4] = ObjectConfig {
             active: true,
             color: 4, // grey vol 0.7, static at x:-1
+            position_space: 0,
             x: -1.0,
             y: 0.0,
             z: 1.0,
@@ -102,6 +105,7 @@ mod tests {
         objects[2] = ObjectConfig {
             active: true,
             color: 6, // SSN vol 1.0, neuralLfo bass + stochastic sat
+            position_space: 0,
             x: 0.0,
             y: 0.0,
             z: 1.0,
@@ -140,6 +144,7 @@ mod tests {
         objects[3] = ObjectConfig {
             active: true,
             color: 1, // pink vol 0.5, flat mods
+            position_space: 0,
             x: 0.0,
             y: 0.0,
             z: 2.0,
@@ -173,6 +178,7 @@ mod tests {
             anchor_color: 0,
             anchor_volume: 0.0,
             environment: 1, // FocusRoom
+            room: crate::preset::RoomConfig::default(),
             objects,
         };
         preset.clamp();
@@ -220,6 +226,7 @@ mod tests {
             objects[0] = ObjectConfig {
                 active: true,
                 color: 2,
+                position_space: 0,
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -254,6 +261,7 @@ mod tests {
             objects[1] = ObjectConfig {
                 active: true,
                 color: 4,
+                position_space: 0,
                 x: 1.0,
                 y: 0.0,
                 z: 1.0,
@@ -272,6 +280,7 @@ mod tests {
             objects[4] = ObjectConfig {
                 active: true,
                 color: 4,
+                position_space: 0,
                 x: -1.0,
                 y: 0.0,
                 z: 1.0,
@@ -290,6 +299,7 @@ mod tests {
             objects[2] = ObjectConfig {
                 active: true,
                 color: 6,
+                position_space: 0,
                 x: 0.0,
                 y: 0.0,
                 z: 1.0,
@@ -327,6 +337,7 @@ mod tests {
             objects[3] = ObjectConfig {
                 active: true,
                 color: 1,
+                position_space: 0,
                 x: 0.0,
                 y: 0.0,
                 z: 2.0,
@@ -359,6 +370,7 @@ mod tests {
                 anchor_color: 0,
                 anchor_volume: 0.0,
                 environment: 1,
+                room: crate::preset::RoomConfig::default(),
                 objects,
             };
             preset.clamp();

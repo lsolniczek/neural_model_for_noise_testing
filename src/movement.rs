@@ -128,6 +128,7 @@ impl MovementConfig {
 
 struct SatelliteState {
     index: u32,
+    position_space: u8,
     pattern: MovementPattern,
     radius: f32,
     speed: f64,
@@ -189,6 +190,7 @@ impl MovementController {
             let mv = &obj.movement;
             satellites.push(SatelliteState {
                 index: i as u32,
+                position_space: obj.position_space,
                 pattern,
                 radius: mv.radius,
                 speed: mv.speed as f64,
@@ -290,7 +292,11 @@ impl MovementController {
                 }
             };
 
-            engine.set_object_position(sat.index, x, y, z);
+            match sat.position_space {
+                1 => engine.set_object_room_position(sat.index, x, y, z),
+                2 => engine.set_object_room_position_meters(sat.index, x, y, z),
+                _ => engine.set_object_position(sat.index, x, y, z),
+            }
         }
     }
 

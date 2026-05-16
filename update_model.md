@@ -1620,6 +1620,264 @@ Possible implementation directions:
 - [ ] **Ref:** (2024). "40 Hz Steady-State Response in Human Auditory Cortex Is Shaped by Gabaergic Neuronal Inhibition." *J Neurosci* 44(24):e2029232024. — Connects inhibitory kinetics to the strength and quality of 40 Hz locking; supports treating gamma ASSR as a timing/coherence phenomenon, not only an amplitude phenomenon.
 - [ ] **Ref:** Ross B, Borgmann C, Draganova R, Roberts LE, Pantev C (2000). "A high-precision magnetoencephalographic study of human auditory steady-state responses to amplitude-modulated tones." *J Acoust Soc Am* 108(2):679-691. — Classic empirical basis for the exceptional robustness of 40 Hz ASSRs in humans.
 
+## Priority 28: Optimizer-Side Acoustic Comfort Constraints and Constrained-DE Ranking (HIGH IMPACT, MEDIUM EFFORT — SHIPPED 2026-05-01)
+
+**Status: SHIPPED 2026-05-01.** Layers 1 + 2 + 3 all landed; calibrated against 50 curated presets; three rounds of external code review addressed (incumbent-recompute bug, BS.1770 polyphase FIR true-peak, Welch + 1/6-octave-bin tilt, independent per-channel BS.1770 gating, calibrated thresholds, min-active-sources floor, `best_strict() -> Option`, constrained-aware convergence). 561 tests passing, 0 regressions. Project memory: `project_priority28_comfort_optimizer.md` and `project_priority28_empirical_findings.md`. CLI usable end-to-end: `optimize --constrained --crowding --stagnation-window N`. **Not shipped from this priority:** §28e Zwicker PA composite (waits for §25d primitives), §28g jSO mutation (deferred to Priority 16 L-SHADE), per-source K-weighted RMS upgrade for §28b (volume-only proxy is current implementation). Sub-priority checkboxes below mark which items shipped vs deferred.
+
+**Problem:** The optimizer (`src/optimizer/differential_evolution.rs`, DE/rand/1/bin) maximises a single scalar fitness produced by `Goal::evaluate_full()` in `src/scoring.rs`. That scalar is dominated by neural-model targets (≈70% EEG band match + ≈30% FHN firing/ISI, plus small PLV / asymmetry adjustments). Three concrete consequences:
+
+1. **No comfort signal for 7 of 9 goals.** `acoustic_comfort_score()` is only consulted via `evaluate_with_acoustic_fusion()` for `Shield` and `Isolation`, and there at only ≈18–22% of the fused score (so its absolute weight is roughly `0.20 × (0.20·sharpness + …) ≈ 4%`). For `Sleep`, `DeepRelaxation`, `Meditation`, `Focus`, `DeepWork`, `Flow`, and `Ignition` no comfort term is consulted at all.
+2. **No loudness, no symmetry, no fatigue terms.** The pipeline already renders L/R stereo (`render_preset_ear_signals` in `src/pipeline.rs`) and runs gammatone analysis on both ears, but never measures perceptual loudness (LUFS), `|LUFS_L − LUFS_R|`, true-peak / crest factor, spectral-tilt deviation from a goal-appropriate reference, or per-source level equity (the "no source dominates; active sources within ~6 dB" rule that today is enforced only by hand on Shield).
+3. **Weighted-sum scalarisation.** Comfort and the neural target are *competing* objectives; a weighted sum can trade comfort away for a few hundredths of band-score gain, and the trade-off is invisible in the fitness trace.
+
+Priority 25 already plans an additive psychoacoustic comfort term (loudness/sharpness/roughness/fluctuation) under a weighted-sum fusion. Priority 28 is **complementary**, not a replacement: it adds the metrics P25 does not enumerate (binaural symmetry, per-source equity, spectral-tilt, peak-to-loudness ratio, Zwicker PA composite), and it changes the **optimizer** so that comfort is enforced as a feasibility constraint with decaying tolerance rather than added as a soft term that can be traded away.
+
+**Solution:** Three layers, each independently flag-gated:
+
+```text
+Layer 1 — Acoustic comfort constraints
+  Compute LUFS_L, LUFS_R, true-peak, spectral tilt, per-source RMS
+  Derive bounded penalties; expose them in AcousticFeatureVector
+  No score change yet; verify metrics are stable on existing presets
+
+Layer 2 — Constrained-DE ranking (ε-constrained method)
+  Replace weighted-sum scalar with: rank by neural target among
+  candidates whose comfort violation ≤ ε(generation), where ε
+  decays from generous → strict over the run
+
+Layer 3 — DE diversification at high dimensionality
+  Crowding-DE selection + stagnation-triggered partial restart
+  Optional jSO upgrade: current-to-pbest/1 + success-history F/CR
+  + linear population-size reduction
+```
+
+Layers 1 and 2 are the priority's main payoff. Layer 3 addresses the documented tendency of vanilla DE/rand/1/bin to collapse prematurely on a 230-D genome (`preset.rs:28`).
+
+### 28a. Per-channel perceptual loudness and binaural symmetry
+
+- [ ] Add `lufs_integrated`, `lufs_left`, `lufs_right`, `lufs_asymmetry_lu`, and `true_peak_dbfs` to `AcousticFeatureVector` in `src/acoustic_score.rs`.
+- [ ] Implement K-weighted, gated loudness per ITU-R BS.1770-5 (pre-filter + RLB-filter, 400 ms blocks, 75 % overlap, −70 LUFS absolute gate, relative gate at integrated − 10 LU). Compute on each channel separately; the integrated stereo loudness uses BS.1770 channel weights.
+- [ ] Implement true-peak via 4× polyphase oversampling and absolute-max (matches BS.1770 Annex 2).
+- [ ] Define `lufs_asymmetry_lu = |lufs_left − lufs_right|`.
+- [ ] Initial comfort thresholds (engineering priors, revisable):
+  - `lufs_asymmetry_lu ≤ 1.0` for all "balanced" goals (`Sleep`, `DeepRelaxation`, `Meditation`, `Flow`, `Shield`, `Isolation`)
+  - `lufs_asymmetry_lu ≤ 2.0` for goals where mild lateralisation is acceptable (`Focus`, `DeepWork`, `Ignition`)
+  - `true_peak_dbfs ≤ −1.0` always (mastering convention; avoids inter-sample clipping after lossy codec)
+- [ ] Penalty curve: zero penalty up to threshold, linear ramp to a configurable cap (default 0.20) at 2× threshold; matches the structure of `asymmetry_penalty` in `scoring.rs:751`.
+
+**Why:** A persistent inter-aural level mismatch >~1 LU is audibly skewed and breaks any HRTF-mediated spatial illusion (head-shadow only operates above ~1.5 kHz; sustained low-frequency ILD is unnatural). For long-form masking the cost of imbalance is cumulative.
+
+**References:**
+- [ ] **Ref:** ITU-R BS.1770-5 (2023). *Algorithms to measure audio programme loudness and true-peak audio level.* — Defines K-weighting, gating, and true-peak measurement; the de-facto open standard for loudness and the basis of EBU R128.
+- [ ] **Ref:** EBU R128 (2020 rev.). *Loudness normalisation and permitted maximum level of audio signals.* — Practical operating thresholds (target −23 LUFS, ±1 LU production tolerance) used widely in broadcast.
+- [ ] **Ref:** Blauert J (1997). *Spatial Hearing: The Psychophysics of Human Sound Localization.* MIT Press, revised ed. — Reference work on ILD/ITD perception; documents that sustained low-frequency ILD is not a natural cue and breaks externalisation.
+- [ ] **Ref:** Soulodre GA, Lavoie MC (2003). "Stereo and Multichannel Loudness Perception and Metering." AES 115th Convention. — Empirical work on audible inter-channel loudness mismatch.
+
+### 28b. Per-source loudness equity (preset-internal balance)
+
+- [ ] Compute a per-active-object RMS or short-term LUFS proxy by rendering each active object **in isolation** (engine clone, single source enabled) for ~2 s and measuring K-weighted RMS. Cache the per-source values for the single-source render that the gammatone pipeline already computes — adds ≤2 s extra render per evaluation.
+- [ ] Define `source_balance_db_range = max(level_dB) − min(level_dB)` over active objects.
+- [ ] Default constraint: `source_balance_db_range ≤ 6.0 dB` for all goals, gated tighter (≤ 4.0 dB) for `Shield` and `Isolation` where the cocoon-balance rule is strictest.
+- [ ] Distinct from §28a: §28a is between L and R ears of the *combined* mix, §28b is between objects within the preset.
+
+**Why:** This codifies the manual heuristic already used for Shield ("active sources within ~6 dB; distribute mid-band tints across sources, not one loud lever"). Without this constraint the optimizer routinely converges on presets where one object dominates and the others contribute negligible perceptual energy, even though their genome is "active". This wastes the parameter space and produces flat-sounding, harder-to-habituate presets.
+
+**References:**
+- [ ] **Ref:** Moore BCJ (2012). *An Introduction to the Psychology of Hearing.* 6th ed. Brill. Ch. 4 — *Masking, the critical band, and frequency selectivity.* — Documents that perceptual fusion of multiple sources requires roughly comparable loudness in overlapping critical bands; one source 10+ dB louder dominates and the rest become inaudible "padding".
+- [ ] **Ref:** Bregman AS (1990). *Auditory Scene Analysis.* MIT Press. — Foundational treatment of how level differences drive auditory streaming; supports the practical 4–6 dB rule for fused-cocoon design.
+
+### 28c. Spectral-tilt and high-frequency fatigue terms
+
+- [ ] Compute `spectral_tilt_db_per_oct` as the slope of a linear regression of log-power vs log-frequency over 100 Hz – 10 kHz on the rendered mono mix (reuse the FFT already computed in `spectral_features`).
+- [ ] Compute `hf_fraction_above_8khz` as the energy fraction in 8–20 kHz relative to 20 Hz – 20 kHz (one extra accumulator in the existing FFT loop in `acoustic_score.rs:249`).
+- [ ] Define a goal-specific reference tilt:
+  - `Sleep`, `DeepRelaxation`, `Meditation`: target ~−6 dB/oct (brown-leaning)
+  - `Flow`, `DeepWork`, `Shield`: target ~−3 dB/oct (pink)
+  - `Focus`, `Isolation`, `Ignition`: target ~−1.5 dB/oct (between pink and white)
+- [ ] Penalty: `|tilt − target|` above 1.5 dB/oct → ramp to 0.15 cap at 4 dB/oct deviation.
+- [ ] HF-fraction guardrail: `hf_fraction_above_8khz ≤ 0.10` for relax/sleep/meditation goals; ≤ 0.20 elsewhere.
+
+**Why:** Pink (1/f) and brown (1/f²) spectra are the most commonly recommended for long-session masking and tinnitus relief because they fatigue the auditory system more slowly than whiter spectra. WHO night-noise guidance (LAeq = 30 dB indoor) and the 2022 EHP environmental-noise meta-analysis both treat sustained high-frequency exposure as the dominant fatigue and sleep-disturbance driver. Encoding tilt as a goal-specific *constraint* prevents the optimizer from drifting toward bright/white energy whenever doing so happens to nudge the EEG band score upward.
+
+**References:**
+- [ ] **Ref:** Voss RF, Clarke J (1975). "1/f noise in music and speech." *Nature* 258:317-318. — Foundational empirical treatment of 1/f spectra in natural audio; basis for the pink-noise prior.
+- [ ] **Ref:** WHO Regional Office for Europe (2009). *Night Noise Guidelines for Europe.* — Recommends LAeq ≤ 30 dB indoor for sleep; HF content disproportionately contributes to disturbance.
+- [ ] **Ref:** Basner M, McGuire S (2018). *WHO Environmental Noise Guidelines for the European Region: A Systematic Review on Environmental Noise and Effects on Sleep.* Int J Environ Res Public Health 15(3):519. — Quantitative meta-analysis used as the basis of WHO 2018 noise guidelines.
+- [ ] **Ref:** Basner M, et al. (2022). "Environmental Noise and Sleep: A Systematic Review and Meta-Analysis." *Environmental Health Perspectives* 130(7):076001. doi:10.1289/EHP10197. — Most recent meta on long-term continuous-noise exposure; documents that fatigue and sleep disturbance scale super-linearly with the high-frequency and tonal components, not just LAeq.
+
+### 28d. Peak-to-Loudness Ratio cap (sustained-listening fatigue)
+
+- [ ] Define `plr_db = true_peak_dbfs − lufs_integrated`. Already a one-line derivation once §28a lands.
+- [ ] Default constraint: `plr_db ≤ 12.0 dB` for all continuous-masking goals (everything except `Ignition`, where transients are part of the design).
+- [ ] Penalty: linear ramp from 0 at threshold to 0.10 cap at `plr_db = 18 dB`.
+
+**Why:** A high crest factor in a *continuous* masker forces listeners to set the average level low to avoid peaks, which then defeats the masking function. Mastering practice for ambient/sleep audio targets PLR ≈ 8–12 dB; >18 dB is consistent with rough or impulsive content that fatigues over hours.
+
+**References:**
+- [ ] **Ref:** Vickers E (2010). "The Loudness War: Background, Speculation, and Recommendations." AES 129th Convention. — Practical reference on PLR as a perceptual fatigue / dynamic-range proxy for sustained-listening material.
+- [ ] **Ref:** Pestana PD, Reiss JD, Barbosa A (2013). "Loudness Measurement of Multitrack Audio Content Using Modifications of ITU-R BS.1770." AES 134th Convention. — Documents PLR distributions for genre-typed continuous content and their relationship to perceived comfort.
+
+### 28e. Zwicker Psychoacoustic Annoyance composite
+
+Priority 25d already plans loudness, sharpness, roughness, and fluctuation-strength terms. Priority 28e is the **scalarisation step**: combine those into a single defensible "annoyance" number that can drive a constraint or appear in a single-line preset summary.
+
+- [ ] Once 25d ships individual psychoacoustic primitives, add `psychoacoustic_annoyance` to `AcousticFeatureVector`:
+  ```text
+  PA = N_5 · sqrt(1 + w_s² + w_fr² + w_t²)
+  w_s    = 0.25 · (S − 1.75) · log10(N_5 + 10)     if S > 1.75 else 0   (sharpness, S in acum)
+  w_fr   = (2.18 / N_5^0.4) · (0.4·F + 0.6·R)                            (fluctuation/roughness)
+  w_t    = (1 − exp(−0.29·K))^2 · (1 − exp(−5.49·N_5))^2 / 0.0954        (tonality, Di et al. 2016)
+  ```
+  with `N_5` = loudness exceeded 5 % of the time (sone), `S` = sharpness (acum), `R` = roughness (asper), `F` = fluctuation strength (vacil), `K` = Aures/Sottek tonality (tu).
+- [ ] Tonality (`K`) is optional first-pass; if not implemented, set `w_t = 0` and document. The Sottek ECMA-418-2 (2024) formulation is the open reference; Aures 1985 is the original.
+- [ ] Treat PA as **diagnostic only** until §28f activates it as a constraint. In §28f, default per-goal cap `PA ≤ 4.0` for relax/sleep/meditation, `≤ 6.0` elsewhere.
+
+**Why:** Zwicker's PA is the longest-validated single-scalar comfort metric in psychoacoustics (>30 years of literature, used in product-sound-quality engineering across automotive, HVAC, and consumer-electronics industries). The Di et al. 2016 tonality-augmented form is the current standard refinement and is openly published.
+
+**References:**
+- [ ] **Ref:** Zwicker E, Fastl H (1999). *Psychoacoustics: Facts and Models.* 2nd ed. Springer-Verlag. Ch. 16. — Original PA formulation; defines `N_5`, `w_s`, `w_fr`.
+- [ ] **Ref:** Di GQ, Chen XW, Song K, Zhou B, Pei CM (2016). "Improvement of Zwicker's psychoacoustic annoyance model aiming at tonal noises." *Applied Acoustics* 105:164-170. doi:10.1016/j.apacoust.2015.11.001. — Adds the tonality term `w_t`; current standard refinement of PA for tonal/broadband mixed content.
+- [ ] **Ref:** Aures W (1985). "A procedure for calculating the sensory pleasantness of various sounds." *Acustica* 59:130-141. — Foundational tonality calculation; basis for both Aures and Sottek tonality.
+- [ ] **Ref:** ECMA-418-2 (2024). *Psychoacoustic metrics for ITT equipment — Part 2: Models based on human perception.* — Open standard for Sottek hearing-model tonality and roughness; available in MoSQITo and SQAT reference implementations.
+- [ ] **Ref:** More S (2010). *Aircraft Noise Characteristics and Metrics.* PhD thesis, Purdue University. — PA refit for broadband + tonal aircraft noise; used in NASA UAM acoustic certification.
+
+### 28f. ε-constrained ranking in the optimizer
+
+- [ ] Replace the single greedy comparator in `DifferentialEvolution::report_trial_result` (currently `trial_fitness >= parent.fitness` at `differential_evolution.rs:185`) with the ε-constrained comparator of Takahama & Sakai (2009):
+  ```text
+  Define violation v(x) = sum of penalty terms from §28a–§28d (and §28e if active),
+                          scaled to [0, 1].
+  Define ε(t) = ε_0 · max(0, 1 − t / T_c)         linearly decays to 0 by gen T_c
+                                                    (e.g. T_c = 0.5 · max_generations).
+
+  Comparator (lexicographic with tolerance ε):
+    if  v(trial) ≤ ε  AND  v(parent) ≤ ε:        prefer higher neural_score
+    elif v(trial) ≤ ε  AND  v(parent) >  ε:       prefer trial
+    elif v(trial) >  ε  AND  v(parent) ≤ ε:       prefer parent
+    else (both infeasible):                        prefer lower violation
+  ```
+- [ ] Set `ε_0` from the violation distribution of the first 200 evaluations (e.g., 70th percentile) so the early generations stay generous and the constraint binds gradually.
+- [ ] Expose as a flag (`--constrained` or `acoustic_constraints_enabled` in `SimulationConfig`); legacy weighted-sum path remains the default until validation completes.
+- [ ] Update `Individual` in `differential_evolution.rs:10` to carry both `neural_fitness: f64` and `violation: f64`; existing `fitness` field becomes a derived display-only scalar.
+- [ ] The surrogate model (Priority 14, 22) needs a parallel update: it must predict `(neural_fitness, violation)` jointly or be retired from the constrained-optimizer path until retrained. Document this clearly in `surrogate.rs` and the artifact contract from Priority 22.
+
+**Why:** Weighted-sum scalarisation cannot escape Pareto trade-offs that are non-convex, and it requires fixed weights chosen before the optimizer has run. The ε-constrained method (Takahama & Sakai) is the empirically dominant constraint-handling technique for population-based optimisers when the user has one clear primary objective and the secondaries are bounded comfort/safety limits. It is strictly better than weighted sums for our case: comfort terms are pass/fail thresholds, not gradients we want to maximise. Algorithmic change is local — only the comparator changes; existing mutation/crossover/selection plumbing is reused.
+
+**References:**
+- [ ] **Ref:** Takahama T, Sakai S (2009). "Constrained Optimization by ε-Constrained Differential Evolution with Dynamic ε-Level Control." *Studies in Computational Intelligence* 175:139-154. doi:10.1007/978-3-540-92695-9_20. — Original ε-constrained DE; defines the relaxation schedule and comparator used here.
+- [ ] **Ref:** Sakai S, Takahama T (2020). "ε-Constrained Differential Evolution Using a Combined Fitness-Violation Function." *Soft Computing* 24:14501-14516. doi:10.1007/s00500-020-04835-6. — Modern variant that also covers the tie-break behaviour and stability guarantees.
+- [ ] **Ref:** Mezura-Montes E, Coello CAC (2011). "Constraint-handling in nature-inspired numerical optimization: Past, present and future." *Swarm and Evolutionary Computation* 1(4):173-194. doi:10.1016/j.swevo.2011.10.001. — Survey of constraint-handling families; the basis for choosing ε-constrained over static-penalty or feasibility-rules approaches.
+- [ ] **Ref:** Miettinen K (1999). *Nonlinear Multiobjective Optimization.* Kluwer Academic. Ch. 3, 4. — Reference treatment of achievement scalarising functions and lexicographic / ε-constraint methods; theoretical Pareto-optimality guarantees.
+
+### 28g. DE diversification: crowding, restart, and (optionally) jSO
+
+- [ ] **Crowding-DE selection:** in `report_trial_result`, an offspring competes against the **nearest-genome parent** rather than its index parent. Implementation: compute Euclidean distance (or normalised-by-bounds distance) over the genome vector; replace `target_index` lookup with `argmin_i ||trial − population[i]||`. ~30 lines.
+- [ ] **Stagnation-triggered partial restart:** when the best fitness has not improved for `restart_window` generations (default 15), reseed the worst 30 % of the population uniformly inside bounds; keep the elite untouched; reset their `fitness` to `NEG_INFINITY` so they re-evaluate.
+- [ ] **(Optional, Phase 3) jSO mutation upgrade:** replace `DE/rand/1/bin` with `current-to-pbest/1` plus success-history adaptation of `F` and `CR` (jSO, Brest et al. 2017). Add a small archive of recently-discarded parents. Keep linear population-size reduction (LPSR) from N₀ → N_min over the run.
+
+**Why:** With a 230-D genome (`preset.rs:28`) the current vanilla DE/rand/1/bin is at the edge where premature convergence is well documented in the literature. The cheapest effective fix is crowding selection plus a stagnation-triggered restart — directly addresses the failure mode "population collapses into one basin around generation 30 and stops exploring". jSO is the modern adaptive-DE refinement that won CEC 2017; it is more invasive but pairs cleanly with §28f because the comparator change is independent of the mutation strategy. The 2025 ARRDE work (arXiv 2511.18429) confirms that nonlinear pop-reduction + adaptive restart materially helps L-SHADE-family variants on high-D problems; a stagnation restart is the simplest applicable instance of that finding.
+
+This sub-priority overlaps Priority 16 (L-SHADE adaptive DE). Treat 28g as the **fallback / minimum-viable** diversification pass: if Priority 16 lands first, use jSO from there and only implement crowding + restart here. If Priority 28 lands first, ship crowding + restart and defer jSO to Priority 16.
+
+**References:**
+- [ ] **Ref:** Thomsen R (2004). "Multimodal Optimization using Crowding-Based Differential Evolution." *Proceedings of the 2004 IEEE Congress on Evolutionary Computation* 2:1382-1389. doi:10.1109/CEC.2004.1331058. — Original crowding-DE; the comparator change implemented here.
+- [ ] **Ref:** Brest J, Maučec MS, Bošković B (2017). "Single Objective Real-Parameter Optimization: Algorithm jSO." *Proceedings of the 2017 IEEE Congress on Evolutionary Computation*:1311-1318. doi:10.1109/CEC.2017.7969456. — jSO description (current-to-pbest/1, success-history F/CR, LPSR); CEC 2017 winner.
+- [ ] **Ref:** Tanabe R, Fukunaga A (2014). "Improving the Search Performance of SHADE Using Linear Population Size Reduction." *Proceedings of the 2014 IEEE Congress on Evolutionary Computation*:1658-1665. doi:10.1109/CEC.2014.6900380. — L-SHADE foundation; introduces LPSR.
+- [ ] **Ref:** Sallam KM, et al. (2025). "Adaptive Restart and Robustness in Differential Evolution: ARRDE." arXiv:2511.18429. — Recent treatment of restart/diversity triggers for L-SHADE-family at high dimensionality; documents the premature-convergence failure mode and a simple restart fix.
+
+### 28h. Implementation phases
+
+- [ ] **Phase 1: Layer 1 — diagnostic comfort metrics, no scoring change.**
+  - Implement §28a (LUFS L/R, true-peak), §28b (per-source RMS), §28c (spectral tilt, HF fraction), §28d (PLR).
+  - Expose them in `evaluate` output and `analyze_preset` output.
+  - Unit tests for each metric on synthetic fixtures (tone pairs with known imbalance, brown vs pink vs white reference, transient vs steady).
+  - Verify that all existing presets (Shield, Flow, Sleep, Focus, Meditation exports) report sensible values; collect the empirical distribution.
+- [ ] **Phase 2: Layer 2 — ε-constrained ranking on neural target only, soft-mode.**
+  - Wire §28f using §28a–§28d as the violation function (skip §28e Zwicker PA until 25d ships).
+  - Default `ε₀` from the Phase-1 distribution (70th percentile).
+  - Run optimizer with `--constrained` on each goal; compare best-preset audio quality against the legacy weighted-sum run.
+  - Acceptance: constrained runs produce presets with `lufs_asymmetry_lu < 1.0` and `plr_db < 12 dB` in ≥95 % of seeds, *without* a loss of more than 5 % in primary neural score.
+- [ ] **Phase 3: Layer 3 — DE diversification.**
+  - Wire §28g crowding selection + stagnation restart.
+  - Acceptance: improved `fitness_std` floor (population diversity does not collapse below 0.02 by generation 50) and lower seed-to-seed variance of best-preset score.
+- [ ] **Phase 4: Layer 1+ — Zwicker PA composite.**
+  - Once Priority 25d ships individual psychoacoustic primitives, add §28e (PA scalar).
+  - Promote PA from diagnostic to a constraint term inside the §28f violation function.
+- [ ] **Phase 5: Optional jSO mutation.**
+  - Only if Priority 16 is not active. Replaces DE/rand/1/bin with current-to-pbest/1 + success-history; preserves the §28f comparator.
+
+### 28i. Regression and acceptance criteria
+
+- [ ] Unit tests:
+  - synthetic L/R level mismatch of 3 LU produces `lufs_asymmetry_lu ≈ 3.0`
+  - 1 kHz sine at varying amplitude produces strictly monotonic `lufs_integrated`
+  - brown noise produces tilt ≈ −6 dB/oct, pink ≈ −3 dB/oct, white ≈ 0 dB/oct (±0.5 dB/oct tolerance)
+  - synthetic transient burst produces `plr_db > 18 dB`; steady noise produces `plr_db < 12 dB`
+- [ ] Integration tests:
+  - all stock presets in the repo (`preset_*.json`) report `lufs_asymmetry_lu < 1.5` (sanity check that hand-tuned presets already satisfy the binaural rule)
+  - `--constrained` optimizer runs on a 30-min budget for `Shield`, `Sleep`, `Focus` produce final-preset comfort metrics within bounds, with ≤ 5 % primary-score regression
+- [ ] Reproducibility:
+  - constrained-mode optimizer is bit-identical at fixed seed
+  - ε(t) schedule is logged per generation alongside best/mean/std fitness
+- [ ] No regression to existing optimizer when flag is off:
+  - bit-identical fitness traces for legacy weighted-sum runs at fixed seed
+  - acoustic-comfort metrics run only when `acoustic_scoring_enabled = true` (already guarded today)
+
+### 28j. Scope, governance, and explicit non-goals
+
+- [ ] **Out of scope:** automated weight learning (e.g., from listening-test data), full NSGA-II / NSGA-III / MOEA/D Pareto front, CMA-ES, Bayesian-optimisation surrogates, MAP-Elites quality-diversity. These are larger architectural changes; revisit only if Priority 28 succeeds and a "diverse gallery of presets per goal" becomes a product requirement.
+- [ ] **Surrogate compatibility:** the surrogate (Priorities 14, 22) is not used in the constrained path until it is retrained to predict `(neural_fitness, violation)` jointly. Document this explicitly in the surrogate artifact contract.
+- [ ] **Backward compatibility:** all existing exported presets must continue to evaluate to the same legacy `score` field when `acoustic_constraints_enabled = false`. Constrained scores are exposed as `constrained_score`, `violation`, and `neural_fitness` in the result payload.
+- [ ] **Goal coverage:** §28a–§28d apply to all goals; §28b's per-source equity skips goals where exactly one object is active by design (no equity question). Per-goal thresholds live in `scoring.rs` as a small constants block, not scattered across the codebase.
+
+**Expected outcome:**
+1. The optimizer can no longer trade comfort for marginal neural score — comfort becomes a feasibility floor.
+2. Loudness-symmetric, perceptually balanced presets are the default optimizer output, not the result of manual cleanup.
+3. High-dimensional collapse is mitigated by crowding + restart, so 200-generation runs explore meaningfully more of the 230-D space.
+4. The `feedback_balanced_cocoon` rule (active sources within ~6 dB) is encoded in the optimizer rather than maintained by hand.
+5. PA-style comfort scoring becomes a single-line reportable metric for every preset, useful for both evaluation and exports.
+
+**References (consolidated):**
+
+*Comfort metrics and standards:*
+- [ ] **Ref:** ITU-R BS.1770-5 (2023). *Algorithms to measure audio programme loudness and true-peak audio level.*
+- [ ] **Ref:** EBU R128 (2020 rev.). *Loudness normalisation and permitted maximum level of audio signals.*
+- [ ] **Ref:** Zwicker E, Fastl H (1999). *Psychoacoustics: Facts and Models.* 2nd ed. Springer.
+- [ ] **Ref:** Di GQ, et al. (2016). "Improvement of Zwicker's psychoacoustic annoyance model aiming at tonal noises." *Applied Acoustics* 105:164-170. doi:10.1016/j.apacoust.2015.11.001.
+- [ ] **Ref:** Aures W (1985). "A procedure for calculating the sensory pleasantness of various sounds." *Acustica* 59:130-141.
+- [ ] **Ref:** ECMA-418-2 (2024). *Psychoacoustic metrics for ITT equipment — Part 2: Models based on human perception.*
+- [ ] **Ref:** ISO 532-1:2017. *Acoustics — Methods for calculating loudness — Part 1: Zwicker method.*
+- [ ] **Ref:** DIN 45692:2009. *Measurement technique for the simulation of the auditory sensation of sharpness.*
+- [ ] **Ref:** Daniel P, Weber R (1997). "Psychoacoustical Roughness: Implementation of an Optimized Model." *Acustica united with Acta Acustica* 83(1):113-123.
+
+*Auditory perception and binaural balance:*
+- [ ] **Ref:** Blauert J (1997). *Spatial Hearing: The Psychophysics of Human Sound Localization.* MIT Press, revised ed.
+- [ ] **Ref:** Soulodre GA, Lavoie MC (2003). "Stereo and Multichannel Loudness Perception and Metering." AES 115th Convention.
+- [ ] **Ref:** Moore BCJ (2012). *An Introduction to the Psychology of Hearing.* 6th ed. Brill.
+- [ ] **Ref:** Bregman AS (1990). *Auditory Scene Analysis.* MIT Press.
+
+*Spectral character and long-exposure fatigue:*
+- [ ] **Ref:** Voss RF, Clarke J (1975). "1/f noise in music and speech." *Nature* 258:317-318.
+- [ ] **Ref:** WHO Regional Office for Europe (2009). *Night Noise Guidelines for Europe.*
+- [ ] **Ref:** Basner M, et al. (2022). "Environmental Noise and Sleep: A Systematic Review and Meta-Analysis." *Environmental Health Perspectives* 130(7):076001. doi:10.1289/EHP10197.
+- [ ] **Ref:** Vickers E (2010). "The Loudness War: Background, Speculation, and Recommendations." AES 129th Convention.
+- [ ] **Ref:** Pestana PD, Reiss JD, Barbosa A (2013). "Loudness Measurement of Multitrack Audio Content Using Modifications of ITU-R BS.1770." AES 134th Convention.
+
+*Constrained and adaptive Differential Evolution:*
+- [ ] **Ref:** Takahama T, Sakai S (2009). "Constrained Optimization by ε-Constrained Differential Evolution with Dynamic ε-Level Control." *Studies in Computational Intelligence* 175:139-154. doi:10.1007/978-3-540-92695-9_20.
+- [ ] **Ref:** Sakai S, Takahama T (2020). "ε-Constrained Differential Evolution Using a Combined Fitness-Violation Function." *Soft Computing* 24:14501-14516. doi:10.1007/s00500-020-04835-6.
+- [ ] **Ref:** Mezura-Montes E, Coello CAC (2011). "Constraint-handling in nature-inspired numerical optimization: Past, present and future." *Swarm and Evolutionary Computation* 1(4):173-194.
+- [ ] **Ref:** Miettinen K (1999). *Nonlinear Multiobjective Optimization.* Kluwer Academic.
+- [ ] **Ref:** Thomsen R (2004). "Multimodal Optimization using Crowding-Based Differential Evolution." *IEEE CEC 2004* 2:1382-1389.
+- [ ] **Ref:** Brest J, Maučec MS, Bošković B (2017). "Single Objective Real-Parameter Optimization: Algorithm jSO." *IEEE CEC 2017*:1311-1318. doi:10.1109/CEC.2017.7969456.
+- [ ] **Ref:** Tanabe R, Fukunaga A (2014). "Improving the Search Performance of SHADE Using Linear Population Size Reduction." *IEEE CEC 2014*:1658-1665. doi:10.1109/CEC.2014.6900380.
+- [ ] **Ref:** Sallam KM, et al. (2025). "Adaptive Restart and Robustness in Differential Evolution: ARRDE." arXiv:2511.18429.
+
+*Open-source reference implementations (for cross-checking):*
+- [ ] **Ref:** MoSQITo — Sound Quality Metrics in Python (Apache-2.0). https://github.com/Eomys/MoSQITo. — Loudness ISO 532-1, sharpness DIN 45692, roughness Daniel-Weber, fluctuation strength Fastl, tonality Aures/Sottek.
+- [ ] **Ref:** SQAT — Sound Quality Analysis Toolbox in MATLAB (open). https://github.com/ggrecow/SQAT. — Independent reference implementation of the same metric family; useful for cross-validating the Rust port.
+- [ ] **Ref:** pyloudnorm — Python BS.1770-4 implementation (MIT). https://github.com/csteinmetz1/pyloudnorm. — Reference for the LUFS / true-peak code path in §28a.
+
 ## Explicitly Deferred: Aperiodic (1/f) Slope as a Scoring Metric
 
 **Status:** reviewed, scientifically interesting, but intentionally **not** promoted to an implementation priority yet.

@@ -17,7 +17,7 @@
 /// - Lomas et al. 2015: EEG during meditation
 /// - Katahira et al. 2018: EEG correlates of flow state
 /// - Engel & Fries 2010: Beta-band oscillations and active maintenance
-use crate::acoustic_score::AcousticScoreResult;
+use crate::acoustic_score::{AcousticFeatureVector, AcousticScoreResult};
 use crate::neural::{BandPowers, FhnResult, JansenRitResult, PerformanceVector};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -702,6 +702,280 @@ impl Goal {
         })
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Priority 28 Phase 2 — comfort-violation function for ε-constrained DE
+    //
+    // Maps the diagnostic comfort metrics (Phase 1) to a non-negative
+    // scalar violation that the DE's ε-constrained comparator (Takahama
+    // & Sakai 2009) consumes.
+    //
+    // **Standards / heuristic split** (re-evaluated 2026-05-01 after
+    // external code review):
+    //
+    // | Term                     | Measurement                     | Threshold       |
+    // | ------------------------ | ------------------------------- | --------------- |
+    // | LUFS asymmetry           | per-channel BS.1770 (independent | 1/2 LU heuristic |
+    // |                          | gating; standards-correct)      |                 |
+    // | True-peak ceiling        | BS.1770-5 Annex 2 polyphase FIR | −1 dBFS         |
+    // |                          | (standards-correct)             | (mastering)     |
+    // | Spectral-tilt deviation  | Welch + 1/6-octave-bin (Welch   | per-goal target |
+    // |                          | 1967; IEC 61260; robust)        | heuristic       |
+    // | HF fraction              | single-FFT integration (simple, | 0.10/0.20       |
+    // |                          | acceptable for relative use)    | heuristic       |
+    // | PLR                      | derived from BS.1770 inputs     | 12/18 dB        |
+    // |                          | (standards-grounded)            | heuristic       |
+    // | Source-balance dB range  | volume-only proxy (HEURISTIC)   | 6/8 dB          |
+    // |                          |                                 | heuristic       |
+    //
+    // The *measurement procedures* for LUFS, true-peak, tilt, and PLR
+    // are all standards-derived (or standards-inspired). The *threshold
+    // values* and the source-balance proxy are engineering priors —
+    // tunable, calibrated by listening tests over time, not standards.
+    //
+    // Each term is bounded to a small max-penalty so the aggregate
+    // violation stays roughly in [0, 0.80] for any input. The bounded
+    // range matters because ε(t) decays through this scale; an
+    // unbounded violation could push the population to always-feasible
+    // or always-infeasible at chosen ε₀ percentiles.
+    //
+    // Missing metrics (`Option::None`) contribute zero — they are treated
+    // as "not measurable on this preset" rather than "no violation".
+    //
+    // References: Takahama & Sakai 2009 (ε-constrained DE); ITU-R
+    // BS.1770-5 (LUFS / true-peak); Welch 1967 / IEC 61260 (Welch PSD,
+    // fractional-octave bandpass); Voss & Clarke 1975 (1/f); WHO 2009
+    // / Basner 2022 (long-exposure fatigue context only — not for
+    // numerical thresholds); Vickers 2010 / Pestana 2013 (PLR
+    // background, not threshold values).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Compute the aggregated comfort violation for this goal.
+    ///
+    /// Returns 0.0 when every measured comfort metric is within its
+    /// goal-specific tolerance, otherwise a non-negative scalar bounded
+    /// by the sum of the per-term caps (≈ 0.85 across all seven terms:
+    /// LUFS asymmetry, true-peak, spectral tilt, HF fraction, PLR,
+    /// source balance, min-source). Higher = more uncomfortable; the
+    /// ε-constrained DE prefers lower violation.
+    pub fn comfort_violation(&self, features: &AcousticFeatureVector) -> f64 {
+        let mut violation = 0.0_f64;
+
+        // §28a — LUFS asymmetry.
+        // Inputs are standards-correct per-channel BS.1770 readings (see
+        // `lufs_left`, `lufs_right` doc). The threshold (3 LU for balanced
+        // goals, 4 LU for active/attention goals — calibrated 2026-05-01
+        // from the empirical p90 of curated presets) is a HEURISTIC
+        // engineering prior, tunable. Linear ramp from zero at threshold
+        // to LUFS_ASYM_CAP at 2× threshold.
+        if let Some(asym) = features.lufs_asymmetry_lu {
+            let threshold = self.lufs_asymmetry_threshold_lu();
+            violation += linear_violation(asym, threshold, threshold * 2.0, LUFS_ASYM_CAP);
+        }
+
+        // §28a — true-peak ceiling.
+        // Input is BS.1770-5 Annex 2 compliant (4× polyphase FIR, ≥60 dB
+        // stopband). The −1 dBFS ceiling is a mastering convention, not
+        // a BS.1770 threshold per se. Excess ramps to TRUE_PEAK_CAP at
+        // +2 dBFS.
+        if let Some(tp) = features.true_peak_dbfs {
+            violation += linear_violation(tp, TRUE_PEAK_THRESHOLD_DBFS, TRUE_PEAK_CAP_DBFS, TRUE_PEAK_CAP);
+        }
+
+        // §28c — spectral-tilt deviation from the goal's preferred slope.
+        // Input is robust (Welch + 1/6-octave-bin regression). The
+        // per-goal target slopes (−6 / −3 / −1.5 dB/oct) are HEURISTIC
+        // engineering priors loosely informed by the 1/f literature
+        // (Voss & Clarke 1975) and WHO/Basner long-exposure context, not
+        // standards-derived numerical thresholds.
+        if let Some(tilt) = features.spectral_tilt_db_per_oct {
+            let target = self.spectral_tilt_target_db_per_oct();
+            let dev = (tilt - target).abs();
+            violation += linear_violation(dev, SPECTRAL_TILT_TOLERANCE_DB, SPECTRAL_TILT_CAP_DB, SPECTRAL_TILT_CAP);
+        }
+
+        // §28c — HF-fraction guardrail.
+        // Simple integration metric. The 0.10 / 0.20 thresholds are
+        // HEURISTIC engineering priors — informed by WHO/Basner fatigue
+        // context but not directly standards-derived.
+        if let Some(hf) = features.hf_fraction_above_8khz {
+            let threshold = self.hf_fraction_threshold();
+            violation += linear_violation(hf, threshold, threshold * 2.0, HF_FRACTION_CAP);
+        }
+
+        // §28d — Peak-to-Loudness Ratio cap.
+        // Input is `true_peak_dbfs − lufs_integrated`, both
+        // standards-grounded. The 12 / 18 dB thresholds are HEURISTIC
+        // engineering priors — Vickers 2010 / Pestana 2013 motivate
+        // PLR as a sustained-listening metric, but the specific values
+        // come from product judgment, not a standard. Skipped for
+        // Ignition because sharp transients are intentional there.
+        if let Some(plr) = features.plr_db {
+            if !matches!(self.kind, GoalKind::Ignition) {
+                violation += linear_violation(plr, PLR_THRESHOLD_DB, PLR_CAP_DB, PLR_CAP);
+            }
+        }
+
+        // §28b — per-source loudness equity.
+        // HEURISTIC end-to-end: the input itself is a *volume-only
+        // proxy* (does not see color / tint / modulation / spread /
+        // reverb). The 12 / 15 dB thresholds (calibrated 2026-05-01
+        // from the empirical p90 of 50 curated presets) are tuning
+        // priors that loosened the original 6 / 8 dB rule from
+        // `feedback_balanced_cocoon` to match the actual range of the
+        // user's curated set. Treat this as a soft house-rule
+        // constraint, not a perceptual-loudness measurement.
+        if let Some(range_db) = features.source_balance_db_range {
+            let threshold = self.source_balance_threshold_db();
+            violation += linear_violation(
+                range_db,
+                threshold,
+                threshold * 2.0,
+                SOURCE_BALANCE_CAP,
+            );
+        }
+
+        // §28b (companion to source_balance) — minimum active-source
+        // count. HEURISTIC. Without this, a cocoon-style goal can
+        // trivially satisfy `source_balance_db_range` by collapsing
+        // to a single source (1 source ⇒ 0 dB range ⇒ no equity
+        // violation), but a 1-source preset is not a cocoon. The
+        // per-goal minimum encodes the design intent that Shield /
+        // Isolation are multi-source by definition.
+        if let Some(count) = features.active_source_count {
+            let min_required = self.min_active_sources();
+            if count < min_required {
+                let deficit = (min_required - count) as f64;
+                let frac = (deficit / min_required.max(1) as f64).min(1.0);
+                violation += MIN_SOURCES_CAP * frac;
+            }
+        }
+
+        violation
+    }
+
+    /// §28b — minimum number of effectively-active sources expected for
+    /// each goal. Below this count, the source-equity constraint is
+    /// trivially satisfied (mathematically 0 dB range with 1 source) but
+    /// the cocoon-design intent is broken.
+    fn min_active_sources(&self) -> u32 {
+        match self.kind {
+            // Cocoon goals — multi-source spatial design is the whole point.
+            GoalKind::Shield | GoalKind::Isolation => 3,
+            // Relaxation / flow — typically 2+ sources for envelope diversity
+            // and habituation; not strictly required, but expected.
+            GoalKind::Sleep
+            | GoalKind::DeepRelaxation
+            | GoalKind::Meditation
+            | GoalKind::Flow => 2,
+            // Active-attention goals — a single carefully-tuned source is
+            // a valid product choice (e.g., focused beat-binding).
+            GoalKind::Focus | GoalKind::DeepWork | GoalKind::Ignition => 1,
+        }
+    }
+
+    /// §28b — goal-aware threshold for the per-source dB range.
+    ///
+    /// **Calibrated 2026-05-01** against the curated `presets/` set.
+    /// The original 6 / 8 dB values came from the user-facing
+    /// `feedback_balanced_cocoon` rule ("active sources within ~6 dB"),
+    /// but empirical p90 of curated presets was 14 dB (Shield), 16 dB
+    /// (Flow), 13 dB (Isolation), 7 dB (DeepWork), 15 dB (Ignition).
+    /// The big gap between the stated rule and the practiced behaviour
+    /// is partly because the volume-only proxy here doesn't account
+    /// for color / tint / reverb / spread (which partially equalise
+    /// perceptual loudness across sources at different volumes).
+    /// Loosened to 12 / 15 dB to keep ~90% of curated presets feasible.
+    fn source_balance_threshold_db(&self) -> f64 {
+        match self.kind {
+            GoalKind::Focus | GoalKind::DeepWork | GoalKind::Ignition => 15.0,
+            _ => 12.0,
+        }
+    }
+
+    /// LUFS asymmetry tolerance in LU. Balanced goals require tighter
+    /// binaural symmetry than goals where lateralisation is acceptable.
+    ///
+    /// **Calibrated 2026-05-01** from the empirical p90 of 50 curated
+    /// presets (`calibrate-comfort` over `presets/`). Pre-calibration
+    /// values were 1 LU / 2 LU; the curated p90 was 2.94 LU for Shield
+    /// (the strictest cocoon goal) and ≤ 1 LU for the active-attention
+    /// goals. Rounded up to 3 / 4 to leave headroom around p90.
+    fn lufs_asymmetry_threshold_lu(&self) -> f64 {
+        match self.kind {
+            GoalKind::Focus | GoalKind::DeepWork | GoalKind::Ignition => 4.0,
+            _ => 3.0,
+        }
+    }
+
+    /// Goal-specific preferred spectral slope (dB/oct).
+    /// Sleep family: brown-leaning (−6 dB/oct); flow family: pink (−3);
+    /// active/attention family: between pink and white (−1.5).
+    fn spectral_tilt_target_db_per_oct(&self) -> f64 {
+        match self.kind {
+            GoalKind::Sleep | GoalKind::DeepRelaxation | GoalKind::Meditation => -6.0,
+            GoalKind::Flow | GoalKind::DeepWork | GoalKind::Shield => -3.0,
+            GoalKind::Focus | GoalKind::Isolation | GoalKind::Ignition => -1.5,
+        }
+    }
+
+    /// HF-fraction (energy >8 kHz / energy 20 Hz–20 kHz) guardrail.
+    /// Tighter cap on relax/sleep goals where HF content is the dominant
+    /// fatigue driver in long-exposure literature.
+    fn hf_fraction_threshold(&self) -> f64 {
+        match self.kind {
+            GoalKind::Sleep | GoalKind::DeepRelaxation | GoalKind::Meditation => 0.10,
+            _ => 0.20,
+        }
+    }
+}
+
+// ── Per-term violation caps (Priority 28 Phase 2) ────────────────────────
+//
+// Each cap controls how much a single comfort dimension can contribute to
+// the aggregated violation. The sum of caps bounds the maximum possible
+// violation at ≈ 0.65 (LUFS_ASYM + TRUE_PEAK + SPECTRAL_TILT + HF + PLR =
+// 0.20 + 0.10 + 0.15 + 0.10 + 0.10), which sets the natural scale for the
+// ε schedule. These constants are tunable; Phase 2b (main.rs wiring) will
+// surface them through CLI/config so empirical tuning is possible without
+// changing scoring.rs.
+
+const LUFS_ASYM_CAP: f64 = 0.20;
+const TRUE_PEAK_CAP: f64 = 0.10;
+const SPECTRAL_TILT_CAP: f64 = 0.15;
+const HF_FRACTION_CAP: f64 = 0.10;
+const PLR_CAP: f64 = 0.10;
+const SOURCE_BALANCE_CAP: f64 = 0.15;
+const MIN_SOURCES_CAP: f64 = 0.20;
+
+const TRUE_PEAK_THRESHOLD_DBFS: f64 = -1.0;
+const TRUE_PEAK_CAP_DBFS: f64 = 2.0;
+// Calibrated 2026-05-01 from the empirical p90 of 50 curated presets
+// (see `calibrate-comfort` subcommand). Pre-calibration values were
+// 1.5 / 4.0 dB/oct (tilt) and 12 / 18 dB (PLR); the curated p90s
+// were 5 dB/oct and 14–18 dB respectively. New values leave headroom
+// around p90 so most hand-tuned presets stay inside the feasible region.
+const SPECTRAL_TILT_TOLERANCE_DB: f64 = 5.0;
+const SPECTRAL_TILT_CAP_DB: f64 = 8.0;
+const PLR_THRESHOLD_DB: f64 = 16.0;
+const PLR_CAP_DB: f64 = 22.0;
+
+/// Linear violation ramp: 0 below `threshold`, scales linearly to
+/// `max_penalty` at `cap_at`, clamped to `max_penalty` for values
+/// beyond `cap_at`. Returns `max_penalty` when the input is non-finite.
+fn linear_violation(value: f64, threshold: f64, cap_at: f64, max_penalty: f64) -> f64 {
+    if !value.is_finite() {
+        return max_penalty;
+    }
+    if value <= threshold {
+        return 0.0;
+    }
+    let span = (cap_at - threshold).max(1e-12);
+    let frac = ((value - threshold) / span).clamp(0.0, 1.0);
+    max_penalty * frac
+}
+
+impl Goal {
+
     /// CET 13c — How much this goal values envelope-phase tracking (slow
     /// 2–9 Hz cortical entrainment to the auditory envelope).
     ///
@@ -1213,6 +1487,7 @@ mod tests {
                 speech_band_ratio: Some(speech_band_ratio),
                 modulation_depth: Some(modulation_depth),
                 sharpness_proxy: Some(sharpness_proxy),
+                ..AcousticFeatureVector::default()
             },
             intelligibility_proxy: Some(1.0 - speech_privacy),
             speech_privacy: Some(speech_privacy),
@@ -1628,5 +1903,468 @@ mod tests {
         };
         assert!(matches!(t.status(0.05), MetricStatus::Fail));
         assert!(matches!(t.status(0.60), MetricStatus::Fail));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Priority 28 Phase 2 — comfort_violation tests
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Build an `AcousticFeatureVector` populated with values comfortably
+    /// inside every comfort threshold for any goal.
+    fn within_threshold_features() -> AcousticFeatureVector {
+        AcousticFeatureVector {
+            broadband_level_db: Some(-18.0),
+            speech_band_ratio: Some(0.25),
+            modulation_depth: Some(0.10),
+            sharpness_proxy: Some(0.30),
+            // Phase 1 comfort metrics — all well within tolerance
+            lufs_integrated: Some(-23.0),
+            lufs_left: Some(-23.0),
+            lufs_right: Some(-23.0),
+            lufs_asymmetry_lu: Some(0.2),
+            true_peak_dbfs: Some(-3.0),
+            plr_db: Some(8.0),
+            spectral_tilt_db_per_oct: Some(-3.0),
+            hf_fraction_above_8khz: Some(0.05),
+            // §28b — within Shield's 12 dB threshold (post-2026-05-01 calibration)
+            source_balance_db_range: Some(3.0),
+            // §28b — at or above every goal's minimum (Shield/Iso need ≥ 3)
+            active_source_count: Some(4),
+        }
+    }
+
+    #[test]
+    fn comfort_violation_zero_inside_thresholds_for_all_goals() {
+        // For each goal, choose features that exactly hit the goal's
+        // preferred tilt and stay inside the goal's tolerances.
+        let baseline = within_threshold_features();
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            let mut features = baseline.clone();
+            // Set tilt to this goal's target so the tilt-deviation term is 0.
+            features.spectral_tilt_db_per_oct = Some(goal.spectral_tilt_target_db_per_oct());
+            let v = goal.comfort_violation(&features);
+            assert!(
+                v < 1e-12,
+                "{kind}: expected 0 violation inside thresholds, got {v:.6}"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_lufs_asymmetry_triggers_above_goal_threshold() {
+        // After 2026-05-01 calibration: Sleep tolerates 3 LU; Focus
+        // tolerates 4 LU. A 3.5 LU asymmetry triggers Sleep but not Focus.
+        let mut f = within_threshold_features();
+        f.lufs_asymmetry_lu = Some(3.5);
+        let sleep = Goal::new(GoalKind::Sleep);
+        let mut f_sleep = f.clone();
+        f_sleep.spectral_tilt_db_per_oct = Some(sleep.spectral_tilt_target_db_per_oct());
+        assert!(
+            sleep.comfort_violation(&f_sleep) > 0.0,
+            "Sleep should violate at 3.5 LU asymmetry (threshold 3 LU)"
+        );
+
+        let focus = Goal::new(GoalKind::Focus);
+        let mut f_focus = f.clone();
+        f_focus.spectral_tilt_db_per_oct = Some(focus.spectral_tilt_target_db_per_oct());
+        assert!(
+            focus.comfort_violation(&f_focus) < 1e-12,
+            "Focus should not violate at 3.5 LU asymmetry (threshold 4 LU)"
+        );
+    }
+
+    #[test]
+    fn comfort_violation_lufs_asymmetry_capped() {
+        // Asymmetry of 100 LU should saturate the term at LUFS_ASYM_CAP
+        // (it must not blow up or escape the per-term bound).
+        let mut f = within_threshold_features();
+        f.lufs_asymmetry_lu = Some(100.0);
+        let sleep = Goal::new(GoalKind::Sleep);
+        f.spectral_tilt_db_per_oct = Some(sleep.spectral_tilt_target_db_per_oct());
+        let v = sleep.comfort_violation(&f);
+        assert!(
+            (v - LUFS_ASYM_CAP).abs() < 1e-10,
+            "asymmetry violation should saturate at {LUFS_ASYM_CAP}, got {v:.6}"
+        );
+    }
+
+    #[test]
+    fn comfort_violation_tilt_deviation_zero_at_target() {
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            let mut f = within_threshold_features();
+            f.spectral_tilt_db_per_oct = Some(goal.spectral_tilt_target_db_per_oct());
+            // All other metrics are inside threshold → total violation is 0.
+            assert_eq!(goal.comfort_violation(&f), 0.0, "tilt at target → no violation for {kind}");
+        }
+    }
+
+    #[test]
+    fn comfort_violation_tilt_deviation_monotone() {
+        // After 2026-05-01 calibration: tolerance 5 dB/oct, cap_at 8 dB/oct.
+        let goal = Goal::new(GoalKind::Sleep); // target -6 dB/oct
+        let mut close = within_threshold_features();
+        close.spectral_tilt_db_per_oct = Some(-6.0 - SPECTRAL_TILT_TOLERANCE_DB); // at tolerance edge
+        let mut far = within_threshold_features();
+        far.spectral_tilt_db_per_oct = Some(-6.0 - SPECTRAL_TILT_CAP_DB); // at cap
+
+        let v_close = goal.comfort_violation(&close);
+        let v_far = goal.comfort_violation(&far);
+        // Within tolerance band → 0 violation.
+        assert!(v_close < 1e-12);
+        // At cap → equals SPECTRAL_TILT_CAP (no other metric violates here).
+        assert!((v_far - SPECTRAL_TILT_CAP).abs() < 1e-10, "tilt at cap should saturate, got {v_far:.6}");
+    }
+
+    #[test]
+    fn comfort_violation_plr_skipped_for_ignition() {
+        let mut f = within_threshold_features();
+        f.plr_db = Some(20.0); // way above threshold
+        let ignition = Goal::new(GoalKind::Ignition);
+        f.spectral_tilt_db_per_oct = Some(ignition.spectral_tilt_target_db_per_oct());
+        let v = ignition.comfort_violation(&f);
+        assert!(
+            v < 1e-12,
+            "Ignition should ignore high PLR, got violation {v:.6}"
+        );
+        // Same PLR violates Focus (which expects steady masking).
+        let focus = Goal::new(GoalKind::Focus);
+        let mut f_focus = f.clone();
+        f_focus.spectral_tilt_db_per_oct = Some(focus.spectral_tilt_target_db_per_oct());
+        let v_focus = focus.comfort_violation(&f_focus);
+        assert!(v_focus > 0.0, "Focus should violate at PLR=20 dB");
+    }
+
+    #[test]
+    fn comfort_violation_hf_threshold_tighter_for_relax_goals() {
+        // 0.15 HF fraction violates relax goals (threshold 0.10) but not
+        // others (threshold 0.20).
+        let mut f = within_threshold_features();
+        f.hf_fraction_above_8khz = Some(0.15);
+        for &kind in &[GoalKind::Sleep, GoalKind::DeepRelaxation, GoalKind::Meditation] {
+            let g = Goal::new(kind);
+            let mut ff = f.clone();
+            ff.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            assert!(g.comfort_violation(&ff) > 0.0, "{kind} should violate at HF=0.15");
+        }
+        for &kind in &[GoalKind::Focus, GoalKind::DeepWork, GoalKind::Flow, GoalKind::Shield] {
+            let g = Goal::new(kind);
+            let mut ff = f.clone();
+            ff.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            assert!(g.comfort_violation(&ff) < 1e-12, "{kind} should not violate at HF=0.15");
+        }
+    }
+
+    #[test]
+    fn comfort_violation_aggregate_bounded_by_sum_of_caps() {
+        // Worst-case input: every metric saturates its term. Total must
+        // never exceed the sum of caps.
+        let f = AcousticFeatureVector {
+            broadband_level_db: Some(0.0),
+            speech_band_ratio: Some(0.5),
+            modulation_depth: Some(0.5),
+            sharpness_proxy: Some(0.9),
+            lufs_integrated: Some(-23.0),
+            lufs_left: Some(-20.0),
+            lufs_right: Some(-50.0),                // huge asymmetry
+            lufs_asymmetry_lu: Some(30.0),
+            true_peak_dbfs: Some(10.0),             // far above ceiling
+            plr_db: Some(50.0),                     // way above cap
+            spectral_tilt_db_per_oct: Some(10.0),   // far from any target
+            hf_fraction_above_8khz: Some(1.0),      // saturated
+            source_balance_db_range: Some(40.0),    // way past any goal threshold
+            active_source_count: Some(0),           // zero sources → max min-source penalty
+        };
+        let max_total = LUFS_ASYM_CAP
+            + TRUE_PEAK_CAP
+            + SPECTRAL_TILT_CAP
+            + HF_FRACTION_CAP
+            + PLR_CAP
+            + SOURCE_BALANCE_CAP
+            + MIN_SOURCES_CAP;
+        for &kind in GoalKind::all() {
+            let g = Goal::new(kind);
+            let v = g.comfort_violation(&f);
+            assert!(v.is_finite(), "{kind}: violation must be finite, got {v}");
+            assert!(v >= 0.0, "{kind}: violation must be ≥ 0, got {v}");
+            assert!(
+                v <= max_total + 1e-10,
+                "{kind}: violation {v:.4} should be ≤ {max_total:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_missing_metrics_contribute_zero() {
+        // All Option fields = None → violation must be 0.0 regardless of goal.
+        let f = AcousticFeatureVector::default();
+        for &kind in GoalKind::all() {
+            assert_eq!(
+                Goal::new(kind).comfort_violation(&f),
+                0.0,
+                "missing metrics should produce 0 violation for {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_nan_input_is_capped_not_propagated() {
+        let mut f = within_threshold_features();
+        f.lufs_asymmetry_lu = Some(f64::NAN);
+        let g = Goal::new(GoalKind::Sleep);
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        let v = g.comfort_violation(&f);
+        assert!(v.is_finite(), "violation must remain finite under NaN input");
+        // NaN is treated as worst-case → asymmetry term saturates.
+        assert!(v >= LUFS_ASYM_CAP - 1e-10, "NaN should saturate the term");
+    }
+
+    // ── §28b — per-source loudness equity ──────────────────────────
+
+    #[test]
+    fn comfort_violation_source_balance_zero_at_threshold() {
+        let mut f = within_threshold_features();
+        // Shield threshold = 6 dB. Exactly at threshold → 0 violation.
+        f.source_balance_db_range = Some(6.0);
+        let g = Goal::new(GoalKind::Shield);
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        assert_eq!(g.comfort_violation(&f), 0.0);
+    }
+
+    #[test]
+    fn comfort_violation_source_balance_triggers_above_threshold_for_shield() {
+        // After 2026-05-01 calibration: Shield threshold 12 dB, cap_at 24 dB.
+        // 18 dB range → halfway between threshold and cap → ~half cap.
+        let mut f = within_threshold_features();
+        f.source_balance_db_range = Some(18.0);
+        let g = Goal::new(GoalKind::Shield);
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        let v = g.comfort_violation(&f);
+        assert!(
+            (v - 0.5 * SOURCE_BALANCE_CAP).abs() < 1e-10,
+            "expected ~½ cap at 18 dB (Shield threshold 12, cap 24), got {v:.6}"
+        );
+    }
+
+    #[test]
+    fn comfort_violation_source_balance_saturates_at_cap() {
+        let mut f = within_threshold_features();
+        f.source_balance_db_range = Some(50.0); // way past cap_at = 12 dB
+        let g = Goal::new(GoalKind::Shield);
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        let v = g.comfort_violation(&f);
+        assert!(
+            (v - SOURCE_BALANCE_CAP).abs() < 1e-10,
+            "extreme imbalance should saturate at cap, got {v:.6}"
+        );
+    }
+
+    #[test]
+    fn comfort_violation_source_balance_threshold_looser_for_active_goals() {
+        // After 2026-05-01 calibration: Shield threshold 12 dB, Focus 15 dB.
+        // 13 dB triggers Shield but not Focus.
+        let mut f = within_threshold_features();
+        f.source_balance_db_range = Some(13.0);
+
+        let shield = Goal::new(GoalKind::Shield);
+        let mut f_shield = f.clone();
+        f_shield.spectral_tilt_db_per_oct = Some(shield.spectral_tilt_target_db_per_oct());
+        assert!(
+            shield.comfort_violation(&f_shield) > 0.0,
+            "Shield should violate at 13 dB (threshold 12)"
+        );
+
+        let focus = Goal::new(GoalKind::Focus);
+        let mut f_focus = f.clone();
+        f_focus.spectral_tilt_db_per_oct = Some(focus.spectral_tilt_target_db_per_oct());
+        assert!(
+            focus.comfort_violation(&f_focus) < 1e-12,
+            "Focus tolerates 13 dB (its threshold is 15 dB)"
+        );
+    }
+
+    /// After 2026-05-01 calibration, Shield's source-balance threshold
+    /// is 12 dB and cap_at is 24 dB. A 13.3 dB imbalance (the value
+    /// from the original optimization run that motivated §28b) is no
+    /// longer saturating — it sits ~1.3 dB into the ramp. To check
+    /// saturation we now need ≥ 24 dB, which is the calibrated p90 of
+    /// curated presets (the loudest hand-tuned imbalance was 24.93 dB
+    /// for `normal_set_shield_v5_optimized.json`).
+    #[test]
+    fn comfort_violation_dominant_source_preset_saturates_term() {
+        let mut f = within_threshold_features();
+        f.source_balance_db_range = Some(30.0); // beyond Shield's 24 dB cap_at
+        let g = Goal::new(GoalKind::Shield);
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        let v = g.comfort_violation(&f);
+        assert!(
+            v >= SOURCE_BALANCE_CAP - 1e-10,
+            "30 dB should saturate Shield's source-balance term, got {v:.6}"
+        );
+
+        // And the 13.3 dB case should now sit *inside* the ramp, not
+        // saturate. This pins the calibration loosening explicitly.
+        f.source_balance_db_range = Some(13.3);
+        let v_partial = g.comfort_violation(&f);
+        assert!(
+            v_partial > 0.0 && v_partial < SOURCE_BALANCE_CAP - 1e-9,
+            "13.3 dB (just past 12 dB threshold) should be a partial penalty, got {v_partial:.6}"
+        );
+    }
+
+    // ── Min-active-sources term (companion to source_balance) ──────
+
+    #[test]
+    fn comfort_violation_min_sources_zero_when_count_meets_threshold() {
+        for &kind in GoalKind::all() {
+            let g = Goal::new(kind);
+            let mut f = within_threshold_features();
+            f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            // exactly the goal's minimum
+            f.active_source_count = Some(g.min_active_sources());
+            assert_eq!(
+                g.comfort_violation(&f),
+                0.0,
+                "{kind}: count == min_active_sources should give 0 violation"
+            );
+            // Above the minimum is also fine
+            f.active_source_count = Some(g.min_active_sources() + 5);
+            assert_eq!(
+                g.comfort_violation(&f),
+                0.0,
+                "{kind}: count > min_active_sources should give 0 violation"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_min_sources_triggers_for_cocoon_goals_when_collapsed() {
+        // The motivating case: optimizer collapses to 1 source, which
+        // trivially passes source_balance (1 source ⇒ 0 dB range) but
+        // breaks the cocoon design intent. Shield/Isolation must penalise
+        // this; active goals should NOT (1 source is valid for them).
+        for &kind in &[GoalKind::Shield, GoalKind::Isolation] {
+            let g = Goal::new(kind);
+            let mut f = within_threshold_features();
+            f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            f.active_source_count = Some(1);
+            f.source_balance_db_range = Some(0.0); // 1 source ⇒ 0 dB
+            let v = g.comfort_violation(&f);
+            assert!(
+                v > 0.0,
+                "{kind}: 1 source should violate min-sources floor (min={})",
+                g.min_active_sources()
+            );
+        }
+        for &kind in &[GoalKind::Focus, GoalKind::DeepWork, GoalKind::Ignition] {
+            let g = Goal::new(kind);
+            let mut f = within_threshold_features();
+            f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            f.active_source_count = Some(1);
+            f.source_balance_db_range = Some(0.0);
+            assert_eq!(
+                g.comfort_violation(&f),
+                0.0,
+                "{kind}: 1 source is acceptable (min=1)"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_min_sources_full_cap_at_zero_count() {
+        // Zero active sources for Shield (min=3) should give the full
+        // MIN_SOURCES_CAP penalty contribution.
+        let g = Goal::new(GoalKind::Shield);
+        let mut f = within_threshold_features();
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        f.active_source_count = Some(0);
+        f.source_balance_db_range = Some(0.0);
+        let v = g.comfort_violation(&f);
+        assert!(
+            (v - MIN_SOURCES_CAP).abs() < 1e-10,
+            "0 sources for Shield (min=3) should saturate min-sources term, got {v:.6}"
+        );
+    }
+
+    #[test]
+    fn comfort_violation_min_sources_partial_when_count_below_min() {
+        // Shield min=3. count=2 means deficit=1, fraction=1/3 of cap.
+        let g = Goal::new(GoalKind::Shield);
+        let mut f = within_threshold_features();
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+        f.source_balance_db_range = Some(0.0);
+
+        f.active_source_count = Some(2);
+        let v2 = g.comfort_violation(&f);
+        let expected2 = MIN_SOURCES_CAP * (1.0 / 3.0);
+        assert!(
+            (v2 - expected2).abs() < 1e-10,
+            "Shield count=2 (min=3): expected {expected2:.6}, got {v2:.6}"
+        );
+
+        // count=1 ⇒ deficit=2, fraction=2/3.
+        f.active_source_count = Some(1);
+        let v1 = g.comfort_violation(&f);
+        let expected1 = MIN_SOURCES_CAP * (2.0 / 3.0);
+        assert!(
+            (v1 - expected1).abs() < 1e-10,
+            "Shield count=1 (min=3): expected {expected1:.6}, got {v1:.6}"
+        );
+    }
+
+    #[test]
+    fn comfort_violation_min_sources_missing_contributes_zero() {
+        // Field absent → no penalty regardless of goal.
+        let mut f = within_threshold_features();
+        f.active_source_count = None;
+        for &kind in GoalKind::all() {
+            let g = Goal::new(kind);
+            let mut ff = f.clone();
+            ff.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            assert_eq!(
+                g.comfort_violation(&ff),
+                0.0,
+                "{kind}: missing active_source_count should produce 0 violation"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_source_balance_missing_contributes_zero() {
+        // No source_balance_db_range field → no penalty regardless of threshold.
+        let mut f = within_threshold_features();
+        f.source_balance_db_range = None;
+        for &kind in GoalKind::all() {
+            let g = Goal::new(kind);
+            let mut ff = f.clone();
+            ff.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+            assert_eq!(
+                g.comfort_violation(&ff),
+                0.0,
+                "missing source_balance must produce 0 violation for {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_violation_true_peak_ramps_above_ceiling() {
+        let mut f = within_threshold_features();
+        let g = Goal::new(GoalKind::Flow);
+        f.spectral_tilt_db_per_oct = Some(g.spectral_tilt_target_db_per_oct());
+
+        f.true_peak_dbfs = Some(-2.0); // below ceiling
+        assert_eq!(g.comfort_violation(&f), 0.0);
+
+        f.true_peak_dbfs = Some(-1.0); // exactly at ceiling
+        assert_eq!(g.comfort_violation(&f), 0.0);
+
+        f.true_peak_dbfs = Some(0.0); // 1 dB above ceiling → partial penalty
+        let v_partial = g.comfort_violation(&f);
+        assert!(v_partial > 0.0 && v_partial < TRUE_PEAK_CAP);
+
+        f.true_peak_dbfs = Some(2.0); // at cap
+        let v_full = g.comfort_violation(&f);
+        assert!((v_full - TRUE_PEAK_CAP).abs() < 1e-10);
     }
 }

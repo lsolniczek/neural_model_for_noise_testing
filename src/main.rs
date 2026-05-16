@@ -15,6 +15,8 @@ mod surrogate;
 mod validate;
 
 use clap::{Parser, Subcommand};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -22,7 +24,7 @@ use brain_type::BrainType;
 use optimizer::DifferentialEvolution;
 use pipeline::{
     evaluate_preset, evaluate_preset_detailed, validate_analysis_window, DetailedSimulationResult,
-    SimulationConfig,
+    SimulationConfig, SimulationResult,
 };
 use preset::Preset;
 use scoring::{Goal, GoalKind, MetricStatus};
@@ -41,6 +43,23 @@ struct EvaluateFeatureFlags {
     thalamic_gate: bool,
     cet: bool,
     phys_gate: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SeedPresetContext {
+    spread_per_slot: [f32; preset::MAX_OBJECTS],
+    position_space_per_slot: [u8; preset::MAX_OBJECTS],
+    room: preset::RoomConfig,
+}
+
+impl Default for SeedPresetContext {
+    fn default() -> Self {
+        Self {
+            spread_per_slot: [0.0_f32; preset::MAX_OBJECTS],
+            position_space_per_slot: [0_u8; preset::MAX_OBJECTS],
+            room: preset::RoomConfig::default(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -103,9 +122,90 @@ enum Commands {
         /// Enable the Phase 5 fused scalar score during optimization.
         /// Currently supported only for `shield` and `isolation`.
         /// Implies acoustic analysis and is incompatible with surrogate
-        /// scoring and CSV logging until those score contracts are updated.
+        /// scoring until the surrogate score contract is updated.
         #[arg(long = "acoustic-score-fusion", default_value_t = false)]
         acoustic_score_fusion: bool,
+
+        /// Enable Priority 28 Phase 2 ε-constrained optimization.
+        ///
+        /// Treats acoustic comfort metrics (LUFS asymmetry, true peak,
+        /// spectral tilt, HF fraction, PLR) as soft constraints with a
+        /// decaying ε-tolerance (Takahama & Sakai 2009). The optimizer
+        /// ranks by neural-fitness *only* among ε-feasible candidates;
+        /// infeasible candidates compete by lowest violation. Tightens
+        /// to strict feasibility by half the generation budget.
+        ///
+        /// Implies acoustic analysis. Forces `--acoustic-score-fusion`
+        /// off (would double-count comfort) and `--surrogate` off
+        /// (single-scalar surrogate cannot predict (fitness, violation)
+        /// jointly). Both are validated up-front to prevent silent
+        /// misconfiguration.
+        #[arg(long, default_value_t = false)]
+        constrained: bool,
+
+        /// Enable Priority 28 Phase 3 crowding-DE selection (Thomsen 2004).
+        ///
+        /// Each trial competes against its **nearest-genome parent**
+        /// rather than the parent it was generated from. Maintains
+        /// niches across the search space and counters the documented
+        /// tendency of vanilla DE/rand/1/bin to collapse to a single
+        /// basin on a high-dimensional genome (the 230-D preset space).
+        /// Generation cost is unchanged; only the replacement target
+        /// is redirected.
+        #[arg(long, default_value_t = false)]
+        crowding: bool,
+
+        /// Enable Priority 28 Phase 3 stagnation-triggered partial
+        /// restart (Sallam 2025 ARRDE). When the best fitness has not
+        /// improved for `--stagnation-window` consecutive generations,
+        /// reseed the worst `--stagnation-fraction` of the population
+        /// with uniform-random genomes; the elite is preserved.
+        ///
+        /// Set to 0 (default) to disable. Typical: 10–20 for the 230-D
+        /// preset genome at 100 generations. Counter is exposed in the
+        /// per-generation progress display.
+        #[arg(long, default_value_t = 0)]
+        stagnation_window: usize,
+
+        /// Fraction of the population to reseed on each stagnation
+        /// trigger. Ignored when `--stagnation-window=0`. Typical:
+        /// 0.20–0.40. The current best is always preserved (elitism).
+        #[arg(long, default_value_t = 0.30)]
+        stagnation_fraction: f64,
+
+        /// Priority 18a — Stochastic noise σ on JR input drive.
+        ///
+        /// Per Ableidinger, Buckwar & Hinterleitner (2017), noise on
+        /// the JR system can drive transitions between the alpha
+        /// attractor (~10 Hz limit cycle) and lower-frequency basins
+        /// (theta/delta), producing a multi-band output spectrum.
+        /// Default 15.0 preserves legacy bit-identity. The
+        /// literature-recommended retuning for breaking the single-
+        /// attractor lock is 50–200 (use 100 as a safe starting point).
+        #[arg(long, default_value_t = 15.0)]
+        jr_sigma: f64,
+
+        /// Priority 18b — Slow inhibitory population decay rate
+        /// `b_slow` (1/s) for the CET parallel slow-GABA loop.
+        ///
+        /// Per Ursino, Cona & Zavaglia (2010), a second inhibitory
+        /// population with a different time constant produces
+        /// simultaneous multi-band rhythms in a single column.
+        /// Default 5.0 (τ = 200 ms) preserves legacy bit-identity.
+        /// Retuning to 25.0 (τ = 40 ms) places the slow-population
+        /// resonance in the theta band (5–8 Hz). Only takes effect
+        /// when CET is enabled.
+        #[arg(long, default_value_t = 5.0)]
+        gaba_b_rate: f64,
+
+        /// Priority 18b — Slow inhibitory population synaptic gain
+        /// `B_slow` (mV) for the CET parallel slow-GABA loop.
+        ///
+        /// Default 10.0 preserves legacy bit-identity. Recommended
+        /// range when retuning for theta-alpha coexistence: 12–20.
+        /// Only takes effect when CET is enabled.
+        #[arg(long, default_value_t = 10.0)]
+        gaba_b_gain: f64,
 
         /// Enable surrogate-assisted pre-screening (Priority 14).
         /// Uses a trained MLP to rank candidates before selective real evaluation.
@@ -126,6 +226,122 @@ enum Commands {
         /// Number of top surrogate candidates to validate with the real pipeline
         #[arg(long, default_value_t = 5)]
         surrogate_k: usize,
+    },
+
+    /// Run a simple multi-stage optimization schedule that searches at a short
+    /// window first, then re-optimizes the winner at longer windows.
+    ///
+    /// This is a pragmatic guard against short-window overfitting:
+    /// stage 1 explores cheaply, stage 2 re-tunes at a medium window,
+    /// and stage 3 applies a final long-window continuation pass.
+    OptimizeStaged {
+        /// Goal to optimize for
+        #[arg(long, default_value = "focus")]
+        goal: String,
+
+        /// Stage 1 population size
+        #[arg(long, default_value_t = 12)]
+        population: usize,
+
+        /// Stage 1 max generations
+        #[arg(long, default_value_t = 30)]
+        generations: usize,
+
+        /// Final output JSON path (stage artifacts are derived from this)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Random seed for reproducibility
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// DE mutation scale factor
+        #[arg(long, default_value_t = 0.7)]
+        de_f: f64,
+
+        /// DE crossover rate
+        #[arg(long, default_value_t = 0.8)]
+        de_cr: f64,
+
+        /// Convergence threshold (legacy DE only)
+        #[arg(long, default_value_t = 0.001)]
+        convergence: f64,
+
+        /// Brain type profile
+        #[arg(long, default_value = "normal")]
+        brain_type: String,
+
+        /// Seed stage 1 from an existing preset JSON
+        #[arg(long)]
+        init_preset: Option<PathBuf>,
+
+        /// Enable Cortical Envelope Tracking
+        #[arg(long, default_value_t = true)]
+        cet: bool,
+
+        /// Enable the physiological thalamic gate
+        #[arg(long = "phys-gate", default_value_t = false)]
+        phys_gate: bool,
+
+        /// Enable fused acoustic/NMM scoring where supported
+        #[arg(long = "acoustic-score-fusion", default_value_t = false)]
+        acoustic_score_fusion: bool,
+
+        /// Enable ε-constrained optimization
+        #[arg(long, default_value_t = false)]
+        constrained: bool,
+
+        /// Enable crowding-DE selection
+        #[arg(long, default_value_t = false)]
+        crowding: bool,
+
+        /// Enable stagnation-triggered partial restart
+        #[arg(long, default_value_t = 0)]
+        stagnation_window: usize,
+
+        /// Fraction of the population to reseed on stagnation
+        #[arg(long, default_value_t = 0.30)]
+        stagnation_fraction: f64,
+
+        /// Priority 18a — Stochastic noise sigma on JR input drive
+        #[arg(long, default_value_t = 15.0)]
+        jr_sigma: f64,
+
+        /// Priority 18b — Slow inhibitory population decay rate
+        #[arg(long, default_value_t = 5.0)]
+        gaba_b_rate: f64,
+
+        /// Priority 18b — Slow inhibitory population synaptic gain
+        #[arg(long, default_value_t = 10.0)]
+        gaba_b_gain: f64,
+
+        /// Stage 1 audio duration (seconds)
+        #[arg(long, default_value_t = 10.0)]
+        stage1_duration: f32,
+
+        /// Stage 2 audio duration (seconds)
+        #[arg(long, default_value_t = 30.0)]
+        stage2_duration: f32,
+
+        /// Stage 3 audio duration (seconds)
+        #[arg(long, default_value_t = 60.0)]
+        stage3_duration: f32,
+
+        /// Stage 2 population size
+        #[arg(long, default_value_t = 8)]
+        stage2_population: usize,
+
+        /// Stage 2 max generations
+        #[arg(long, default_value_t = 12)]
+        stage2_generations: usize,
+
+        /// Stage 3 population size
+        #[arg(long, default_value_t = 6)]
+        stage3_population: usize,
+
+        /// Stage 3 max generations
+        #[arg(long, default_value_t = 4)]
+        stage3_generations: usize,
     },
 
     /// Evaluate an existing preset against goal(s) and brain type(s).
@@ -197,6 +413,35 @@ enum Commands {
         /// analysis and leaves optimize/surrogate behavior unchanged.
         #[arg(long = "acoustic-score-fusion", default_value_t = false)]
         acoustic_score_fusion: bool,
+
+        /// Priority 18a — Stochastic noise sigma on JR input drive.
+        ///
+        /// Use this to replay the same P18 neural retune that may have been
+        /// used during optimization. Default 15.0 preserves legacy behavior.
+        #[arg(long, default_value_t = 15.0)]
+        jr_sigma: f64,
+
+        /// Priority 18b — Slow inhibitory population decay rate `b_slow`
+        /// (1/s) for the CET parallel slow-GABA loop.
+        ///
+        /// Use this to replay the same P18 neural retune that may have been
+        /// used during optimization. Default 5.0 preserves legacy behavior.
+        #[arg(long, default_value_t = 5.0)]
+        gaba_b_rate: f64,
+
+        /// Priority 18b — Slow inhibitory population synaptic gain `B_slow`
+        /// (mV) for the CET parallel slow-GABA loop.
+        ///
+        /// Use this to replay the same P18 neural retune that may have been
+        /// used during optimization. Default 10.0 preserves legacy behavior.
+        #[arg(long, default_value_t = 10.0)]
+        gaba_b_gain: f64,
+
+        /// Append evaluation rows to the shared training CSV schema.
+        /// For single goal/brain evaluation this writes one example row and
+        /// a sibling runs CSV entry next to the requested file.
+        #[arg(long)]
+        log_evaluations: Option<PathBuf>,
     },
 
     /// Run disturbance resilience test — inject acoustic spike and measure recovery.
@@ -264,6 +509,27 @@ enum Commands {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
+
+    /// Walk a directory of curated presets, evaluate each, and report the
+    /// empirical distribution of Phase-1 comfort metrics. Used to
+    /// **calibrate** the heuristic thresholds in `Goal::comfort_violation`
+    /// against presets that are known-good (hand-tuned or accepted from
+    /// previous runs). The 90th-percentile column is the suggested
+    /// upper-bound a threshold should leave inside the feasible region.
+    /// Read-only command — does not modify any file.
+    CalibrateComfort {
+        /// Directory of preset JSON files to analyse.
+        #[arg(long, default_value = "presets")]
+        presets_dir: PathBuf,
+
+        /// Audio duration per evaluation (seconds).
+        #[arg(long, default_value_t = 6.0)]
+        duration: f32,
+
+        /// Brain type profile.
+        #[arg(long, default_value = "normal")]
+        brain_type: String,
+    },
 }
 
 fn bar(value: f64, width: usize) -> String {
@@ -303,6 +569,9 @@ fn build_eval_config(
     flags: EvaluateFeatureFlags,
     acoustic_scoring_enabled: bool,
     acoustic_score_fusion_enabled: bool,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
 ) -> SimulationConfig {
     SimulationConfig {
         duration_secs: duration,
@@ -313,6 +582,9 @@ fn build_eval_config(
         physiological_thalamic_gate_enabled: flags.phys_gate,
         acoustic_scoring_enabled,
         acoustic_score_fusion_enabled,
+        jr_stochastic_sigma: jr_sigma,
+        cet_b_slow_rate: gaba_b_rate,
+        cet_b_slow_gain: gaba_b_gain,
         ..SimulationConfig::default()
     }
 }
@@ -330,21 +602,64 @@ fn build_generate_data_config(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_optimize_config(
     duration: f32,
     brain_type: BrainType,
     cet: bool,
     phys_gate: bool,
     acoustic_score_fusion_enabled: bool,
+    acoustic_constraints_enabled: bool,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
 ) -> SimulationConfig {
+    // Priority 28 Phase 2 — when constraints are on, we MUST populate
+    // acoustic features (so `Goal::comfort_violation` has something to
+    // read) and we MUST NOT enable fusion (would double-count comfort —
+    // see SimulationConfig::acoustic_constraints_enabled docs).
+    // Validation in `validate_optimize_acoustic_mode` already rejects the
+    // illegal combinations; this constructor is just a final safety net.
+    let acoustic_scoring_enabled =
+        acoustic_score_fusion_enabled || acoustic_constraints_enabled;
+    let acoustic_score_fusion_enabled = if acoustic_constraints_enabled {
+        false
+    } else {
+        acoustic_score_fusion_enabled
+    };
     SimulationConfig {
         duration_secs: duration,
         brain_type,
         cet_enabled: cet,
         physiological_thalamic_gate_enabled: phys_gate,
-        acoustic_scoring_enabled: acoustic_score_fusion_enabled,
+        acoustic_scoring_enabled,
         acoustic_score_fusion_enabled,
+        acoustic_constraints_enabled,
+        // Priority 18 — wire the literature-tunable params through.
+        // Defaults match the historical hardcoded constants exactly,
+        // so omitting --jr-sigma / --gaba-b-rate / --gaba-b-gain on
+        // the CLI gives bit-identical pre-P18 behaviour.
+        jr_stochastic_sigma: jr_sigma,
+        cet_b_slow_rate: gaba_b_rate,
+        cet_b_slow_gain: gaba_b_gain,
         ..SimulationConfig::default()
+    }
+}
+
+/// Priority 28 Phase 2 — derive the comfort violation for a single
+/// `evaluate_preset` result. Returns 0.0 when the result has no acoustic
+/// payload (e.g., acoustic scoring was disabled), which is the safe
+/// fallback that keeps the constrained DE comparator from rejecting an
+/// individual purely because the optimizer was misconfigured.
+///
+/// Callers should ensure `sim_config.acoustic_scoring_enabled = true`
+/// before invoking this, so that the features are populated. The
+/// `validate_optimize_acoustic_mode` check up-front prevents the
+/// misconfiguration from ever reaching this helper in production.
+fn compute_comfort_violation(goal: &Goal, result: &pipeline::SimulationResult) -> f64 {
+    match result.acoustic_score.as_ref() {
+        Some(acoustic) => goal.comfort_violation(&acoustic.features),
+        None => 0.0,
     }
 }
 
@@ -361,9 +676,30 @@ fn ensure_analysis_window_or_exit(command_name: &str, duration: f32, warmup_disc
 fn validate_optimize_acoustic_mode(
     goal: &Goal,
     acoustic_score_fusion: bool,
+    constrained: bool,
     use_surrogate: bool,
     log_evaluations_path: Option<&Path>,
 ) -> Result<(), String> {
+    // Priority 28 Phase 2 — constrained-mode invariants. Checked first so
+    // a misconfigured run fails before any expensive setup.
+    if constrained {
+        if acoustic_score_fusion {
+            return Err(
+                "--constrained is incompatible with --acoustic-score-fusion (would double-count comfort)"
+                    .to_string(),
+            );
+        }
+        if use_surrogate {
+            return Err(
+                "--constrained is incompatible with --surrogate until the surrogate is retrained to predict (neural_fitness, violation) jointly"
+                    .to_string(),
+            );
+        }
+        let _ = goal; // accepted for any goal — comfort_violation thresholds are goal-aware.
+        let _ = log_evaluations_path;
+        return Ok(());
+    }
+
     if !acoustic_score_fusion {
         return Ok(());
     }
@@ -379,12 +715,7 @@ fn validate_optimize_acoustic_mode(
                 .to_string(),
         );
     }
-    if log_evaluations_path.is_some() {
-        return Err(
-            "--acoustic-score-fusion is incompatible with --log-evaluations until the surrogate CSV contract records fused-score runs"
-                .to_string(),
-        );
-    }
+    let _ = log_evaluations_path;
     Ok(())
 }
 
@@ -408,23 +739,498 @@ fn surrogate_validation_mask(
     validate
 }
 
-fn surrogate_csv_header() -> String {
-    let genome_cols: Vec<String> = (0..surrogate::GENOME_DIM)
-        .map(|i| format!("g{i}"))
-        .collect();
+#[derive(Debug, Clone)]
+struct CsvExampleMeta {
+    example_id: String,
+    run_id: String,
+    parent_example_id: String,
+    stage: String,
+    source: String,
+    seed_eval: String,
+    created_at: String,
+}
+
+struct OptimizeCsvLogger {
+    command_kind: String,
+    run_id: String,
+    created_at: String,
+    examples_path: PathBuf,
+    pairs_path: PathBuf,
+    runs_path: PathBuf,
+    examples_file: File,
+    pairs_file: File,
+    next_example_seq: usize,
+    total_examples: usize,
+    total_pairs: usize,
+}
+
+impl OptimizeCsvLogger {
+    fn new(examples_path: &Path, command_kind: &str) -> Self {
+        let pairs_path = derive_sibling_csv_path(examples_path, "_pairs");
+        let runs_path = derive_sibling_csv_path(examples_path, "_runs");
+        let examples_file = open_append_csv(examples_path, surrogate_csv_header());
+        let pairs_file = open_append_csv(&pairs_path, pairs_csv_header());
+        let _runs_file = open_append_csv(&runs_path, runs_csv_header());
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let run_id = make_run_id(command_kind);
+        Self {
+            command_kind: command_kind.to_string(),
+            run_id,
+            created_at,
+            examples_path: examples_path.to_path_buf(),
+            pairs_path,
+            runs_path,
+            examples_file,
+            pairs_file,
+            next_example_seq: 0,
+            total_examples: 0,
+            total_pairs: 0,
+        }
+    }
+
+    fn build_example_meta(
+        &mut self,
+        parent_example_id: Option<&str>,
+        stage: &str,
+        source: &str,
+        seed_eval: Option<u64>,
+    ) -> CsvExampleMeta {
+        let example_id = format!("{}_e{:06}", self.run_id, self.next_example_seq);
+        self.next_example_seq += 1;
+        CsvExampleMeta {
+            example_id,
+            run_id: self.run_id.clone(),
+            parent_example_id: parent_example_id.unwrap_or_default().to_string(),
+            stage: stage.to_string(),
+            source: source.to_string(),
+            seed_eval: seed_eval.map(|s| s.to_string()).unwrap_or_default(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn log_example(
+        &mut self,
+        meta: &CsvExampleMeta,
+        genome: &[f64],
+        goal_kind: GoalKind,
+        brain_type: BrainType,
+        config: &SimulationConfig,
+        result: &SimulationResult,
+    ) {
+        writeln!(
+            self.examples_file,
+            "{}",
+            surrogate_csv_row(meta, genome, goal_kind, brain_type, config, result)
+        )
+        .unwrap();
+        self.total_examples += 1;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_pair(
+        &mut self,
+        generation: usize,
+        target_index: usize,
+        goal_kind: GoalKind,
+        brain_type: BrainType,
+        config: &SimulationConfig,
+        parent_example_id: &str,
+        child_example_id: &str,
+        parent_result: &SimulationResult,
+        child_result: &SimulationResult,
+        parent_violation: f64,
+        child_violation: f64,
+        child_selected_by_de: bool,
+    ) {
+        let pair_id = format!("{}_p{:06}", self.run_id, self.total_pairs);
+        writeln!(
+            self.pairs_file,
+            "{}",
+            pairs_csv_row(
+                &pair_id,
+                &self.run_id,
+                generation,
+                target_index,
+                goal_kind,
+                brain_type,
+                config,
+                parent_example_id,
+                child_example_id,
+                parent_result,
+                child_result,
+                parent_violation,
+                child_violation,
+                child_selected_by_de,
+            )
+        )
+        .unwrap();
+        self.total_pairs += 1;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_run(
+        &self,
+        status: &str,
+        goal_kind: GoalKind,
+        brain_type: BrainType,
+        duration_secs: f32,
+        population: usize,
+        generations: usize,
+        de_f: f64,
+        de_cr: f64,
+        convergence: f64,
+        config: &SimulationConfig,
+        crowding: bool,
+        stagnation_window: usize,
+        stagnation_fraction: f64,
+        init_preset: Option<&Path>,
+        output: Option<&Path>,
+    ) {
+        let mut runs_file = OpenOptions::new()
+            .append(true)
+            .open(&self.runs_path)
+            .unwrap();
+        writeln!(
+            runs_file,
+            "{}",
+            runs_csv_row(
+                &self.run_id,
+                &self.created_at,
+                &self.command_kind,
+                status,
+                goal_kind,
+                brain_type,
+                duration_secs,
+                population,
+                generations,
+                de_f,
+                de_cr,
+                convergence,
+                config,
+                crowding,
+                stagnation_window,
+                stagnation_fraction,
+                init_preset,
+                output,
+                &self.examples_path,
+                &self.pairs_path,
+                self.total_examples,
+                self.total_pairs,
+            )
+        )
+        .unwrap();
+    }
+}
+
+fn make_run_id(command_kind: &str) -> String {
     format!(
-        "{},{}",
-        genome_cols.join(","),
-        surrogate::CSV_METADATA_COLUMNS.join(",")
+        "{}_{}",
+        command_kind,
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
     )
 }
 
+fn derive_sibling_csv_path(base: &Path, suffix: &str) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("evaluations");
+    let ext = base.extension().and_then(|e| e.to_str()).unwrap_or("csv");
+    base.with_file_name(format!("{stem}{suffix}.{ext}"))
+}
+
+fn open_append_csv(path: &Path, header: String) -> File {
+    let file_exists = path.exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to open log file '{}': {e}", path.display());
+            std::process::exit(1);
+        });
+    if !file_exists {
+        writeln!(file, "{header}").unwrap();
+    }
+    file
+}
+
+fn pairs_csv_header() -> String {
+    [
+        "pair_id",
+        "run_id",
+        "generation",
+        "target_index",
+        "goal",
+        "brain_type",
+        "duration_secs",
+        "parent_example_id",
+        "child_example_id",
+        "parent_score",
+        "child_score",
+        "delta_score",
+        "parent_violation",
+        "child_violation",
+        "delta_violation",
+        "parent_feasible",
+        "child_feasible",
+        "child_better_score",
+        "child_better_feasible",
+        "child_selected_by_de",
+        "parent_alpha",
+        "child_alpha",
+        "delta_alpha",
+        "parent_beta",
+        "child_beta",
+        "delta_beta",
+        "parent_dominant_freq_hz",
+        "child_dominant_freq_hz",
+        "same_constraints",
+        "same_p18_params",
+        "same_flags",
+    ]
+    .join(",")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pairs_csv_row(
+    pair_id: &str,
+    run_id: &str,
+    generation: usize,
+    target_index: usize,
+    goal_kind: GoalKind,
+    brain_type: BrainType,
+    config: &SimulationConfig,
+    parent_example_id: &str,
+    child_example_id: &str,
+    parent_result: &SimulationResult,
+    child_result: &SimulationResult,
+    parent_violation: f64,
+    child_violation: f64,
+    child_selected_by_de: bool,
+) -> String {
+    let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
+    [
+        pair_id.to_string(),
+        run_id.to_string(),
+        generation.to_string(),
+        target_index.to_string(),
+        goal_kind.to_string(),
+        brain_type.to_string(),
+        format!("{:.3}", config.duration_secs),
+        parent_example_id.to_string(),
+        child_example_id.to_string(),
+        format!("{:.6}", parent_result.score),
+        format!("{:.6}", child_result.score),
+        format!("{:.6}", child_result.score - parent_result.score),
+        format!("{:.6}", parent_violation),
+        format!("{:.6}", child_violation),
+        format!("{:.6}", child_violation - parent_violation),
+        bool01(parent_violation <= 1e-9),
+        bool01(child_violation <= 1e-9),
+        bool01(child_result.score > parent_result.score),
+        bool01(
+            child_violation < parent_violation
+                || ((child_violation - parent_violation).abs() <= 1e-9
+                    && child_result.score >= parent_result.score),
+        ),
+        bool01(child_selected_by_de),
+        format!("{:.6}", parent_result.alpha_power),
+        format!("{:.6}", child_result.alpha_power),
+        format!("{:.6}", child_result.alpha_power - parent_result.alpha_power),
+        format!("{:.6}", parent_result.beta_power),
+        format!("{:.6}", child_result.beta_power),
+        format!("{:.6}", child_result.beta_power - parent_result.beta_power),
+        format!("{:.6}", parent_result.dominant_freq),
+        format!("{:.6}", child_result.dominant_freq),
+        bool01(config.acoustic_constraints_enabled),
+        "1".to_string(),
+        "1".to_string(),
+    ]
+    .join(",")
+}
+
+fn runs_csv_header() -> String {
+    [
+        "run_id",
+        "created_at",
+        "finished_at",
+        "command_kind",
+        "status",
+        "goal",
+        "brain_type",
+        "duration_secs",
+        "population",
+        "generations",
+        "de_f",
+        "de_cr",
+        "convergence",
+        "assr",
+        "thalamic_gate",
+        "cet",
+        "phys_gate",
+        "acoustic_score_fusion",
+        "constrained",
+        "crowding",
+        "stagnation_window",
+        "stagnation_fraction",
+        "jr_sigma",
+        "gaba_b_rate",
+        "gaba_b_gain",
+        "init_preset_path",
+        "output_path",
+        "examples_path",
+        "pairs_path",
+        "total_examples",
+        "total_pairs",
+    ]
+    .join(",")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runs_csv_row(
+    run_id: &str,
+    created_at: &str,
+    command_kind: &str,
+    status: &str,
+    goal_kind: GoalKind,
+    brain_type: BrainType,
+    duration_secs: f32,
+    population: usize,
+    generations: usize,
+    de_f: f64,
+    de_cr: f64,
+    convergence: f64,
+    config: &SimulationConfig,
+    crowding: bool,
+    stagnation_window: usize,
+    stagnation_fraction: f64,
+    init_preset: Option<&Path>,
+    output: Option<&Path>,
+    examples_path: &Path,
+    pairs_path: &Path,
+    total_examples: usize,
+    total_pairs: usize,
+) -> String {
+    let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
+    [
+        run_id.to_string(),
+        created_at.to_string(),
+        chrono::Utc::now().to_rfc3339(),
+        command_kind.to_string(),
+        status.to_string(),
+        goal_kind.to_string(),
+        brain_type.to_string(),
+        format!("{duration_secs:.3}"),
+        population.to_string(),
+        generations.to_string(),
+        format!("{de_f:.6}"),
+        format!("{de_cr:.6}"),
+        format!("{convergence:.6}"),
+        bool01(config.assr_enabled),
+        bool01(config.thalamic_gate_enabled),
+        bool01(config.cet_enabled),
+        bool01(config.physiological_thalamic_gate_enabled),
+        bool01(config.acoustic_score_fusion_enabled),
+        bool01(config.acoustic_constraints_enabled),
+        bool01(crowding),
+        stagnation_window.to_string(),
+        format!("{stagnation_fraction:.6}"),
+        format!("{:.6}", config.jr_stochastic_sigma),
+        format!("{:.6}", config.cet_b_slow_rate),
+        format!("{:.6}", config.cet_b_slow_gain),
+        init_preset
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        output.map(|p| p.display().to_string()).unwrap_or_default(),
+        examples_path.display().to_string(),
+        pairs_path.display().to_string(),
+        total_examples.to_string(),
+        total_pairs.to_string(),
+    ]
+    .join(",")
+}
+
+fn surrogate_csv_header() -> String {
+    let mut cols: Vec<String> = vec![
+        "example_id".into(),
+        "run_id".into(),
+        "parent_example_id".into(),
+        "stage".into(),
+        "source".into(),
+        "seed_eval".into(),
+        "created_at".into(),
+        "goal".into(),
+        "goal_id".into(),
+        "brain_type".into(),
+        "brain_type_id".into(),
+        "duration_secs".into(),
+        "assr".into(),
+        "thalamic_gate".into(),
+        "cet".into(),
+        "phys_gate".into(),
+        "acoustic_score_fusion".into(),
+        "constrained".into(),
+        "jr_sigma".into(),
+        "gaba_b_rate".into(),
+        "gaba_b_gain".into(),
+    ];
+    cols.extend((0..surrogate::GENOME_DIM).map(|i| format!("g{i}")));
+    cols.extend([
+        "score",
+        "legacy_nmm_score",
+        "fused_score",
+        "acoustic_goal_score",
+        "comfort_score",
+        "violation",
+        "dominant_freq_hz",
+        "delta_power",
+        "theta_power",
+        "alpha_power",
+        "beta_power",
+        "gamma_power",
+        "left_dominant_freq_hz",
+        "right_dominant_freq_hz",
+        "alpha_asymmetry",
+        "fhn_firing_rate",
+        "fhn_isi_cv",
+        "spectral_centroid_hz",
+        "entrainment_ratio",
+        "ei_stability_cv",
+        "brightness",
+        "broadband_level_db",
+        "speech_band_ratio",
+        "modulation_depth",
+        "sharpness_proxy",
+        "intelligibility",
+        "speech_privacy",
+        "lufs_asymmetry_lu",
+        "true_peak_dbfs",
+        "plr_db",
+        "spectral_tilt_db_per_oct",
+        "hf_fraction_above_8khz",
+        "source_balance_db_range",
+        "is_feasible",
+        "is_good_10s",
+        "is_good_30s",
+        "is_good_60s",
+        "is_stable_10_60",
+        "score_mean",
+        "score_std",
+        "repeats",
+    ]
+    .into_iter()
+    .map(str::to_string));
+    cols.join(",")
+}
+
 fn surrogate_csv_row(
+    meta: &CsvExampleMeta,
     genome: &[f64],
     goal_kind: GoalKind,
     brain_type: BrainType,
     config: &SimulationConfig,
-    score: f64,
+    result: &SimulationResult,
 ) -> String {
     assert_eq!(
         genome.len(),
@@ -443,28 +1249,120 @@ fn surrogate_csv_row(
         .iter()
         .position(|&b| b == brain_type)
         .unwrap_or(0);
+    let acoustic = result.acoustic_score.as_ref();
+    let features = acoustic.map(|a| &a.features);
+    let violation = acoustic
+        .map(|a| Goal::new(goal_kind).comfort_violation(&a.features))
+        .unwrap_or(0.0);
+    let fmt_opt = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
+    let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
+    let score = result.score;
+    let is_good_10s = if (config.duration_secs - 10.0).abs() < 1e-6 {
+        bool01(score >= 0.60)
+    } else {
+        String::new()
+    };
+    let is_good_30s = if (config.duration_secs - 30.0).abs() < 1e-6 {
+        bool01(score >= 0.55)
+    } else {
+        String::new()
+    };
+    let is_good_60s = if (config.duration_secs - 60.0).abs() < 1e-6 {
+        bool01(score >= 0.50)
+    } else {
+        String::new()
+    };
 
-    format!(
-        "{},{goal_id},{bt_id},{},{},{},{},{score:.6}",
-        genome_str.join(","),
-        if config.assr_enabled { 1 } else { 0 },
-        if config.thalamic_gate_enabled { 1 } else { 0 },
-        if config.cet_enabled { 1 } else { 0 },
-        if config.physiological_thalamic_gate_enabled {
-            1
-        } else {
-            0
-        },
-    )
+    let mut cols = vec![
+        meta.example_id.clone(),
+        meta.run_id.clone(),
+        meta.parent_example_id.clone(),
+        meta.stage.clone(),
+        meta.source.clone(),
+        meta.seed_eval.clone(),
+        meta.created_at.clone(),
+        goal_kind.to_string(),
+        goal_id.to_string(),
+        brain_type.to_string(),
+        bt_id.to_string(),
+        format!("{:.3}", config.duration_secs),
+        bool01(config.assr_enabled),
+        bool01(config.thalamic_gate_enabled),
+        bool01(config.cet_enabled),
+        bool01(config.physiological_thalamic_gate_enabled),
+        bool01(config.acoustic_score_fusion_enabled),
+        bool01(config.acoustic_constraints_enabled),
+        format!("{:.6}", config.jr_stochastic_sigma),
+        format!("{:.6}", config.cet_b_slow_rate),
+        format!("{:.6}", config.cet_b_slow_gain),
+    ];
+    cols.extend(genome_str);
+    cols.extend([
+        format!("{score:.6}"),
+        fmt_opt(acoustic.and_then(|a| a.legacy_nmm_score)),
+        fmt_opt(acoustic.and_then(|a| a.fused_score_preview)),
+        fmt_opt(acoustic.and_then(|a| a.acoustic_goal_score)),
+        fmt_opt(acoustic.and_then(|a| a.comfort_score)),
+        format!("{violation:.6}"),
+        format!("{:.6}", result.dominant_freq),
+        format!("{:.6}", result.delta_power),
+        format!("{:.6}", result.theta_power),
+        format!("{:.6}", result.alpha_power),
+        format!("{:.6}", result.beta_power),
+        format!("{:.6}", result.gamma_power),
+        format!("{:.6}", result.left_dominant_freq),
+        format!("{:.6}", result.right_dominant_freq),
+        format!("{:.6}", result.alpha_asymmetry),
+        format!("{:.6}", result.fhn_firing_rate),
+        format!("{:.6}", result.fhn_isi_cv),
+        format!("{:.6}", result.performance.spectral_centroid),
+        fmt_opt(result.performance.entrainment_ratio),
+        fmt_opt(result.performance.ei_stability),
+        format!("{:.6}", result.brightness),
+        fmt_opt(features.and_then(|f| f.broadband_level_db)),
+        fmt_opt(features.and_then(|f| f.speech_band_ratio)),
+        fmt_opt(features.and_then(|f| f.modulation_depth)),
+        fmt_opt(features.and_then(|f| f.sharpness_proxy)),
+        fmt_opt(acoustic.and_then(|a| a.intelligibility_proxy)),
+        fmt_opt(acoustic.and_then(|a| a.speech_privacy)),
+        fmt_opt(features.and_then(|f| f.lufs_asymmetry_lu)),
+        fmt_opt(features.and_then(|f| f.true_peak_dbfs)),
+        fmt_opt(features.and_then(|f| f.plr_db)),
+        fmt_opt(features.and_then(|f| f.spectral_tilt_db_per_oct)),
+        fmt_opt(features.and_then(|f| f.hf_fraction_above_8khz)),
+        fmt_opt(features.and_then(|f| f.source_balance_db_range)),
+        bool01(violation <= 1e-9),
+        is_good_10s,
+        is_good_30s,
+        is_good_60s,
+        String::new(), // is_stable_10_60
+        format!("{score:.6}"),
+        String::new(), // score_std
+        "1".to_string(),
+    ]);
+    cols.join(",")
+}
+
+fn preset_from_genome_with_seed_context(
+    genome: &[f64],
+    seed_ctx: &SeedPresetContext,
+) -> Preset {
+    let mut preset = Preset::from_genome_with_spread(genome, &seed_ctx.spread_per_slot);
+    preset.room = seed_ctx.room.clone();
+    for (i, obj) in preset.objects.iter_mut().enumerate() {
+        obj.position_space = seed_ctx.position_space_per_slot[i];
+    }
+    preset.clamp();
+    preset
 }
 
 fn reevaluate_best_preset(
     best_genome: &[f64],
     goal: &Goal,
     sim_config: &SimulationConfig,
-    spread_per_slot: &[f32; preset::MAX_OBJECTS],
+    seed_ctx: &SeedPresetContext,
 ) -> (Preset, pipeline::SimulationResult) {
-    let best_preset = Preset::from_genome_with_spread(best_genome, spread_per_slot);
+    let best_preset = preset_from_genome_with_seed_context(best_genome, seed_ctx);
     let best_result = evaluate_preset(&best_preset, goal, sim_config);
     (best_preset, best_result)
 }
@@ -477,10 +1375,9 @@ fn export_best_genome(
     generations: usize,
     duration_secs: f32,
     sim_config: &SimulationConfig,
-    spread_per_slot: &[f32; preset::MAX_OBJECTS],
+    seed_ctx: &SeedPresetContext,
 ) -> std::io::Result<(Preset, pipeline::SimulationResult)> {
-    let (best_preset, best_result) =
-        reevaluate_best_preset(best_genome, goal, sim_config, spread_per_slot);
+    let (best_preset, best_result) = reevaluate_best_preset(best_genome, goal, sim_config, seed_ctx);
     export::export_preset(
         &best_preset,
         &best_result,
@@ -511,6 +1408,9 @@ fn evaluate_score_matrix(
     duration: f32,
     flags: EvaluateFeatureFlags,
     acoustic_score_fusion: bool,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
 ) -> Vec<Vec<f64>> {
     brain_types
         .iter()
@@ -525,12 +1425,243 @@ fn evaluate_score_matrix(
                         flags,
                         acoustic_score_fusion,
                         acoustic_score_fusion,
+                        jr_sigma,
+                        gaba_b_rate,
+                        gaba_b_gain,
                     );
                     evaluate_preset(preset, &goal, &sim_config).score
                 })
                 .collect()
         })
         .collect()
+}
+
+fn staged_output_paths(goal: &str, output: Option<&Path>) -> (PathBuf, PathBuf, PathBuf) {
+    if let Some(final_output) = output {
+        let parent = final_output.parent().unwrap_or_else(|| Path::new("."));
+        let stem = final_output
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("preset");
+        let ext = final_output
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("json");
+        let stage1 = parent.join(format!("{stem}_stage1_10s.{ext}"));
+        let stage2 = parent.join(format!("{stem}_stage2_30s.{ext}"));
+        (stage1, stage2, final_output.to_path_buf())
+    } else {
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        (
+            PathBuf::from(format!("preset_{}_staged_stage1_10s_{}.json", goal, ts)),
+            PathBuf::from(format!("preset_{}_staged_stage2_30s_{}.json", goal, ts)),
+            PathBuf::from(format!("preset_{}_staged_final_60s_{}.json", goal, ts)),
+        )
+    }
+}
+
+fn seed_only_path_for_preset(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("preset");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("json");
+    parent.join(format!("{stem}_seed_only.{ext}"))
+}
+
+/// Accept either a raw preset JSON or an exported wrapper with a nested
+/// `preset` payload. Returns a path to a raw preset JSON suitable for
+/// `run_optimize --init-preset`.
+fn ensure_raw_preset_seed(path: &Path) -> PathBuf {
+    let json = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Failed to read preset seed '{}': {}", path.display(), e);
+        std::process::exit(1);
+    });
+
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
+        eprintln!("Failed to parse preset seed '{}': {}", path.display(), e);
+        std::process::exit(1);
+    });
+
+    if value.get("master_gain").is_some() {
+        return path.to_path_buf();
+    }
+
+    let raw_preset = value.get("preset").cloned().unwrap_or_else(|| {
+        eprintln!(
+            "Preset seed '{}' is neither a raw preset nor an export wrapper with a top-level 'preset' field",
+            path.display()
+        );
+        std::process::exit(1);
+    });
+
+    let seed_path = seed_only_path_for_preset(path);
+    let serialized = serde_json::to_string_pretty(&raw_preset).unwrap_or_else(|e| {
+        eprintln!(
+            "Failed to serialize extracted raw preset for '{}': {}",
+            path.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+    std::fs::write(&seed_path, serialized).unwrap_or_else(|e| {
+        eprintln!(
+            "Failed to write extracted raw preset seed '{}': {}",
+            seed_path.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+    seed_path
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimize_staged(
+    goal: &str,
+    stage1_generations: usize,
+    stage1_population: usize,
+    stage1_duration: f32,
+    stage2_generations: usize,
+    stage2_population: usize,
+    stage2_duration: f32,
+    stage3_generations: usize,
+    stage3_population: usize,
+    stage3_duration: f32,
+    output: Option<PathBuf>,
+    seed: u64,
+    de_f: f64,
+    de_cr: f64,
+    convergence: f64,
+    brain_type: &str,
+    init_preset: Option<&Path>,
+    cet: bool,
+    phys_gate: bool,
+    acoustic_score_fusion: bool,
+    constrained: bool,
+    crowding: bool,
+    stagnation_window: usize,
+    stagnation_fraction: f64,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
+) {
+    let (stage1_output, stage2_output, final_output) = staged_output_paths(goal, output.as_deref());
+    let stage1_seed = init_preset.map(ensure_raw_preset_seed);
+
+    println!();
+    println!("  Staged Optimization");
+    println!("  ════════════════════════════════════════");
+    println!(
+        "  Schedule:       {:.0}s -> {:.0}s -> {:.0}s",
+        stage1_duration, stage2_duration, stage3_duration
+    );
+    println!(
+        "  Stage 1:        pop={} gens={}",
+        stage1_population, stage1_generations
+    );
+    println!(
+        "  Stage 2:        pop={} gens={}",
+        stage2_population, stage2_generations
+    );
+    println!(
+        "  Stage 3:        pop={} gens={}",
+        stage3_population, stage3_generations
+    );
+    println!("  Final output:   {}", final_output.display());
+    println!();
+
+    println!("  Stage 1/3 — short-window search");
+    run_optimize(
+        goal,
+        stage1_generations,
+        stage1_population,
+        stage1_duration,
+        Some(stage1_output.clone()),
+        seed,
+        de_f,
+        de_cr,
+        convergence,
+        brain_type,
+        stage1_seed.as_deref(),
+        cet,
+        phys_gate,
+        acoustic_score_fusion,
+        constrained,
+        crowding,
+        stagnation_window,
+        stagnation_fraction,
+        jr_sigma,
+        gaba_b_rate,
+        gaba_b_gain,
+        false,
+        Path::new("surrogate_weights.bin"),
+        5,
+        None,
+    );
+    let stage2_seed = ensure_raw_preset_seed(&stage1_output);
+
+    println!("  Stage 2/3 — medium-window continuation");
+    run_optimize(
+        goal,
+        stage2_generations,
+        stage2_population,
+        stage2_duration,
+        Some(stage2_output.clone()),
+        seed.wrapping_add(1),
+        de_f,
+        de_cr,
+        convergence,
+        brain_type,
+        Some(stage2_seed.as_path()),
+        cet,
+        phys_gate,
+        acoustic_score_fusion,
+        constrained,
+        crowding,
+        stagnation_window,
+        stagnation_fraction,
+        jr_sigma,
+        gaba_b_rate,
+        gaba_b_gain,
+        false,
+        Path::new("surrogate_weights.bin"),
+        5,
+        None,
+    );
+    let stage3_seed = ensure_raw_preset_seed(&stage2_output);
+
+    println!("  Stage 3/3 — long-window continuation");
+    run_optimize(
+        goal,
+        stage3_generations,
+        stage3_population,
+        stage3_duration,
+        Some(final_output.clone()),
+        seed.wrapping_add(2),
+        de_f,
+        de_cr,
+        convergence,
+        brain_type,
+        Some(stage3_seed.as_path()),
+        cet,
+        phys_gate,
+        acoustic_score_fusion,
+        constrained,
+        crowding,
+        stagnation_window,
+        stagnation_fraction,
+        jr_sigma,
+        gaba_b_rate,
+        gaba_b_gain,
+        false,
+        Path::new("surrogate_weights.bin"),
+        5,
+        None,
+    );
+
+    println!("  Stage artifacts:");
+    println!("    {}", stage1_output.display());
+    println!("    {}", stage2_output.display());
+    println!("    {}", final_output.display());
+    println!();
 }
 
 fn main() {
@@ -552,6 +1683,13 @@ fn main() {
             cet,
             phys_gate,
             acoustic_score_fusion,
+            constrained,
+            crowding,
+            stagnation_window,
+            stagnation_fraction,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
             log_evaluations,
             surrogate,
             surrogate_weights,
@@ -572,10 +1710,76 @@ fn main() {
                 cet,
                 phys_gate,
                 acoustic_score_fusion,
+                constrained,
+                crowding,
+                stagnation_window,
+                stagnation_fraction,
+                jr_sigma,
+                gaba_b_rate,
+                gaba_b_gain,
                 surrogate,
                 &surrogate_weights,
                 surrogate_k,
                 log_evaluations.as_deref(),
+            );
+        }
+        Commands::OptimizeStaged {
+            goal,
+            population,
+            generations,
+            output,
+            seed,
+            de_f,
+            de_cr,
+            convergence,
+            brain_type,
+            init_preset,
+            cet,
+            phys_gate,
+            acoustic_score_fusion,
+            constrained,
+            crowding,
+            stagnation_window,
+            stagnation_fraction,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
+            stage1_duration,
+            stage2_duration,
+            stage3_duration,
+            stage2_population,
+            stage2_generations,
+            stage3_population,
+            stage3_generations,
+        } => {
+            run_optimize_staged(
+                &goal,
+                generations,
+                population,
+                stage1_duration,
+                stage2_generations,
+                stage2_population,
+                stage2_duration,
+                stage3_generations,
+                stage3_population,
+                stage3_duration,
+                output,
+                seed,
+                de_f,
+                de_cr,
+                convergence,
+                &brain_type,
+                init_preset.as_deref(),
+                cet,
+                phys_gate,
+                acoustic_score_fusion,
+                constrained,
+                crowding,
+                stagnation_window,
+                stagnation_fraction,
+                jr_sigma,
+                gaba_b_rate,
+                gaba_b_gain,
             );
         }
         Commands::Evaluate {
@@ -592,6 +1796,10 @@ fn main() {
             phys_gate,
             acoustic_score,
             acoustic_score_fusion,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
+            log_evaluations,
         } => {
             let flags = resolve_evaluate_feature_flags(
                 assr,
@@ -610,6 +1818,10 @@ fn main() {
                 flags,
                 acoustic_score,
                 acoustic_score_fusion,
+                jr_sigma,
+                gaba_b_rate,
+                gaba_b_gain,
+                log_evaluations.as_deref(),
             );
         }
         Commands::Disturb {
@@ -653,11 +1865,354 @@ fn main() {
                 seed,
             );
         }
+        Commands::CalibrateComfort {
+            presets_dir,
+            duration,
+            brain_type,
+        } => {
+            run_calibrate_comfort(&presets_dir, duration, &brain_type);
+        }
     }
+}
+
+// ── Calibrate Comfort ─────────────────────────────────────────────────────
+
+/// Infer goal from preset filename. Returns None when no goal token is
+/// recognised in the filename — caller should skip those presets.
+fn infer_goal_from_filename(name: &str) -> Option<GoalKind> {
+    let lower = name.to_lowercase();
+    // Order matters: more specific patterns first.
+    if lower.contains("deepwork") || lower.contains("deep_work") {
+        return Some(GoalKind::DeepWork);
+    }
+    if lower.contains("deep_relax") || lower.contains("deeprelax") || lower.contains("deep-relax") {
+        return Some(GoalKind::DeepRelaxation);
+    }
+    if lower.contains("isolation") {
+        return Some(GoalKind::Isolation);
+    }
+    if lower.contains("meditation") || lower.contains("meditate") {
+        return Some(GoalKind::Meditation);
+    }
+    if lower.contains("ignition") {
+        return Some(GoalKind::Ignition);
+    }
+    if lower.contains("shield") {
+        return Some(GoalKind::Shield);
+    }
+    if lower.contains("sleep") {
+        return Some(GoalKind::Sleep);
+    }
+    if lower.contains("flow") {
+        return Some(GoalKind::Flow);
+    }
+    if lower.contains("focus") {
+        return Some(GoalKind::Focus);
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ComfortSample {
+    lufs_asymmetry_lu: Option<f64>,
+    true_peak_dbfs: Option<f64>,
+    plr_db: Option<f64>,
+    spectral_tilt_dev_db_per_oct: Option<f64>,
+    hf_fraction: Option<f64>,
+    source_balance_db_range: Option<f64>,
+}
+
+/// Compute percentile from a sorted slice via nearest-rank.
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let q = q.clamp(0.0, 1.0);
+    let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn print_metric_distribution(
+    label: &str,
+    values: &[f64],
+    current_threshold: Option<f64>,
+    units: &str,
+) {
+    if values.is_empty() {
+        println!(
+            "  {label:<32}  no data",
+            label = format!("{label} ({units})")
+        );
+        return;
+    }
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = sorted.len();
+    let min = sorted[0];
+    let p10 = percentile(&sorted, 0.10);
+    let p50 = percentile(&sorted, 0.50);
+    let p90 = percentile(&sorted, 0.90);
+    let max = sorted[n - 1];
+    let mean = sorted.iter().sum::<f64>() / n as f64;
+    let header = format!("{label} ({units})");
+    let threshold_col = match current_threshold {
+        Some(t) => format!("  thr={t:.3}"),
+        None => "".to_string(),
+    };
+    let suggestion = match current_threshold {
+        Some(t) if p90 > t => format!("  ⚠ p90 > thr (∴ raise to ≥{:.2})", p90),
+        Some(t) if p90 < t * 0.5 => format!("  ⚠ p90 << thr (∴ tighten to ≈{:.2})", p90.max(p50 * 1.2)),
+        Some(_) => "  ✓ fits".to_string(),
+        None => "".to_string(),
+    };
+    println!(
+        "  {:<28}  n={:>3}  min={:>6.2}  p10={:>6.2}  p50={:>6.2}  p90={:>6.2}  max={:>6.2}  mean={:>6.2}{}{}",
+        header, n, min, p10, p50, p90, max, mean, threshold_col, suggestion
+    );
+}
+
+fn run_calibrate_comfort(presets_dir: &Path, duration: f32, brain_type_str: &str) {
+    let bt = BrainType::from_str(brain_type_str).unwrap_or_else(|| {
+        eprintln!("Unknown brain type: '{brain_type_str}'. Valid: normal, high_alpha, adhd, aging, anxious");
+        std::process::exit(1);
+    });
+
+    println!();
+    println!("  Comfort-Metric Calibration");
+    println!("  ════════════════════════════════════════");
+    println!("  Presets dir:    {}", presets_dir.display());
+    println!("  Brain type:     {bt}");
+    println!("  Duration:       {duration:.1}s");
+    println!();
+
+    let entries = match std::fs::read_dir(presets_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Failed to read presets dir {}: {e}", presets_dir.display());
+            std::process::exit(1);
+        }
+    };
+
+    // Build a flat list of (filename, goal, preset) tuples.
+    let mut work: Vec<(String, GoalKind, Preset)> = Vec::new();
+    let mut skipped_no_goal = 0usize;
+    let mut skipped_parse = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let goal = match infer_goal_from_filename(&filename) {
+            Some(g) => g,
+            None => {
+                skipped_no_goal += 1;
+                continue;
+            }
+        };
+        let json = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => {
+                skipped_parse += 1;
+                continue;
+            }
+        };
+        // Accept both raw Preset JSON and PresetExport-wrapped JSON.
+        let value: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(_) => {
+                skipped_parse += 1;
+                continue;
+            }
+        };
+        let preset_value = if value.get("preset").is_some() {
+            value["preset"].clone()
+        } else {
+            value
+        };
+        let preset: Preset = match serde_json::from_value(preset_value) {
+            Ok(p) => p,
+            Err(_) => {
+                skipped_parse += 1;
+                continue;
+            }
+        };
+        work.push((filename, goal, preset));
+    }
+
+    println!(
+        "  Found {} presets, skipped {} (no goal in filename), {} parse failures",
+        work.len(),
+        skipped_no_goal,
+        skipped_parse
+    );
+    println!();
+
+    let mut sim_config = pipeline::SimulationConfig {
+        duration_secs: duration,
+        brain_type: bt,
+        acoustic_scoring_enabled: true,
+        ..pipeline::SimulationConfig::default()
+    };
+    // We need acoustic features but NOT fusion or constraints — both
+    // alter scoring rather than feature extraction.
+    sim_config.acoustic_score_fusion_enabled = false;
+    sim_config.acoustic_constraints_enabled = false;
+
+    use std::collections::BTreeMap;
+    let mut samples_by_goal: BTreeMap<String, Vec<ComfortSample>> = BTreeMap::new();
+    let mut all_samples: Vec<ComfortSample> = Vec::new();
+
+    for (filename, goal_kind, preset) in &work {
+        let goal = Goal::new(*goal_kind);
+        let detailed = pipeline::evaluate_preset_detailed(preset, &goal, &sim_config);
+        let acoustic = match detailed.summary.acoustic_score.as_ref() {
+            Some(a) => a,
+            None => continue,
+        };
+        let f = &acoustic.features;
+        let target_tilt = goal_target_tilt(*goal_kind);
+        let tilt_dev = f
+            .spectral_tilt_db_per_oct
+            .map(|t| (t - target_tilt).abs());
+        let sample = ComfortSample {
+            lufs_asymmetry_lu: f.lufs_asymmetry_lu,
+            true_peak_dbfs: f.true_peak_dbfs,
+            plr_db: f.plr_db,
+            spectral_tilt_dev_db_per_oct: tilt_dev,
+            hf_fraction: f.hf_fraction_above_8khz,
+            source_balance_db_range: f.source_balance_db_range,
+        };
+        let goal_key = format!("{goal_kind}");
+        samples_by_goal.entry(goal_key).or_default().push(sample);
+        all_samples.push(sample);
+        eprintln!("  {filename:<60}  goal={goal_kind}");
+    }
+    eprintln!();
+
+    // Print global distribution + per-goal.
+    println!();
+    println!("  ── ALL goals combined ─────────────────────");
+    print_distributions("(combined)", &all_samples);
+
+    for (goal_label, samples) in &samples_by_goal {
+        println!();
+        println!("  ── Goal: {goal_label} ──────────────────");
+        print_distributions(goal_label, samples);
+    }
+
+    println!();
+    println!("  Notes:");
+    println!("    - Thresholds shown are CURRENT values from Goal::comfort_violation.");
+    println!("    - p90 > thr means raising the threshold would keep most curated");
+    println!("      presets inside the feasible region (loosening the constraint).");
+    println!("    - p90 << thr means the constraint is loose; could tighten safely.");
+    println!("    - 'tilt_deviation' is |measured − goal_target|, so smaller is better.");
+}
+
+fn goal_target_tilt(goal: GoalKind) -> f64 {
+    match goal {
+        GoalKind::Sleep | GoalKind::DeepRelaxation | GoalKind::Meditation => -6.0,
+        GoalKind::Flow | GoalKind::DeepWork | GoalKind::Shield => -3.0,
+        GoalKind::Focus | GoalKind::Isolation | GoalKind::Ignition => -1.5,
+    }
+}
+
+// Display thresholds — must mirror Goal::comfort_violation. After the
+// 2026-05-01 empirical calibration the values are looser (see commit
+// notes on Goal::lufs_asymmetry_threshold_lu and friends).
+fn goal_lufs_asym_threshold(goal: &str) -> Option<f64> {
+    match goal {
+        "focus" | "deep_work" | "ignition" => Some(4.0),
+        "(combined)" => None, // no single threshold for the mixed group
+        _ => Some(3.0),
+    }
+}
+
+fn goal_hf_threshold(goal: &str) -> Option<f64> {
+    match goal {
+        "sleep" | "deep_relaxation" | "meditation" => Some(0.10),
+        "(combined)" => None,
+        _ => Some(0.20),
+    }
+}
+
+fn goal_source_balance_threshold(goal: &str) -> Option<f64> {
+    match goal {
+        "focus" | "deep_work" | "ignition" => Some(15.0),
+        "(combined)" => None,
+        _ => Some(12.0),
+    }
+}
+
+fn print_distributions(goal_label: &str, samples: &[ComfortSample]) {
+    if samples.is_empty() {
+        println!("  (no samples)");
+        return;
+    }
+    let collect = |f: fn(&ComfortSample) -> Option<f64>| -> Vec<f64> {
+        samples.iter().filter_map(f).collect()
+    };
+    let lufs_asym = collect(|s| s.lufs_asymmetry_lu);
+    let true_peak = collect(|s| s.true_peak_dbfs);
+    let plr = collect(|s| s.plr_db);
+    let tilt_dev = collect(|s| s.spectral_tilt_dev_db_per_oct);
+    let hf = collect(|s| s.hf_fraction);
+    let src_balance = collect(|s| s.source_balance_db_range);
+
+    print_metric_distribution(
+        "lufs_asymmetry",
+        &lufs_asym,
+        goal_lufs_asym_threshold(goal_label),
+        "LU",
+    );
+    print_metric_distribution(
+        "true_peak",
+        &true_peak,
+        Some(-1.0), // ceiling, same for all goals
+        "dBFS",
+    );
+    print_metric_distribution(
+        "plr",
+        &plr,
+        if goal_label == "ignition" {
+            None
+        } else {
+            Some(16.0) // PLR_THRESHOLD_DB after 2026-05-01 calibration
+        },
+        "dB",
+    );
+    print_metric_distribution(
+        "tilt_deviation_from_goal",
+        &tilt_dev,
+        Some(5.0), // SPECTRAL_TILT_TOLERANCE_DB after 2026-05-01 calibration
+        "dB/oct",
+    );
+    print_metric_distribution(
+        "hf_fraction",
+        &hf,
+        goal_hf_threshold(goal_label),
+        "[0,1]",
+    );
+    print_metric_distribution(
+        "source_balance",
+        &src_balance,
+        goal_source_balance_threshold(goal_label),
+        "dB",
+    );
 }
 
 // ── Optimize ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn run_optimize(
     goal_str: &str,
     generations: usize,
@@ -673,6 +2228,13 @@ fn run_optimize(
     cet: bool,
     phys_gate: bool,
     acoustic_score_fusion: bool,
+    constrained: bool,
+    crowding: bool,
+    stagnation_window: usize,
+    stagnation_fraction: f64,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
     use_surrogate: bool,
     surrogate_weights_path: &Path,
     surrogate_k: usize,
@@ -695,6 +2257,7 @@ fn run_optimize(
     if let Err(message) = validate_optimize_acoustic_mode(
         &goal,
         acoustic_score_fusion,
+        constrained,
         use_surrogate,
         log_evaluations_path,
     ) {
@@ -710,8 +2273,17 @@ fn run_optimize(
         std::process::exit(1);
     });
 
-    let sim_config =
-        build_optimize_config(duration, bt, cet, phys_gate, acoustic_score_fusion);
+    let sim_config = build_optimize_config(
+        duration,
+        bt,
+        cet,
+        phys_gate,
+        acoustic_score_fusion,
+        constrained,
+        jr_sigma,
+        gaba_b_rate,
+        gaba_b_gain,
+    );
 
     println!();
     println!("  Neural Preset Optimizer");
@@ -732,44 +2304,12 @@ fn run_optimize(
         println!("  Acoustic fusion: enabled ({goal_kind} objective)");
     }
 
-    // Set up evaluation logger for surrogate training data collection.
-    // Appends every real-pipeline evaluation to a CSV file. The file is
-    // created with a header if it doesn't exist, or appended to if it does.
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
-    let eval_logger: Option<Arc<Mutex<std::fs::File>>> = log_evaluations_path.map(|path| {
-        let file_exists = path.exists();
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to open log file: {e}");
-                std::process::exit(1);
-            });
-        if !file_exists {
-            // Write CSV header
-            let mut f = file;
-            writeln!(f, "{}", surrogate_csv_header()).unwrap();
-            println!("  Log evals:      {} (new file)", path.display());
-            Arc::new(Mutex::new(f))
-        } else {
-            println!("  Log evals:      {} (appending)", path.display());
-            Arc::new(Mutex::new(file))
-        }
-    });
-
-    let log_eval = |genome: &[f64], score: f64| {
-        if let Some(ref logger) = eval_logger {
-            let mut f = logger.lock().unwrap();
-            let _ = writeln!(
-                f,
-                "{}",
-                surrogate_csv_row(genome, goal_kind, bt, &sim_config, score)
-            );
-        }
-    };
+    let mut eval_logger = log_evaluations_path.map(|path| OptimizeCsvLogger::new(path, "optimize"));
+    if let Some(ref logger) = eval_logger {
+        println!("  Log evals:      {}", logger.examples_path.display());
+        println!("  Log pairs:      {}", logger.pairs_path.display());
+        println!("  Log runs:       {}", logger.runs_path.display());
+    }
 
     // Load surrogate model if requested (Priority 14).
     let surrogate_model = if use_surrogate {
@@ -790,10 +2330,44 @@ fn run_optimize(
     };
     println!();
 
-    let bounds = Preset::bounds();
+    // Force all optimizer-generated presets to keep the anchor muted so every
+    // audible component goes through the object/HRTF path.
+    let bounds = Preset::bounds_with_anchor_disabled();
     let discrete_dims = Preset::discrete_gene_indices();
     let mut de =
         DifferentialEvolution::with_discrete(bounds, population, de_f, de_cr, seed, discrete_dims);
+
+    // Priority 28 Phase 3 — DE diversification (opt-in).
+    if crowding {
+        de.enable_crowding_selection();
+        println!("  Crowding-DE:    enabled (Thomsen 2004 nearest-parent selection)");
+    }
+    if stagnation_window > 0 {
+        if !(0.0..=1.0).contains(&stagnation_fraction) {
+            eprintln!(
+                "Invalid optimize configuration: --stagnation-fraction must be in [0, 1], got {stagnation_fraction}"
+            );
+            std::process::exit(2);
+        }
+        de.enable_stagnation_restart(stagnation_window, stagnation_fraction);
+        println!(
+            "  Stagnation:     restart after {} stale gens, reseed worst {:.0}%",
+            stagnation_window,
+            stagnation_fraction * 100.0
+        );
+    }
+    // Priority 18 — only print when at least one param is non-default.
+    // Defaults match historical hardcoded values exactly, so this
+    // produces no extra output for legacy invocations.
+    if (jr_sigma - 15.0).abs() > 1e-12
+        || (gaba_b_rate - 5.0).abs() > 1e-12
+        || (gaba_b_gain - 10.0).abs() > 1e-12
+    {
+        println!(
+            "  P18 retune:     jr_sigma={:.1} (default 15.0)  gaba_b_rate={:.1} (default 5.0)  gaba_b_gain={:.1} (default 10.0)",
+            jr_sigma, gaba_b_rate, gaba_b_gain
+        );
+    }
 
     // Seed population from an existing preset if provided. Spread is not part
     // of the genome (the surrogate contract requires a stable 230-dim input),
@@ -801,7 +2375,7 @@ fn run_optimize(
     // `from_genome` call below. Without this, seed presets that use spread
     // would silently lose those values on the first round-trip and the
     // optimizer would "improve" a structurally different preset.
-    let mut spread_per_slot = [0.0_f32; preset::MAX_OBJECTS];
+    let mut seed_ctx = SeedPresetContext::default();
     if let Some(path) = init_preset {
         let json = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("Failed to read init preset: {}", e);
@@ -812,12 +2386,16 @@ fn run_optimize(
             std::process::exit(1);
         });
         for (i, obj) in preset.objects.iter().take(preset::MAX_OBJECTS).enumerate() {
-            spread_per_slot[i] = obj.spread.clamp(0.0, 1.0);
+            seed_ctx.spread_per_slot[i] = obj.spread.clamp(0.0, 1.0);
+            seed_ctx.position_space_per_slot[i] = obj.position_space.min(2);
         }
-        let genome = preset.to_genome();
+        seed_ctx.room = preset.room.clone();
+        let mut genome = preset.to_genome();
+        Preset::disable_anchor_in_genome(&mut genome);
         de.seed_from_genome(&genome, 0.15);
         println!("  Init preset:    {}", path.display());
-        let nonzero_spread: Vec<String> = spread_per_slot
+        let nonzero_spread: Vec<String> = seed_ctx
+            .spread_per_slot
             .iter()
             .enumerate()
             .filter(|(_, &s)| s > 0.0)
@@ -829,6 +2407,11 @@ fn run_optimize(
                 nonzero_spread.join(", ")
             );
         }
+        if seed_ctx.room.mode != 0
+            || seed_ctx.position_space_per_slot.iter().any(|&space| space != 0)
+        {
+            println!("  Seed context:   preserving room mode and object position spaces from seed");
+        }
     }
 
     let start = Instant::now();
@@ -836,23 +2419,83 @@ fn run_optimize(
     // ── Initial population evaluation ───────────────────────────────────────
     println!("  Evaluating initial population...");
     let pending = de.pending_evaluations();
+    let mut population_example_ids = vec![String::new(); population];
     for (idx, genome) in &pending {
-        let preset = Preset::from_genome_with_spread(genome, &spread_per_slot);
+        let preset = preset_from_genome_with_seed_context(genome, &seed_ctx);
         let result = evaluate_preset(&preset, &goal, &sim_config);
-        log_eval(genome, result.score);
-        de.report_fitness(*idx, result.score);
+        if let Some(ref mut logger) = eval_logger {
+            let meta = logger.build_example_meta(
+                None,
+                "optimize_initial_population",
+                "initial_population",
+                None,
+            );
+            logger.log_example(&meta, genome, goal_kind, bt, &sim_config, &result);
+            population_example_ids[*idx] = meta.example_id;
+        }
+        if constrained {
+            // Priority 28 Phase 2: in constrained mode the optimizer ranks
+            // by (neural_fitness, violation). The neural_fitness is the
+            // pure-NMM score (fusion is force-disabled); violation comes
+            // from goal.comfort_violation over the populated acoustic
+            // features.
+            let violation = compute_comfort_violation(&goal, &result);
+            de.report_constrained(*idx, result.score, violation);
+        } else {
+            de.report_fitness(*idx, result.score);
+        }
     }
 
-    println!(
-        "  Initial best: {:.4}  mean: {:.4}",
-        de.best().fitness,
-        de.mean_fitness()
-    );
+    // ── Priority 28 Phase 2: activate ε schedule from initial-pop violations
+    //    (Takahama & Sakai 2009; ε₀ from 70th-percentile per spec §28f).
+    if constrained {
+        let eps_0 = de.suggest_eps_from_population(0.70);
+        let t_c = (generations / 2).max(1);
+        de.enable_eps_constrained(eps_0, t_c);
+        println!(
+            "  Constrained:    ε₀ = {:.4} (70th-pct violation), t_c = {} gens",
+            eps_0, t_c
+        );
+    }
+
+    if constrained {
+        println!(
+            "  Initial best:   neural = {:.4}  violation = {:.4}  mean fitness = {:.4}",
+            de.best().neural_fitness,
+            de.best().violation,
+            de.mean_fitness()
+        );
+    } else {
+        println!(
+            "  Initial best: {:.4}  mean: {:.4}",
+            de.best().fitness,
+            de.mean_fitness()
+        );
+    }
     println!();
 
     // ── Evolution loop ──────────────────────────────────────────────────────
+    //
+    // Convergence/stagnation tracking is mode-aware (review fix
+    // 2026-05-02). In **legacy mode** we track `de.best().fitness`,
+    // matching the historical behaviour exactly. In **constrained
+    // mode** we track the **strict-feasible best** instead, because
+    // the cached `best` follows the ε-relaxed comparator (which
+    // changes its incumbent as ε decays), and `fitness_std()` is
+    // computed over all individuals' display fitness regardless of
+    // feasibility — neither is a meaningful signal for "the run has
+    // stopped finding better strict-feasible candidates". We also
+    // refuse to declare convergence while ε > 0, since the schedule
+    // is still actively reshaping which candidates qualify as
+    // ε-feasible.
     let mut stale_count = 0;
-    let mut prev_best = de.best().fitness;
+    let mut prev_best: f64 = if constrained {
+        de.best_strict()
+            .map(|s| s.neural_fitness)
+            .unwrap_or(f64::NEG_INFINITY)
+    } else {
+        de.best().fitness
+    };
 
     for gen in 0..generations {
         let trials = de.generate_trials();
@@ -890,21 +2533,107 @@ fn run_optimize(
             for (rank, &(target_idx, ref trial_genome, surr_score)) in scored.iter().enumerate() {
                 if validate_mask[rank] {
                     // Validate with real pipeline
-                    let preset = Preset::from_genome_with_spread(trial_genome, &spread_per_slot);
+                    let parent_before = de.individual(target_idx).clone();
+                    let preset = preset_from_genome_with_seed_context(trial_genome, &seed_ctx);
                     let result = evaluate_preset(&preset, &goal, &sim_config);
-                    log_eval(trial_genome, result.score);
+                    let parent_preset =
+                        preset_from_genome_with_seed_context(&parent_before.genome, &seed_ctx);
+                    let parent_result = evaluate_preset(&parent_preset, &goal, &sim_config);
+                    let child_selected = de.trial_would_replace(target_idx, result.score);
+                    let parent_example_id = population_example_ids[target_idx].clone();
+                    let child_example_id = if let Some(ref mut logger) = eval_logger {
+                        let meta = logger.build_example_meta(
+                            Some(&parent_example_id),
+                            "optimize_generation",
+                            "surrogate_validated_trial",
+                            None,
+                        );
+                        logger.log_example(&meta, trial_genome, goal_kind, bt, &sim_config, &result);
+                        logger.log_pair(
+                            gen + 1,
+                            target_idx,
+                            goal_kind,
+                            bt,
+                            &sim_config,
+                            &parent_example_id,
+                            &meta.example_id,
+                            &parent_result,
+                            &result,
+                            parent_before.violation,
+                            0.0,
+                            child_selected,
+                        );
+                        meta.example_id
+                    } else {
+                        String::new()
+                    };
                     de.report_trial_result(target_idx, trial_genome.clone(), result.score);
+                    if child_selected && !child_example_id.is_empty() {
+                        population_example_ids[target_idx] = child_example_id;
+                    }
                 } else {
                     let _ = surr_score;
                 }
             }
         } else {
-            // Standard mode: evaluate ALL trials with real pipeline
+            // Standard mode: evaluate ALL trials with real pipeline.
             for (target_idx, trial_genome) in trials {
-                let preset = Preset::from_genome_with_spread(&trial_genome, &spread_per_slot);
+                let parent_before = de.individual(target_idx).clone();
+                let preset = preset_from_genome_with_seed_context(&trial_genome, &seed_ctx);
                 let result = evaluate_preset(&preset, &goal, &sim_config);
-                log_eval(&trial_genome, result.score);
-                de.report_trial_result(target_idx, trial_genome, result.score);
+                let violation = if constrained {
+                    compute_comfort_violation(&goal, &result)
+                } else {
+                    0.0
+                };
+                let child_selected = if constrained {
+                    de.trial_would_replace_constrained(target_idx, result.score, violation)
+                } else {
+                    de.trial_would_replace(target_idx, result.score)
+                };
+                let parent_example_id = population_example_ids[target_idx].clone();
+                let child_example_id = if let Some(ref mut logger) = eval_logger {
+                    let meta = logger.build_example_meta(
+                        Some(&parent_example_id),
+                        "optimize_generation",
+                        "trial",
+                        None,
+                    );
+                    logger.log_example(&meta, &trial_genome, goal_kind, bt, &sim_config, &result);
+                    let parent_preset =
+                        preset_from_genome_with_seed_context(&parent_before.genome, &seed_ctx);
+                    let parent_result = evaluate_preset(&parent_preset, &goal, &sim_config);
+                    logger.log_pair(
+                        gen + 1,
+                        target_idx,
+                        goal_kind,
+                        bt,
+                        &sim_config,
+                        &parent_example_id,
+                        &meta.example_id,
+                        &parent_result,
+                        &result,
+                        parent_before.violation,
+                        violation,
+                        child_selected,
+                    );
+                    meta.example_id
+                } else {
+                    String::new()
+                };
+                if constrained {
+                    de.report_trial_constrained(
+                        target_idx,
+                        trial_genome,
+                        result.score,
+                        violation,
+                    );
+                } else {
+                    de.report_trial_result(target_idx, trial_genome, result.score);
+                }
+                if child_selected && !child_example_id.is_empty() {
+                    population_example_ids[target_idx] = child_example_id;
+                }
             }
         }
 
@@ -915,25 +2644,77 @@ fn run_optimize(
         // Progress display
         if gen % 5 == 0 || gen == generations - 1 {
             let elapsed = start.elapsed().as_secs_f64();
-            println!(
-                "  Gen {:>4}  best: {:.4}  mean: {:.4}  std: {:.4}  [{:.0}s]",
-                gen + 1,
-                best_fitness,
-                mean_fitness,
-                fitness_std,
-                elapsed,
-            );
+            // Phase 3 instrumentation — only emitted when the feature is
+            // enabled, to keep legacy progress output bit-identical.
+            let restart_suffix = if de.is_stagnation_restart_enabled() {
+                format!("  restarts={}", de.stagnation_restart_count())
+            } else {
+                String::new()
+            };
+            if constrained {
+                let (strict_label, strict_neural, strict_violation) = match de.best_strict() {
+                    Some(s) => ("strict", s.neural_fitness, s.violation),
+                    None => ("none-strict-feasible; ε-best", de.best().neural_fitness, de.best().violation),
+                };
+                println!(
+                    "  Gen {:>4}  ε = {:.4}  best ({}): neural = {:.4}  v = {:.4}  mean = {:.4}{}  [{:.0}s]",
+                    gen + 1,
+                    de.current_eps(),
+                    strict_label,
+                    strict_neural,
+                    strict_violation,
+                    mean_fitness,
+                    restart_suffix,
+                    elapsed,
+                );
+            } else {
+                println!(
+                    "  Gen {:>4}  best: {:.4}  mean: {:.4}  std: {:.4}{}  [{:.0}s]",
+                    gen + 1,
+                    best_fitness,
+                    mean_fitness,
+                    fitness_std,
+                    restart_suffix,
+                    elapsed,
+                );
+            }
         }
 
-        // Convergence check
-        if (best_fitness - prev_best).abs() < 1e-6 {
+        // Mode-aware convergence + stagnation tracking (review fix
+        // 2026-05-02). Constrained mode tracks the strict-feasible
+        // incumbent instead of the ε-relaxed `best`, and refuses to
+        // declare convergence while ε > 0 (the schedule is still
+        // moving). Legacy mode is bit-identical to the historical
+        // behaviour.
+        let tracked_best = if constrained {
+            de.best_strict()
+                .map(|s| s.neural_fitness)
+                .unwrap_or(f64::NEG_INFINITY)
+        } else {
+            best_fitness
+        };
+        let stale_this_gen = if constrained && de.current_eps() > 0.0 {
+            // ε is still binding the comparator; do not let stagnation
+            // fire while the schedule is still reshaping the feasible
+            // region. This avoids the "stagnated at gen 12 because the
+            // strict-best happened not to move while ε halved" failure
+            // mode.
+            false
+        } else {
+            tracked_best.is_finite() && (tracked_best - prev_best).abs() < 1e-6
+        };
+        if stale_this_gen {
             stale_count += 1;
         } else {
             stale_count = 0;
         }
-        prev_best = best_fitness;
+        prev_best = tracked_best;
 
-        if fitness_std < convergence && gen > 10 {
+        // fitness_std-based convergence is meaningful only in legacy
+        // mode — in constrained mode the std is over all individuals'
+        // display fitness regardless of feasibility, so a small std
+        // can coincide with the strict frontier still moving.
+        if !constrained && fitness_std < convergence && gen > 10 {
             println!();
             println!(
                 "  Converged at generation {} (fitness std: {:.6})",
@@ -955,9 +2736,44 @@ fn run_optimize(
     let elapsed = start.elapsed();
 
     // ── Final evaluation of best preset ─────────────────────────────────────
-    let best_genome = de.best().genome.clone();
+    // Constrained mode: prefer best_strict() so the user receives the
+    // strictly feasible (violation ≤ 1e-9) best. If no strictly feasible
+    // candidate exists (the run failed to find any), fall back to the
+    // ε-relaxed best with a clear warning so the user knows what they're
+    // getting. Legacy / fusion modes always return best() because every
+    // individual has violation = 0 by construction.
+    let mut returned_strict = true;
+    let best_genome = if constrained {
+        match de.best_strict() {
+            Some(s) => s.genome.clone(),
+            None => {
+                returned_strict = false;
+                eprintln!(
+                    "  WARNING: no strictly feasible candidate found in constrained run."
+                );
+                eprintln!(
+                    "           Returning the ε-relaxed best (violation = {:.4}) — this preset"
+                    , de.best().violation
+                );
+                eprintln!(
+                    "           does not satisfy the comfort constraints. Consider increasing"
+                );
+                eprintln!(
+                    "           --generations, loosening thresholds, or adjusting --init-preset."
+                );
+                de.best().genome.clone()
+            }
+        }
+    } else {
+        de.best().genome.clone()
+    };
     let (best_preset, best_result) =
-        reevaluate_best_preset(&best_genome, &goal, &sim_config, &spread_per_slot);
+        reevaluate_best_preset(&best_genome, &goal, &sim_config, &seed_ctx);
+    let final_violation = if constrained {
+        compute_comfort_violation(&goal, &best_result)
+    } else {
+        0.0
+    };
 
     println!();
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
@@ -965,7 +2781,18 @@ fn run_optimize(
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
     println!("  Goal:            {}", goal_kind);
     println!("  Brain type:      {}", bt);
-    if acoustic_score_fusion {
+    if constrained {
+        let feasibility_tag = if returned_strict {
+            "strict-feasible"
+        } else {
+            "ε-relaxed (NO strict-feasible candidate found)"
+        };
+        println!(
+            "  Score:           {:.4} (neural-only, ε-constrained, {feasibility_tag})",
+            best_result.score
+        );
+        println!("  Violation:       {:.4}", final_violation);
+    } else if acoustic_score_fusion {
         println!("  Score:           {:.4} (fused)", best_result.score);
     } else {
         println!("  Score:           {:.4}", best_result.score);
@@ -1051,7 +2878,7 @@ fn run_optimize(
         de.generation(),
         duration,
         &sim_config,
-        &spread_per_slot,
+        &seed_ctx,
     ) {
         Ok(_) => {
             println!();
@@ -1063,6 +2890,26 @@ fn run_optimize(
     }
 
     println!();
+
+    if let Some(ref logger) = eval_logger {
+        logger.finalize_run(
+            "success",
+            goal_kind,
+            bt,
+            duration,
+            population,
+            generations,
+            de_f,
+            de_cr,
+            convergence,
+            &sim_config,
+            crowding,
+            stagnation_window,
+            stagnation_fraction,
+            init_preset,
+            Some(&output_path),
+        );
+    }
 }
 
 // ── Evaluate ─────────────────────────────────────────────────────────────────
@@ -1075,6 +2922,10 @@ fn run_evaluate(
     flags: EvaluateFeatureFlags,
     acoustic_score: bool,
     acoustic_score_fusion: bool,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
+    log_evaluations_path: Option<&Path>,
 ) {
     ensure_analysis_window_or_exit(
         "evaluate",
@@ -1147,6 +2998,15 @@ fn run_evaluate(
         "  Features: assr={}  thalamic_gate={}  cet={}  phys_gate={}",
         flags.assr, flags.thalamic_gate, flags.cet, flags.phys_gate
     );
+    if (jr_sigma - 15.0).abs() > 1e-12
+        || (gaba_b_rate - 5.0).abs() > 1e-12
+        || (gaba_b_gain - 10.0).abs() > 1e-12
+    {
+        println!(
+            "  P18 retune: jr_sigma={:.1}  gaba_b_rate={:.1}  gaba_b_gain={:.1}",
+            jr_sigma, gaba_b_rate, gaba_b_gain
+        );
+    }
     if acoustic_score {
         println!("  Acoustic score: enabled (evaluate-only)");
     }
@@ -1156,6 +3016,10 @@ fn run_evaluate(
     println!();
 
     if is_matrix {
+        if log_evaluations_path.is_some() {
+            eprintln!("--log-evaluations is currently supported only for single goal/brain evaluate");
+            std::process::exit(2);
+        }
         // ── Matrix mode ─────────────────────────────────────────────────────
         print_comparison_matrix(
             &preset,
@@ -1164,6 +3028,9 @@ fn run_evaluate(
             duration,
             flags,
             acoustic_score_fusion,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
         );
         if acoustic_score {
             println!("  Note: acoustic metrics are shown only for single goal/brain evaluate.");
@@ -1178,6 +3045,8 @@ fn run_evaluate(
         let bt = brain_types[0];
         let goal_kind = goals[0];
         let goal = Goal::new(goal_kind);
+        let mut eval_logger =
+            log_evaluations_path.map(|path| OptimizeCsvLogger::new(path, "evaluate"));
         let show_acoustic = acoustic_score || acoustic_score_fusion;
         let sim_config = build_eval_config(
             duration,
@@ -1185,6 +3054,9 @@ fn run_evaluate(
             flags,
             show_acoustic,
             acoustic_score_fusion,
+            jr_sigma,
+            gaba_b_rate,
+            gaba_b_gain,
         );
         let detailed = evaluate_preset_detailed(&preset, &goal, &sim_config);
         let result = &detailed.summary;
@@ -1204,6 +3076,9 @@ fn run_evaluate(
         }
         if acoustic_score_fusion && !goal.supports_acoustic_fusion() {
             println!("  Acoustic fusion: requested, but this goal still uses legacy NMM scoring.");
+        }
+        if let Some(ref logger) = eval_logger {
+            println!("  Log evals: {}", logger.examples_path.display());
         }
         println!();
 
@@ -1453,6 +3328,29 @@ fn run_evaluate(
 
         // Preset summary
         print_preset_summary(&preset);
+
+        if let Some(ref mut logger) = eval_logger {
+            let meta = logger.build_example_meta(None, "evaluate_single", "manual_evaluate", None);
+            let genome = preset.to_genome();
+            logger.log_example(&meta, &genome, goal_kind, bt, &sim_config, result);
+            logger.finalize_run(
+                "success",
+                goal_kind,
+                bt,
+                duration,
+                1,
+                1,
+                0.0,
+                0.0,
+                0.0,
+                &sim_config,
+                false,
+                0,
+                0.0,
+                Some(preset_path.as_path()),
+                None,
+            );
+        }
     }
 
     println!();
@@ -1465,6 +3363,9 @@ fn print_comparison_matrix(
     duration: f32,
     flags: EvaluateFeatureFlags,
     acoustic_score_fusion: bool,
+    jr_sigma: f64,
+    gaba_b_rate: f64,
+    gaba_b_gain: f64,
 ) {
     let scores = evaluate_score_matrix(
         preset,
@@ -1473,6 +3374,9 @@ fn print_comparison_matrix(
         duration,
         flags,
         acoustic_score_fusion,
+        jr_sigma,
+        gaba_b_rate,
+        gaba_b_gain,
     );
 
     // Header
@@ -2025,8 +3929,9 @@ fn run_generate_data(
     }
 
     // Thread-safe results collector
-    let results: Arc<Mutex<Vec<(usize, Vec<f64>, GoalKind, BrainType, SimulationConfig, f64)>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
+    let results: Arc<
+        Mutex<Vec<(usize, Vec<f64>, GoalKind, BrainType, SimulationConfig, SimulationResult)>>,
+    > = Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
     let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Parallel evaluation
@@ -2055,7 +3960,7 @@ fn run_generate_data(
                         goal_kind,
                         bt,
                         config,
-                        result.score,
+                        result,
                     ));
 
                     let done = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -2072,7 +3977,7 @@ fn run_generate_data(
     eprintln!();
 
     // Write CSV
-    let results = match Arc::try_unwrap(results) {
+    let mut results = match Arc::try_unwrap(results) {
         Ok(mutex) => match mutex.into_inner() {
             Ok(values) => values,
             Err(poisoned) => poisoned.into_inner(),
@@ -2082,6 +3987,7 @@ fn run_generate_data(
             std::process::exit(1);
         }
     };
+    results.sort_by_key(|(preset_idx, _, _, _, _, _)| *preset_idx);
     let mut file = std::fs::File::create(output).unwrap_or_else(|e| {
         eprintln!("Failed to create output file: {e}");
         std::process::exit(1);
@@ -2091,11 +3997,21 @@ fn run_generate_data(
     writeln!(file, "{}", surrogate_csv_header()).unwrap();
 
     // Data rows
-    for (_, genome, goal_kind, bt, config, score) in &results {
+    let run_id = make_run_id("generate_data");
+    for (row_idx, (_, genome, goal_kind, bt, config, result)) in results.iter().enumerate() {
+        let meta = CsvExampleMeta {
+            example_id: format!("{run_id}_e{row_idx:06}"),
+            run_id: run_id.clone(),
+            parent_example_id: String::new(),
+            stage: "generate_data".to_string(),
+            source: "random".to_string(),
+            seed_eval: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
         writeln!(
             file,
             "{}",
-            surrogate_csv_row(genome, *goal_kind, *bt, config, *score)
+            surrogate_csv_row(&meta, genome, *goal_kind, *bt, config, result)
         )
         .unwrap();
     }
@@ -2132,7 +4048,7 @@ mod tests {
             phys_gate: true,
         };
 
-        let config = build_eval_config(7.5, BrainType::Aging, flags, true, true);
+        let config = build_eval_config(7.5, BrainType::Aging, flags, true, true, 15.0, 5.0, 10.0);
         assert!((config.duration_secs - 7.5).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Aging);
         assert!(!config.assr_enabled);
@@ -2141,6 +4057,32 @@ mod tests {
         assert!(config.physiological_thalamic_gate_enabled);
         assert!(config.acoustic_scoring_enabled);
         assert!(config.acoustic_score_fusion_enabled);
+        assert_eq!(config.jr_stochastic_sigma, 15.0);
+        assert_eq!(config.cet_b_slow_rate, 5.0);
+        assert_eq!(config.cet_b_slow_gain, 10.0);
+    }
+
+    #[test]
+    fn build_eval_config_propagates_p18_params() {
+        let flags = EvaluateFeatureFlags {
+            assr: true,
+            thalamic_gate: true,
+            cet: true,
+            phys_gate: false,
+        };
+        let config = build_eval_config(
+            12.0,
+            BrainType::Normal,
+            flags,
+            false,
+            false,
+            100.0,
+            25.0,
+            18.0,
+        );
+        assert_eq!(config.jr_stochastic_sigma, 100.0);
+        assert_eq!(config.cet_b_slow_rate, 25.0);
+        assert_eq!(config.cet_b_slow_gain, 18.0);
     }
 
     #[test]
@@ -2157,13 +4099,36 @@ mod tests {
 
     #[test]
     fn build_optimize_config_enables_fusion_implies_acoustic_scoring() {
-        let config = build_optimize_config(4.0, BrainType::Anxious, true, true, true);
+        // Pass legacy P18 defaults (15.0, 5.0, 10.0) so the resulting
+        // config is bit-identical to pre-P18 behaviour.
+        let config = build_optimize_config(
+            4.0, BrainType::Anxious, true, true, true, false, 15.0, 5.0, 10.0,
+        );
         assert!((config.duration_secs - 4.0).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Anxious);
         assert!(config.cet_enabled);
         assert!(config.physiological_thalamic_gate_enabled);
         assert!(config.acoustic_scoring_enabled);
         assert!(config.acoustic_score_fusion_enabled);
+        assert!(!config.acoustic_constraints_enabled);
+        // P18 defaults preserved end-to-end through build_optimize_config.
+        assert_eq!(config.jr_stochastic_sigma, 15.0);
+        assert_eq!(config.cet_b_slow_rate, 5.0);
+        assert_eq!(config.cet_b_slow_gain, 10.0);
+    }
+
+    /// **P18 wiring pin**: build_optimize_config must propagate
+    /// non-default jr_sigma / gaba_b_rate / gaba_b_gain to the
+    /// resulting SimulationConfig. Otherwise a CLI invocation of
+    /// `--jr-sigma 100` would be silently ignored.
+    #[test]
+    fn build_optimize_config_propagates_p18_params() {
+        let config = build_optimize_config(
+            4.0, BrainType::Normal, true, false, false, true, 100.0, 25.0, 18.0,
+        );
+        assert_eq!(config.jr_stochastic_sigma, 100.0);
+        assert_eq!(config.cet_b_slow_rate, 25.0);
+        assert_eq!(config.cet_b_slow_gain, 18.0);
     }
 
     #[test]
@@ -2172,40 +4137,113 @@ mod tests {
         assert!(!crate::acoustic_score::AcousticScoreConfig::default().fusion_enabled);
         assert!(!SimulationConfig::default().acoustic_scoring_enabled);
         assert!(!SimulationConfig::default().acoustic_score_fusion_enabled);
+        assert!(!SimulationConfig::default().acoustic_constraints_enabled);
         assert!(!disturb::DisturbConfig::default().acoustic_scoring_enabled);
+    }
+
+    // ── Priority 28 Phase 2 — build_optimize_config (constrained mode) ──
+
+    /// Constrained mode must force `acoustic_scoring_enabled = true` so
+    /// `Goal::comfort_violation` has data, and force `fusion = false` to
+    /// prevent double-counting comfort. The shape of this test pins the
+    /// "safety net" behaviour of `build_optimize_config` even though the
+    /// up-front validator already rejects the illegal combination.
+    #[test]
+    fn build_optimize_config_constrained_forces_scoring_on_and_fusion_off() {
+        // Even if the caller passes fusion=true, constrained=true must win.
+        let config = build_optimize_config(
+            4.0, BrainType::Normal, true, false, true, true, 15.0, 5.0, 10.0,
+        );
+        assert!(config.acoustic_scoring_enabled);
+        assert!(!config.acoustic_score_fusion_enabled);
+        assert!(config.acoustic_constraints_enabled);
+    }
+
+    #[test]
+    fn build_optimize_config_constrained_alone_enables_scoring() {
+        let config = build_optimize_config(
+            4.0, BrainType::Normal, true, false, false, true, 15.0, 5.0, 10.0,
+        );
+        assert!(config.acoustic_scoring_enabled);
+        assert!(!config.acoustic_score_fusion_enabled);
+        assert!(config.acoustic_constraints_enabled);
     }
 
     #[test]
     fn validate_optimize_acoustic_mode_accepts_supported_goal_without_sidecars() {
         let goal = Goal::new(GoalKind::Shield);
-        assert!(validate_optimize_acoustic_mode(&goal, true, false, None).is_ok());
+        assert!(validate_optimize_acoustic_mode(&goal, true, false, false, None).is_ok());
     }
 
     #[test]
     fn validate_optimize_acoustic_mode_rejects_unsupported_goal() {
         let goal = Goal::new(GoalKind::Focus);
-        let err = validate_optimize_acoustic_mode(&goal, true, false, None).unwrap_err();
+        let err = validate_optimize_acoustic_mode(&goal, true, false, false, None).unwrap_err();
         assert!(err.contains("supported only for shield and isolation"));
     }
 
     #[test]
     fn validate_optimize_acoustic_mode_rejects_surrogate_mix() {
         let goal = Goal::new(GoalKind::Shield);
-        let err = validate_optimize_acoustic_mode(&goal, true, true, None).unwrap_err();
+        let err = validate_optimize_acoustic_mode(&goal, true, false, true, None).unwrap_err();
         assert!(err.contains("--surrogate"));
     }
 
     #[test]
     fn validate_optimize_acoustic_mode_rejects_logging_mix() {
         let goal = Goal::new(GoalKind::Isolation);
-        let err = validate_optimize_acoustic_mode(
+        assert!(validate_optimize_acoustic_mode(
             &goal,
             true,
             false,
+            false,
             Some(Path::new("/tmp/fused_optimize.csv")),
         )
-        .unwrap_err();
-        assert!(err.contains("--log-evaluations"));
+        .is_ok());
+    }
+
+    // ── Priority 28 Phase 2 — validate_optimize_acoustic_mode (constrained) ──
+
+    #[test]
+    fn validate_optimize_acoustic_mode_accepts_constrained_for_any_goal() {
+        // Constrained mode is goal-agnostic — `comfort_violation` thresholds
+        // are goal-aware, so every goal kind is admissible at this layer.
+        for &kind in GoalKind::all() {
+            let goal = Goal::new(kind);
+            assert!(
+                validate_optimize_acoustic_mode(&goal, false, true, false, None).is_ok(),
+                "constrained mode must accept goal {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_rejects_constrained_with_fusion() {
+        let goal = Goal::new(GoalKind::Shield);
+        let err = validate_optimize_acoustic_mode(&goal, true, true, false, None).unwrap_err();
+        assert!(err.contains("--constrained"));
+        assert!(err.contains("--acoustic-score-fusion"));
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_rejects_constrained_with_surrogate() {
+        let goal = Goal::new(GoalKind::Shield);
+        let err = validate_optimize_acoustic_mode(&goal, false, true, true, None).unwrap_err();
+        assert!(err.contains("--constrained"));
+        assert!(err.contains("--surrogate"));
+    }
+
+    #[test]
+    fn validate_optimize_acoustic_mode_rejects_constrained_with_logging() {
+        let goal = Goal::new(GoalKind::Sleep);
+        assert!(validate_optimize_acoustic_mode(
+            &goal,
+            false,
+            true,
+            false,
+            Some(Path::new("/tmp/eps_optimize.csv")),
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2243,19 +4281,18 @@ mod tests {
         let header = surrogate_csv_header();
         let cols: Vec<&str> = header.split(',').collect();
 
+        assert_eq!(cols[0], "example_id");
+        assert_eq!(cols[7], "goal");
+        assert_eq!(cols[20], "gaba_b_gain");
+        assert_eq!(cols[21], "g0");
         assert_eq!(
-            cols.len(),
-            surrogate::GENOME_DIM + surrogate::CSV_METADATA_COLUMNS.len()
-        );
-        assert_eq!(cols[0], "g0");
-        assert_eq!(
-            cols[surrogate::GENOME_DIM - 1],
+            cols[21 + surrogate::GENOME_DIM - 1],
             format!("g{}", surrogate::GENOME_DIM - 1)
         );
-        assert_eq!(
-            &cols[surrogate::GENOME_DIM..],
-            &surrogate::CSV_METADATA_COLUMNS
-        );
+        assert!(cols.contains(&"score"));
+        assert!(cols.contains(&"violation"));
+        assert!(cols.contains(&"speech_privacy"));
+        assert!(cols.contains(&"is_feasible"));
     }
 
     #[test]
@@ -2268,12 +4305,33 @@ mod tests {
             thalamic_gate_enabled: false,
             cet_enabled: true,
             physiological_thalamic_gate_enabled: true,
+            jr_stochastic_sigma: 100.0,
+            cet_b_slow_rate: 25.0,
+            cet_b_slow_gain: 18.0,
             ..SimulationConfig::default()
         };
-
-        let row = surrogate_csv_row(&genome, GoalKind::Sleep, BrainType::Aging, &config, 0.375);
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Sleep);
+        let result = evaluate_preset(&preset, &goal, &config);
+        let meta = CsvExampleMeta {
+            example_id: "ex1".to_string(),
+            run_id: "run1".to_string(),
+            parent_example_id: "parent0".to_string(),
+            stage: "optimize_generation".to_string(),
+            source: "trial".to_string(),
+            seed_eval: "42".to_string(),
+            created_at: "2026-05-02T00:00:00Z".to_string(),
+        };
+        let row = surrogate_csv_row(
+            &meta,
+            &genome,
+            GoalKind::Sleep,
+            BrainType::Aging,
+            &config,
+            &result,
+        );
         let cols: Vec<&str> = row.split(',').collect();
-        let meta_start = surrogate::GENOME_DIM;
+        let meta_start = 0usize;
         let expected_goal_id = GoalKind::all()
             .iter()
             .position(|&g| g == GoalKind::Sleep)
@@ -2285,13 +4343,32 @@ mod tests {
             .unwrap()
             .to_string();
 
-        assert_eq!(cols[meta_start], expected_goal_id);
-        assert_eq!(cols[meta_start + 1], expected_brain_type_id);
-        assert_eq!(cols[meta_start + 2], "1");
-        assert_eq!(cols[meta_start + 3], "0");
-        assert_eq!(cols[meta_start + 4], "1");
-        assert_eq!(cols[meta_start + 5], "1");
-        assert_eq!(cols[meta_start + 6], "0.375000");
+        assert_eq!(cols[meta_start], "ex1");
+        assert_eq!(cols[meta_start + 1], "run1");
+        assert_eq!(cols[meta_start + 2], "parent0");
+        assert_eq!(cols[meta_start + 3], "optimize_generation");
+        assert_eq!(cols[meta_start + 4], "trial");
+        assert_eq!(cols[meta_start + 5], "42");
+        assert_eq!(cols[meta_start + 8], expected_goal_id);
+        assert_eq!(cols[meta_start + 10], expected_brain_type_id);
+        assert_eq!(cols[meta_start + 12], "1");
+        assert_eq!(cols[meta_start + 13], "0");
+        assert_eq!(cols[meta_start + 14], "1");
+        assert_eq!(cols[meta_start + 15], "1");
+        assert_eq!(cols[meta_start + 18], "100.000000");
+        assert_eq!(cols[meta_start + 19], "25.000000");
+        assert_eq!(cols[meta_start + 20], "18.000000");
+        assert_eq!(cols[meta_start + 21], "0.500000");
+        assert_eq!(cols[meta_start + 21 + surrogate::GENOME_DIM], format!("{:.6}", result.score));
+    }
+
+    #[test]
+    fn derive_sibling_csv_path_keeps_directory_and_extension() {
+        let path = Path::new("/tmp/training/examples.csv");
+        assert_eq!(
+            derive_sibling_csv_path(path, "_pairs"),
+            PathBuf::from("/tmp/training/examples_pairs.csv")
+        );
     }
 
     #[test]
@@ -2309,7 +4386,7 @@ mod tests {
         let output_path = std::env::temp_dir().join("test_export_best_genome_uses_real_score.json");
         let _ = std::fs::remove_file(&output_path);
 
-        let zero_spread = [0.0_f32; preset::MAX_OBJECTS];
+        let seed_ctx = SeedPresetContext::default();
         let (_preset, exported_result) = export_best_genome(
             &output_path,
             &best_genome,
@@ -2318,7 +4395,7 @@ mod tests {
             7,
             config.duration_secs,
             &config,
-            &zero_spread,
+            &seed_ctx,
         )
         .expect("best-genome export should succeed");
 
@@ -2357,7 +4434,7 @@ mod tests {
             std::env::temp_dir().join("test_export_best_genome_uses_re_evaluated_fused_score.json");
         let _ = std::fs::remove_file(&output_path);
 
-        let zero_spread = [0.0_f32; preset::MAX_OBJECTS];
+        let seed_ctx = SeedPresetContext::default();
         let (_preset, exported_result) = export_best_genome(
             &output_path,
             &best_genome,
@@ -2366,7 +4443,7 @@ mod tests {
             3,
             config.duration_secs,
             &config,
-            &zero_spread,
+            &seed_ctx,
         )
         .expect("fused best-genome export should succeed");
 
@@ -2392,6 +4469,23 @@ mod tests {
     }
 
     #[test]
+    fn seed_context_preserves_room_and_position_space() {
+        let best_genome = Preset::default().to_genome();
+        let mut seed_ctx = SeedPresetContext::default();
+        seed_ctx.room.mode = 1;
+        seed_ctx.position_space_per_slot[0] = 1;
+        seed_ctx.position_space_per_slot[1] = 2;
+        seed_ctx.spread_per_slot[0] = 0.65;
+
+        let preset = preset_from_genome_with_seed_context(&best_genome, &seed_ctx);
+
+        assert_eq!(preset.room.mode, 1);
+        assert_eq!(preset.objects[0].position_space, 1);
+        assert_eq!(preset.objects[1].position_space, 2);
+        assert!((preset.objects[0].spread - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
     fn matrix_single_cell_score_matches_scalar_evaluate() {
         let preset = Preset::default();
         let flags = EvaluateFeatureFlags {
@@ -2404,7 +4498,7 @@ mod tests {
         let goal_kind = GoalKind::Meditation;
         let brain_type = BrainType::Anxious;
         let goal = Goal::new(goal_kind);
-        let config = build_eval_config(duration, brain_type, flags, false, false);
+        let config = build_eval_config(duration, brain_type, flags, false, false, 15.0, 5.0, 10.0);
 
         let direct = evaluate_preset(&preset, &goal, &config);
         let matrix = evaluate_score_matrix(
@@ -2414,6 +4508,9 @@ mod tests {
             duration,
             flags,
             false,
+            15.0,
+            5.0,
+            10.0,
         );
 
         assert_eq!(matrix.len(), 1);
@@ -2424,5 +4521,134 @@ mod tests {
             matrix[0][0],
             direct.score
         );
+    }
+
+    // ── Calibrate-comfort helpers ──────────────────────────────────────
+
+    #[test]
+    fn infer_goal_from_filename_handles_core_patterns() {
+        // Curated `presets/` filename patterns must map to expected goals.
+        let cases = &[
+            ("normal_set_shield_v5.json", Some(GoalKind::Shield)),
+            ("the_shield_v3.json", Some(GoalKind::Shield)),
+            ("isolation_normal_clean.json", Some(GoalKind::Isolation)),
+            ("the_shield_isolation_v1.json", Some(GoalKind::Isolation)),
+            ("normal_set_flow_v3.json", Some(GoalKind::Flow)),
+            ("the_flow_v1.json", Some(GoalKind::Flow)),
+            ("normal_set_ignition.json", Some(GoalKind::Ignition)),
+            ("deepwork_adhd.json", Some(GoalKind::DeepWork)),
+            ("deepwork_normal_v2.json", Some(GoalKind::DeepWork)),
+            ("normal_set_deep_relax.json", Some(GoalKind::DeepRelaxation)),
+            ("deep_relax_phys_cet_v1.json", Some(GoalKind::DeepRelaxation)),
+            ("sleep_phys_cet_v1.json", Some(GoalKind::Sleep)),
+            ("showcase_pink.json", None),
+            ("normal_set_reset.json", None),
+        ];
+        for (name, expected) in cases {
+            let got = infer_goal_from_filename(name);
+            assert_eq!(
+                got, *expected,
+                "infer_goal_from_filename({name}) = {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    /// Isolation must beat Shield in the inference order: a filename
+    /// like `the_shield_isolation_v1.json` is an isolation preset, not
+    /// a shield one.
+    #[test]
+    fn infer_goal_resolves_compound_filenames_consistently() {
+        assert_eq!(
+            infer_goal_from_filename("the_shield_isolation_v1.json"),
+            Some(GoalKind::Isolation),
+            "compound filename should match the more specific token first"
+        );
+        assert_eq!(
+            infer_goal_from_filename("deepwork_adhd.json"),
+            Some(GoalKind::DeepWork)
+        );
+    }
+
+    #[test]
+    fn percentile_handles_edges_and_quantiles() {
+        let v: Vec<f64> = (0..10).map(|i| i as f64).collect(); // 0..9
+        // p0 → min, p100 → max
+        assert!((percentile(&v, 0.0) - 0.0).abs() < 1e-12);
+        assert!((percentile(&v, 1.0) - 9.0).abs() < 1e-12);
+        // p50 nearest-rank: round(9 * 0.5) = 5 → 5.0
+        assert!((percentile(&v, 0.5) - 5.0).abs() < 1e-12);
+        // p90 nearest-rank: round(9 * 0.9) = 8 → 8.0
+        assert!((percentile(&v, 0.9) - 8.0).abs() < 1e-12);
+        // empty input → NaN
+        assert!(percentile(&[], 0.5).is_nan());
+    }
+
+    #[test]
+    fn goal_thresholds_match_goal_comfort_violation() {
+        // The display thresholds in the calibration printout must match
+        // the values actually consumed by Goal::comfort_violation, so
+        // p90/threshold comparisons are meaningful. **Updated 2026-05-01**
+        // to reflect the empirically-calibrated thresholds.
+        for (label, kind) in &[
+            ("shield", GoalKind::Shield),
+            ("isolation", GoalKind::Isolation),
+            ("focus", GoalKind::Focus),
+            ("deep_work", GoalKind::DeepWork),
+            ("ignition", GoalKind::Ignition),
+            ("sleep", GoalKind::Sleep),
+            ("deep_relaxation", GoalKind::DeepRelaxation),
+            ("meditation", GoalKind::Meditation),
+            ("flow", GoalKind::Flow),
+        ] {
+            let displayed = goal_lufs_asym_threshold(label);
+            let expected = match *kind {
+                GoalKind::Focus | GoalKind::DeepWork | GoalKind::Ignition => Some(4.0),
+                _ => Some(3.0),
+            };
+            assert_eq!(
+                displayed, expected,
+                "lufs_asym threshold mismatch for {label}: shown {displayed:?}, expected {expected:?}"
+            );
+            // Source-balance threshold parity
+            let displayed_sb = goal_source_balance_threshold(label);
+            let expected_sb = match *kind {
+                GoalKind::Focus | GoalKind::DeepWork | GoalKind::Ignition => Some(15.0),
+                _ => Some(12.0),
+            };
+            assert_eq!(
+                displayed_sb, expected_sb,
+                "source_balance threshold mismatch for {label}"
+            );
+            // HF threshold parity (unchanged by calibration — already loose)
+            let displayed_hf = goal_hf_threshold(label);
+            let expected_hf = match *kind {
+                GoalKind::Sleep | GoalKind::DeepRelaxation | GoalKind::Meditation => Some(0.10),
+                _ => Some(0.20),
+            };
+            assert_eq!(
+                displayed_hf, expected_hf,
+                "hf threshold mismatch for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_target_tilt_matches_scoring() {
+        // Mirror of Goal::spectral_tilt_target_db_per_oct (private), so
+        // the calibration tilt-deviation column actually measures the
+        // same target the optimizer constraints use.
+        for &k in &[
+            GoalKind::Sleep,
+            GoalKind::DeepRelaxation,
+            GoalKind::Meditation,
+        ] {
+            assert_eq!(goal_target_tilt(k), -6.0);
+        }
+        for &k in &[GoalKind::Flow, GoalKind::DeepWork, GoalKind::Shield] {
+            assert_eq!(goal_target_tilt(k), -3.0);
+        }
+        for &k in &[GoalKind::Focus, GoalKind::Isolation, GoalKind::Ignition] {
+            assert_eq!(goal_target_tilt(k), -1.5);
+        }
     }
 }

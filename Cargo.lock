@@ -272,6 +272,31 @@ name = "noise_generator_core"
 version = "0.1.0"
 dependencies = [
  "fastrand",
+ "noise_generator_engine_shared",
+ "noise_generator_signal_core",
+ "noise_generator_spatial_core",
+]
+
+[[package]]
+name = "noise_generator_engine_shared"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
+name = "noise_generator_signal_core"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "noise_generator_engine_shared",
+]
+
+[[package]]
+name = "noise_generator_spatial_core"
+version = "0.1.0"
+dependencies = [
+ "noise_generator_engine_shared",
 ]
 
 [[package]]
