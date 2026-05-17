@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nmm.local/schema/human_validation_peaks_v1.schema.json",
+  "title": "HumanValidationPeaksV1Row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trial_id",
+    "peak_rank",
+    "center_hz",
+    "bandwidth_hz",
+    "power_above_aperiodic"
+  ],
+  "properties": {
+    "trial_id": { "type": "string", "minLength": 1 },
+    "peak_rank": { "type": "integer", "minimum": 1 },
+    "center_hz": { "type": "number", "minimum": 0.0 },
+    "bandwidth_hz": { "type": "number", "exclusiveMinimum": 0.0 },
+    "power_above_aperiodic": { "type": "number" }
+  }
+}

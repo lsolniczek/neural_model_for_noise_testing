@@ -1,0 +1,61 @@
+{
+  "dataset_id": "fixture_daytime_attention_v1",
+  "failure_thresholds": {
+    "alpha_asymmetry": 0.08,
+    "alpha_peak_frequency_hz": 1.0,
+    "aperiodic_exponent": 0.25,
+    "aperiodic_offset": 0.2,
+    "assr_plv": 0.12,
+    "comfort_rating": 1.0,
+    "envelope_plv": 0.12,
+    "irritation_rating": 1.0,
+    "masking_effectiveness_rating": 1.0,
+    "reaction_time_ms": 50.0,
+    "reaction_time_variability_ms": 25.0,
+    "vigilance_accuracy": 0.1
+  },
+  "feature_families": {
+    "acoustic_only": [
+      "product_acoustic_score",
+      "spl_db_a"
+    ],
+    "candidate_v2": [
+      "candidate_research_v2_score",
+      "candidate_gamma_response_strength",
+      "candidate_modulation_responsiveness_index",
+      "candidate_total_modulation_power"
+    ],
+    "legacy_v1": [
+      "legacy_v1_neural_score",
+      "legacy_v1_fused_score"
+    ],
+    "modulation_only": [
+      "candidate_total_modulation_power",
+      "candidate_mod_slow_0p5_4_hz",
+      "candidate_mod_theta_4_8_hz",
+      "candidate_mod_alpha_8_13_hz",
+      "candidate_mod_beta_13_30_hz",
+      "candidate_mod_gamma_30_50_hz"
+    ]
+  },
+  "holdout_available": true,
+  "outcomes": [
+    "aperiodic_exponent",
+    "aperiodic_offset",
+    "envelope_plv",
+    "assr_plv",
+    "alpha_peak_frequency_hz",
+    "alpha_asymmetry",
+    "vigilance_accuracy",
+    "reaction_time_ms",
+    "reaction_time_variability_ms",
+    "comfort_rating",
+    "irritation_rating",
+    "masking_effectiveness_rating"
+  ],
+  "run_id": "run_20260517T152215Z",
+  "schema_version": "human_validation_v1",
+  "split_manifest": "/tmp/nmm_splits_stage8_final.json",
+  "timestamp_utc": "2026-05-17T15:22:15.480570+00:00",
+  "trials_sha256": "3feb36e1c342449f5b273cfc0af7ec7d29f017e2bfb484df4695266dd0c06d30"
+}

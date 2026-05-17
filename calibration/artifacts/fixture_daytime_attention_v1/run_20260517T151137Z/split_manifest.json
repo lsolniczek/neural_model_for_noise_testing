@@ -1,0 +1,36 @@
+{
+  "folds": [
+    {
+      "fold_id": "fold_0",
+      "test_participants": [
+        "p01",
+        "p02"
+      ],
+      "train_participants": [
+        "p03"
+      ]
+    },
+    {
+      "fold_id": "fold_1",
+      "test_participants": [
+        "p03"
+      ],
+      "train_participants": [
+        "p01",
+        "p02"
+      ]
+    }
+  ],
+  "holdout_fraction": 0.2,
+  "holdout_participants": [
+    "p04",
+    "p05"
+  ],
+  "k_folds": 2,
+  "k_folds_requested": 3,
+  "seed": 1234,
+  "split_schema_version": "human_validation_split_v1",
+  "warnings": [
+    "Reduced effective fold count from 3 to 2 to avoid empty test folds."
+  ]
+}

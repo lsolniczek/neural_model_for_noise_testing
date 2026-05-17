@@ -1,0 +1,43 @@
+{
+  "dataset_id": "fixture_daytime_attention_v1",
+  "feature_families": {
+    "acoustic_only": [
+      "product_acoustic_score",
+      "comfort_rating",
+      "irritation_rating",
+      "spl_db_a"
+    ],
+    "candidate_v2": [
+      "candidate_research_v2_score",
+      "candidate_gamma_response_strength",
+      "candidate_modulation_responsiveness_index",
+      "candidate_total_modulation_power"
+    ],
+    "legacy_v1": [
+      "legacy_v1_neural_score",
+      "legacy_v1_fused_score"
+    ],
+    "modulation_only": [
+      "candidate_total_modulation_power",
+      "candidate_mod_slow_0p5_4_hz",
+      "candidate_mod_theta_4_8_hz",
+      "candidate_mod_alpha_8_13_hz",
+      "candidate_mod_beta_13_30_hz",
+      "candidate_mod_gamma_30_50_hz"
+    ]
+  },
+  "outcomes": [
+    "aperiodic_exponent",
+    "envelope_plv",
+    "assr_plv",
+    "vigilance_accuracy",
+    "reaction_time_ms",
+    "comfort_rating",
+    "masking_effectiveness_rating"
+  ],
+  "run_id": "run_20260517T144409Z",
+  "schema_version": "human_validation_v1",
+  "split_manifest": "/tmp/nmm_splits.json",
+  "timestamp_utc": "2026-05-17T14:44:09.763478+00:00",
+  "trials_sha256": "3feb36e1c342449f5b273cfc0af7ec7d29f017e2bfb484df4695266dd0c06d30"
+}
