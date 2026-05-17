@@ -604,6 +604,7 @@ fn print_model_signature(signature: &model_signature::ModelSignature) {
         "  Pipeline path:  {}",
         match signature.pipeline_variant {
             model_signature::PipelineVariant::EvaluateCanonical => "evaluate_canonical",
+            model_signature::PipelineVariant::EvaluateCandidateV2 => "evaluate_candidate_v2",
             model_signature::PipelineVariant::DisturbCanonical => "disturb_canonical",
             model_signature::PipelineVariant::DisturbLegacyAblated => "disturb_legacy_ablated",
         }
@@ -3652,6 +3653,20 @@ fn run_evaluate(
                 println!(
                     "      Latent arousal={:.3} ({:?})",
                     candidate.latent_state.estimated_arousal, candidate.latent_state.arousal_source
+                );
+            }
+            if let Some(candidate_cortical) = science.candidate_cortical_response.as_ref() {
+                println!(
+                    "    Candidate v2 cortical response: dominant={:?}, responsiveness={:.6}",
+                    candidate_cortical.dominant_module,
+                    candidate_cortical.modulation_responsiveness_index
+                );
+                println!(
+                    "      Module strengths: slow={:.6}, alpha={:.6}, beta={:.6}, gamma={:.6}",
+                    candidate_cortical.slow.response_strength,
+                    candidate_cortical.alpha.response_strength,
+                    candidate_cortical.beta.response_strength,
+                    candidate_cortical.gamma.response_strength
                 );
             }
         }

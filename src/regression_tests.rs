@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod tests {
     use crate::brain_type::BrainType;
+    use crate::model_signature::ModelVersion;
     use crate::neural::fhn::*;
     use crate::neural::jansen_rit::*;
     use crate::optimizer::DifferentialEvolution;
@@ -211,6 +212,15 @@ mod tests {
         SimulationConfig {
             duration_secs,
             brain_type,
+            ..SimulationConfig::default()
+        }
+    }
+
+    fn candidate_v2_config(duration_secs: f32, brain_type: BrainType) -> SimulationConfig {
+        SimulationConfig {
+            duration_secs,
+            brain_type,
+            model_version: ModelVersion::CandidateV2,
             ..SimulationConfig::default()
         }
     }
@@ -1578,6 +1588,212 @@ mod tests {
         assert!(
             candidate.temporal_modulation.total_modulation_power > 0.0,
             "candidate modulation power should be positive for actively modulated rendered input"
+        );
+    }
+
+    #[test]
+    fn candidate_v2_cortical_response_is_namespaced_and_score_inert() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Flow);
+        let legacy_cfg = canonical_config(4.0, BrainType::Normal);
+        let candidate_cfg = candidate_v2_config(4.0, BrainType::Normal);
+
+        let legacy = evaluate_preset_detailed(&preset, &goal, &legacy_cfg);
+        let candidate = evaluate_preset_detailed(&preset, &goal, &candidate_cfg);
+
+        assert_eq!(
+            legacy.summary.score.to_bits(),
+            candidate.summary.score.to_bits(),
+            "candidate_v2 diagnostics path must remain score-inert in Stage 4"
+        );
+        assert_eq!(
+            candidate.summary.model_signature.pipeline_variant,
+            crate::model_signature::PipelineVariant::EvaluateCandidateV2
+        );
+
+        let legacy_diag = legacy
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("legacy detailed diagnostics should exist");
+        assert!(
+            legacy_diag.candidate_cortical_response.is_none(),
+            "legacy_v1 should not emit candidate_v2 cortical diagnostics"
+        );
+        let candidate_diag = candidate
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("candidate detailed diagnostics should exist");
+        assert!(
+            candidate_diag.candidate_cortical_response.is_some(),
+            "candidate_v2 should emit candidate cortical diagnostics"
+        );
+    }
+
+    #[test]
+    fn candidate_v2_routes_same_modulation_same_rhythm_across_carriers() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = candidate_v2_config(12.0, BrainType::Normal);
+        let brown_40hz = fixture_single_noise_with_modulation(2, 5, 40.0, 0.95);
+        let white_40hz = fixture_single_noise_with_modulation(0, 5, 40.0, 0.95);
+
+        let db = evaluate_preset_detailed(&brown_40hz, &goal, &config);
+        let dw = evaluate_preset_detailed(&white_40hz, &goal, &config);
+        let rb = db
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for brown 40 Hz");
+        let rw = dw
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for white 40 Hz");
+
+        assert_eq!(rb.dominant_module, rw.dominant_module);
+        assert_eq!(
+            rb.dominant_module,
+            Some(crate::neural::CandidateRhythmModule::GammaAssr)
+        );
+    }
+
+    #[test]
+    fn candidate_v2_response_changes_with_modulation_rate() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = candidate_v2_config(12.0, BrainType::Normal);
+        let pink_5hz = fixture_single_noise_with_modulation(1, 4, 5.0, 0.95);
+        let pink_40hz = fixture_single_noise_with_modulation(1, 5, 40.0, 0.95);
+
+        let d5 = evaluate_preset_detailed(&pink_5hz, &goal, &config);
+        let d40 = evaluate_preset_detailed(&pink_40hz, &goal, &config);
+        let r5 = d5
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for 5 Hz");
+        let r40 = d40
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for 40 Hz");
+
+        assert!(
+            r40.gamma.response_strength > r5.gamma.response_strength,
+            "40 Hz modulation should increase candidate gamma/ASSR response"
+        );
+        assert!(
+            r5.slow.response_strength > r40.slow.response_strength,
+            "5 Hz modulation should emphasize slow module over 40 Hz case"
+        );
+    }
+
+    #[test]
+    fn candidate_v2_unmodulated_baseline_has_no_false_strong_drive() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = candidate_v2_config(12.0, BrainType::Normal);
+        let unmodulated = fixture_single_noise_unmodulated_reference();
+        let detailed = evaluate_preset_detailed(&unmodulated, &goal, &config);
+        let response = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for unmodulated case");
+
+        assert!(
+            response.drive.dominant_modulation_hz.is_none(),
+            "unmodulated input should not expose dominant modulation in candidate routing"
+        );
+        assert!(
+            response.dominant_module.is_none(),
+            "unmodulated input should not report a winning candidate rhythm module"
+        );
+        assert_eq!(response.slow.response_strength.to_bits(), 0.0f64.to_bits());
+        assert_eq!(response.alpha.response_strength.to_bits(), 0.0f64.to_bits());
+        assert_eq!(response.beta.response_strength.to_bits(), 0.0f64.to_bits());
+        assert_eq!(response.gamma.response_strength.to_bits(), 0.0f64.to_bits());
+        assert!(
+            response.modulation_responsiveness_index < 1e-6,
+            "unmodulated baseline should keep candidate responsiveness near zero; got {}",
+            response.modulation_responsiveness_index
+        );
+    }
+
+    #[test]
+    fn candidate_v2_response_scales_with_modulation_depth() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = candidate_v2_config(12.0, BrainType::Normal);
+        let weak = fixture_single_tone_with_modulation(40.0, 0.30);
+        let strong = fixture_single_tone_with_modulation(40.0, 0.95);
+
+        let dw = evaluate_preset_detailed(&weak, &goal, &config);
+        let ds = evaluate_preset_detailed(&strong, &goal, &config);
+        let rw = dw
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing weak candidate cortical response");
+        let rs = ds
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing strong candidate cortical response");
+
+        assert!(
+            rs.drive.total_modulation_power > rw.drive.total_modulation_power,
+            "strong modulation should produce larger total modulation power"
+        );
+        assert!(
+            rs.modulation_responsiveness_index > rw.modulation_responsiveness_index,
+            "strong modulation should produce stronger candidate responsiveness"
+        );
+    }
+
+    #[test]
+    fn candidate_v2_responsiveness_orders_none_weak_strong() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = candidate_v2_config(12.0, BrainType::Normal);
+        let none = fixture_single_noise_unmodulated_reference();
+        let weak = fixture_single_tone_with_modulation(40.0, 0.20);
+        let strong = fixture_single_tone_with_modulation(40.0, 0.95);
+
+        let dn = evaluate_preset_detailed(&none, &goal, &config);
+        let dw = evaluate_preset_detailed(&weak, &goal, &config);
+        let ds = evaluate_preset_detailed(&strong, &goal, &config);
+        let rn = dn
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing none-response");
+        let rw = dw
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing weak-response");
+        let rs = ds
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing strong-response");
+
+        assert_eq!(
+            rn.modulation_responsiveness_index.to_bits(),
+            0.0f64.to_bits()
+        );
+        assert!(
+            rn.modulation_responsiveness_index < rw.modulation_responsiveness_index
+                && rw.modulation_responsiveness_index < rs.modulation_responsiveness_index,
+            "expected responsiveness ordering none < weak < strong"
         );
     }
 

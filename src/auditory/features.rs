@@ -79,11 +79,8 @@ pub fn extract_candidate_auditory_features(
         },
         spectral_tilt_db_per_oct: spectral_tilt_db_per_oct.filter(|v| v.is_finite()),
     };
-    let temporal_modulation = extract_temporal_modulation_from_bands(
-        left_bands_dec,
-        right_bands_dec,
-        sample_rate_hz,
-    );
+    let temporal_modulation =
+        extract_temporal_modulation_from_bands(left_bands_dec, right_bands_dec, sample_rate_hz);
     let latent_state = LatentStateEstimate {
         estimated_arousal: if estimated_arousal.is_finite() {
             estimated_arousal.clamp(0.0, 1.0)

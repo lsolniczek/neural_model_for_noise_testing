@@ -18,8 +18,9 @@ use crate::model_signature::{
 };
 use crate::movement::MovementController;
 use crate::neural::{
-    aperiodic, simulate_bilateral, BilateralResult, FastInhibParams, FhnModel, FhnResult,
-    PerformanceVector, SpectralParameterization,
+    aperiodic, simulate_bilateral, simulate_candidate_v2, BilateralResult,
+    CandidateCorticalResponse, FastInhibParams, FhnModel, FhnResult, PerformanceVector,
+    SpectralParameterization,
 };
 use crate::preset::Preset;
 use crate::scoring::Goal;
@@ -268,7 +269,10 @@ impl SimulationConfig {
     pub fn model_signature(&self) -> ModelSignature {
         ModelSignature {
             version: self.model_version,
-            pipeline_variant: PipelineVariant::EvaluateCanonical,
+            pipeline_variant: match self.model_version {
+                ModelVersion::LegacyV1 => PipelineVariant::EvaluateCanonical,
+                ModelVersion::CandidateV2 => PipelineVariant::EvaluateCandidateV2,
+            },
             scoring_profile: ScoringProfile::LegacyV1,
             normalization_mode: NormalizationMode::GlobalPerEar,
             brain_type: self.brain_type,
@@ -391,6 +395,7 @@ pub struct ScientificDiagnostics {
     pub assr: AssrDiagnostics,
     pub arousal_sensitivity: ArousalSensitivityDiagnostics,
     pub candidate_auditory_features: Option<CandidateAuditoryFeatures>,
+    pub candidate_cortical_response: Option<CandidateCorticalResponse>,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -1031,6 +1036,17 @@ fn build_scientific_diagnostics(
         candidate_arousal_source(config),
         NEURAL_SR,
     ));
+    let candidate_cortical_response = if config.model_version == ModelVersion::CandidateV2 {
+        candidate_features.as_ref().map(|candidate| {
+            simulate_candidate_v2(
+                &candidate.temporal_modulation,
+                &candidate.latent_state,
+                &config.brain_type,
+            )
+        })
+    } else {
+        None
+    };
 
     let mut sweep = Vec::with_capacity(AROUSAL_SWEEP_GRID.len());
     for arousal in AROUSAL_SWEEP_GRID {
@@ -1080,6 +1096,7 @@ fn build_scientific_diagnostics(
             score_span,
         },
         candidate_auditory_features: candidate_features,
+        candidate_cortical_response,
     }
 }
 

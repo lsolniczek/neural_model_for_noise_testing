@@ -531,6 +531,16 @@ These modules may still use JR, Wilson-Cowan, or another oscillator family inter
 - optional calibrated carrier-dependent gain,
 not raw acoustic band index.
 
+Stage 4 candidate response should preserve both:
+- modulation-rate allocation (relative band distribution), and
+- modulation magnitude (absolute strength).
+
+No-modulation inputs must produce an explicit inactive candidate response
+(zero module strengths, zero responsiveness, no winning module).
+
+Any candidate gain terms in this stage are provisional engineering priors,
+not validated physiological transfer functions.
+
 ### Suggested files
 
 - new `src/neural/candidate_v2.rs`

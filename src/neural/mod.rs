@@ -1,4 +1,5 @@
 pub mod aperiodic;
+pub mod candidate_v2;
 pub mod fhn;
 pub mod jansen_rit;
 pub mod performance;
@@ -6,6 +7,10 @@ mod tests;
 pub mod wilson_cowan;
 
 pub use aperiodic::SpectralParameterization;
+pub use candidate_v2::{
+    simulate_candidate_v2, CandidateCorticalResponse, CandidateRhythmModule,
+    CandidateRhythmModuleResponse,
+};
 pub use fhn::{FhnModel, FhnResult};
 pub use jansen_rit::{
     simulate_bilateral, simulate_tonotopic, BandPowers, BilateralResult, FastInhibParams,
