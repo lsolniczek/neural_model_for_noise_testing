@@ -692,6 +692,7 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
             disturbance_left_spike_seed: Some(DISTURB_LEFT_SPIKE_SEED),
             disturbance_right_spike_seed: Some(DISTURB_RIGHT_SPIKE_SEED),
         },
+        candidate_brain_profile_v2: None,
     };
 
     summarize_disturb_result(

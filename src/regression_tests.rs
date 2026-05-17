@@ -1135,6 +1135,7 @@ mod tests {
         let sig = &result.model_signature;
 
         assert_eq!(sig.version, crate::model_signature::ModelVersion::LegacyV1);
+        assert!(sig.candidate_brain_profile_v2.is_none());
         assert_eq!(
             sig.scoring_profile,
             crate::model_signature::ScoringProfile::LegacyV1
@@ -1197,6 +1198,59 @@ mod tests {
                 .wc_adaptive_entrainment_range_hz
                 .to_bits(),
             5.0f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn candidate_v2_model_signature_includes_candidate_brain_profile() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Flow);
+        let config = candidate_v2_config(4.0, BrainType::Adhd);
+        let result = evaluate_preset(&preset, &goal, &config);
+        let sig = &result.model_signature;
+
+        assert_eq!(sig.version, crate::model_signature::ModelVersion::CandidateV2);
+        let profile = sig
+            .candidate_brain_profile_v2
+            .as_ref()
+            .expect("candidate_v2 should export candidate brain profile");
+        assert_eq!(
+            profile.stochastic_resonance,
+            crate::brain_type::CandidateStochasticResonancePrior::Optional
+        );
+        let sig_json = serde_json::to_string(sig).expect("signature should serialize");
+        assert!(
+            sig_json.contains("candidate_brain_profile_v2"),
+            "candidate profile must appear in serialized signature"
+        );
+    }
+
+    #[test]
+    fn candidate_v2_response_remains_metadata_only_across_brain_types_in_stage7() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Flow);
+        let normal_cfg = candidate_v2_config(4.0, BrainType::Normal);
+        let adhd_cfg = candidate_v2_config(4.0, BrainType::Adhd);
+
+        let normal = evaluate_preset_detailed(&preset, &goal, &normal_cfg);
+        let adhd = evaluate_preset_detailed(&preset, &goal, &adhd_cfg);
+
+        let rn = normal
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for normal");
+        let ra = adhd
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_cortical_response.as_ref())
+            .expect("missing candidate cortical response for adhd");
+
+        assert_eq!(
+            rn, ra,
+            "Stage 7 candidate brain profiles must remain metadata-only"
         );
     }
 

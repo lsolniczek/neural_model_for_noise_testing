@@ -1,4 +1,4 @@
-use crate::brain_type::{BandModelType, BrainType, TonotopicParams};
+use crate::brain_type::{BandModelType, BrainType, CandidateBrainProfile, TonotopicParams};
 use crate::auditory::ArousalModel;
 use crate::neural::fhn::legacy_constants_snapshot as fhn_legacy_constants_snapshot;
 use crate::neural::jansen_rit::legacy_constants_snapshot;
@@ -356,4 +356,5 @@ pub struct ModelSignature {
     pub warmup_discard_secs: f32,
     pub duration_secs: f32,
     pub seeds: ReproducibilitySeeds,
+    pub candidate_brain_profile_v2: Option<CandidateBrainProfile>,
 }

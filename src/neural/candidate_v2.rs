@@ -140,8 +140,12 @@ fn inactive_candidate_response(
 pub fn simulate_candidate_v2(
     modulation: &TemporalModulationFeatures,
     state: &LatentStateEstimate,
-    _brain: &BrainType,
+    brain: &BrainType,
 ) -> CandidateCorticalResponse {
+    // Stage 7: candidate brain profiles are exported/inspectable metadata.
+    // They intentionally do not retune candidate dynamics yet.
+    let _profile = brain.candidate_profile_v2();
+
     let band = modulation.band_power_by_mod_rate;
     let slow_raw = band.slow_0p5_4_hz + band.theta_4_8_hz;
     let alpha_raw = band.alpha_8_13_hz;

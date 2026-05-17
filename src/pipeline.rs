@@ -318,6 +318,10 @@ impl SimulationConfig {
                 disturbance_left_spike_seed: None,
                 disturbance_right_spike_seed: None,
             },
+            candidate_brain_profile_v2: match self.model_version {
+                ModelVersion::LegacyV1 => None,
+                ModelVersion::CandidateV2 => Some(self.brain_type.candidate_profile_v2()),
+            },
         }
     }
 }

@@ -6,6 +6,48 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateEvidenceLevel {
+    Heuristic,
+    LiteratureInformed,
+    Calibrated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidatePriorDirection {
+    Lower,
+    Reference,
+    Higher,
+    Unspecified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateStochasticResonancePrior {
+    Disabled,
+    Optional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateAperiodicPrior {
+    pub exponent: CandidatePriorDirection,
+    pub offset: CandidatePriorDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateBrainProfile {
+    pub inhibitory_kinetics: CandidatePriorDirection,
+    pub baseline_excitation: CandidatePriorDirection,
+    pub response_gain: CandidatePriorDirection,
+    pub arousal_sensitivity: CandidatePriorDirection,
+    pub stochastic_resonance: CandidateStochasticResonancePrior,
+    pub aperiodic_prior: Option<CandidateAperiodicPrior>,
+    pub evidence_level: CandidateEvidenceLevel,
+    pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrainType {
     /// Healthy adult — default model parameters.
     Normal,
@@ -52,6 +94,72 @@ impl BrainType {
             BrainType::Aging,
             BrainType::Anxious,
         ]
+    }
+
+    /// Stage 7 candidate-v2 brain profile priors.
+    ///
+    /// These are structured, serializable assumptions for inspection and later
+    /// calibration. They are metadata-only in Stage 7 and do not retune
+    /// candidate cortical dynamics yet.
+    ///
+    /// Aperiodic priors stay intentionally unspecified (except the normal
+    /// reference baseline) until cohort-specific calibration evidence exists.
+    pub fn candidate_profile_v2(&self) -> CandidateBrainProfile {
+        match self {
+            BrainType::Normal => CandidateBrainProfile {
+                inhibitory_kinetics: CandidatePriorDirection::Reference,
+                baseline_excitation: CandidatePriorDirection::Reference,
+                response_gain: CandidatePriorDirection::Reference,
+                arousal_sensitivity: CandidatePriorDirection::Reference,
+                stochastic_resonance: CandidateStochasticResonancePrior::Disabled,
+                aperiodic_prior: Some(CandidateAperiodicPrior {
+                    exponent: CandidatePriorDirection::Reference,
+                    offset: CandidatePriorDirection::Reference,
+                }),
+                evidence_level: CandidateEvidenceLevel::Heuristic,
+                profile_id: "stage7_candidate_prior_normal_v1".to_string(),
+            },
+            BrainType::HighAlpha => CandidateBrainProfile {
+                inhibitory_kinetics: CandidatePriorDirection::Higher,
+                baseline_excitation: CandidatePriorDirection::Lower,
+                response_gain: CandidatePriorDirection::Reference,
+                arousal_sensitivity: CandidatePriorDirection::Lower,
+                stochastic_resonance: CandidateStochasticResonancePrior::Disabled,
+                aperiodic_prior: None,
+                evidence_level: CandidateEvidenceLevel::Heuristic,
+                profile_id: "stage7_candidate_prior_high_alpha_v1".to_string(),
+            },
+            BrainType::Adhd => CandidateBrainProfile {
+                inhibitory_kinetics: CandidatePriorDirection::Lower,
+                baseline_excitation: CandidatePriorDirection::Higher,
+                response_gain: CandidatePriorDirection::Higher,
+                arousal_sensitivity: CandidatePriorDirection::Higher,
+                stochastic_resonance: CandidateStochasticResonancePrior::Optional,
+                aperiodic_prior: None,
+                evidence_level: CandidateEvidenceLevel::Heuristic,
+                profile_id: "stage7_candidate_prior_adhd_v1".to_string(),
+            },
+            BrainType::Aging => CandidateBrainProfile {
+                inhibitory_kinetics: CandidatePriorDirection::Higher,
+                baseline_excitation: CandidatePriorDirection::Lower,
+                response_gain: CandidatePriorDirection::Lower,
+                arousal_sensitivity: CandidatePriorDirection::Lower,
+                stochastic_resonance: CandidateStochasticResonancePrior::Disabled,
+                aperiodic_prior: None,
+                evidence_level: CandidateEvidenceLevel::Heuristic,
+                profile_id: "stage7_candidate_prior_aging_v1".to_string(),
+            },
+            BrainType::Anxious => CandidateBrainProfile {
+                inhibitory_kinetics: CandidatePriorDirection::Higher,
+                baseline_excitation: CandidatePriorDirection::Higher,
+                response_gain: CandidatePriorDirection::Higher,
+                arousal_sensitivity: CandidatePriorDirection::Higher,
+                stochastic_resonance: CandidateStochasticResonancePrior::Disabled,
+                aperiodic_prior: None,
+                evidence_level: CandidateEvidenceLevel::Heuristic,
+                profile_id: "stage7_candidate_prior_anxious_v1".to_string(),
+            },
+        }
     }
 
     /// Get the neural parameter profile for this brain type.
@@ -1225,5 +1333,26 @@ mod tests {
                 bi.contralateral_ratio
             );
         }
+    }
+
+    #[test]
+    fn candidate_profile_v2_is_defined_for_all_brain_types() {
+        for &bt in BrainType::all() {
+            let profile = bt.candidate_profile_v2();
+            assert!(!profile.profile_id.is_empty(), "{bt:?} missing profile_id");
+            let json = serde_json::to_string(&profile).expect("profile should serialize");
+            let round_trip: CandidateBrainProfile =
+                serde_json::from_str(&json).expect("profile should deserialize");
+            assert_eq!(round_trip, profile, "{bt:?} profile serde round-trip mismatch");
+        }
+    }
+
+    #[test]
+    fn candidate_profile_v2_adhd_stochastic_resonance_is_optional() {
+        let adhd = BrainType::Adhd.candidate_profile_v2();
+        assert_eq!(
+            adhd.stochastic_resonance,
+            CandidateStochasticResonancePrior::Optional
+        );
     }
 }
