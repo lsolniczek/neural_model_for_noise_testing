@@ -98,17 +98,18 @@ The current adapter is `Ds005048PreprocessedAdapter` and requires `nmm_benchmark
 - `conversion_tool_version`
 - `conversion_timestamp`
 
-Current Stage 8c status:
+Current Stage 8d status:
 - observation-side benchmarking is implemented;
 - fixture runs are plumbing only;
-- intermediate runs can reach `intermediate_verified` reproducibility;
-- `source_verified` lineage is not implemented yet in this repo, so ds005048 remains not promotable public evidence.
+- conversion scaffold exists via `tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py`, but does not yet provide independently verified raw-source lineage;
+- ASSR benchmark emits observation-side metrics and explicit unavailable status for prediction/comparison metrics until a real NMM prediction bridge is implemented;
+- ds005048 remains not evidence-promotable (`benchmark_ready=false`, `conversion_status=not_started`).
 
-Current scientifically valid ASSR outputs are observation-side only:
+Current scientifically valid ASSR outputs:
 - observed target-rate recovery from `observed_dominant_modulation_hz`
 - observed target-band strength
 - observed target-vs-control strength delta
 - observed dominant modulation error
+- prediction/comparison outputs are explicitly unavailable pending model bridge implementation.
 
 `observed_assr_plv` is intentionally not used/named because true cross-trial PLV is not implemented yet in this path.
-NMM-vs-observed prediction comparison remains pending.

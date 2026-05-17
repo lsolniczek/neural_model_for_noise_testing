@@ -77,6 +77,37 @@ def compute_assr_metrics(rows: list[dict[str, str]]) -> dict:
     }
 
 
+def compute_prediction_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    # Stage 8d closure guardrail:
+    # prediction rows are intentionally unavailable until a real model-derived bridge
+    # is implemented. Do not derive "predictions" from benchmark labels.
+    out: list[dict[str, str]] = []
+    for r in rows:
+        out.append(
+            {
+                "trial_id": r["trial_id"],
+                "condition_id": r["condition_id"],
+                "predicted_dominant_modulation_hz": "",
+                "predicted_gamma_assr_response_strength": "",
+                "prediction_status": "unavailable_model_bridge_not_implemented",
+            }
+        )
+    return out
+
+
+def compute_prediction_metrics(rows: list[dict[str, str]], pred_rows: list[dict[str, str]]) -> dict:
+    joined = []
+    return {
+        "predicted_target_rate_recovery_accuracy": None,
+        "predicted_target_vs_control_strength_delta": None,
+        "prediction_observation_target_rate_agreement": None,
+        "prediction_observation_condition_rank_agreement": None,
+        "prediction_observation_strength_delta_sign_agreement": None,
+        "comparison_status": "unavailable_noncommensurate_output",
+        "joined_rows": joined,
+    }
+
+
 def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root: Path | None) -> int:
     run_mode = "fixture_smoke_test" if use_fixture else "real_public_data"
     data_status = "fixture" if use_fixture else "downloaded"
@@ -115,17 +146,38 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
             w = csv.DictWriter(f, fieldnames=["metric", "value"])
             w.writeheader()
             w.writerows(metric_rows)
+    pred_rows = compute_prediction_rows(rows)
+    pred_metrics = compute_prediction_metrics(rows, pred_rows)
     with (output_dir / "assr_prediction_metrics.csv").open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["metric", "value"])
         w.writeheader()
-        w.writerow({"metric": "prediction_vs_observation_error", "value": ""})
-        w.writerow({"metric": "status", "value": "not_yet_available"})
+        w.writerow({"metric": "predicted_target_rate_recovery_accuracy", "value": ""})
+        w.writerow({"metric": "predicted_target_vs_control_strength_delta", "value": ""})
+        w.writerow({"metric": "status", "value": "unavailable_model_bridge_not_implemented"})
+    with (output_dir / "assr_comparison_metrics.csv").open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["metric", "value"])
+        w.writeheader()
+        w.writerow({"metric": "prediction_observation_target_rate_agreement", "value": ""})
+        w.writerow({"metric": "prediction_observation_condition_rank_agreement", "value": ""})
+        w.writerow({"metric": "prediction_observation_strength_delta_sign_agreement", "value": ""})
+        w.writerow({"metric": "status", "value": "comparison_unavailable_noncommensurate_output"})
+    with (output_dir / "assr_prediction_rows.csv").open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["trial_id", "condition_id", "predicted_dominant_modulation_hz", "predicted_gamma_assr_response_strength", "prediction_status"])
+        w.writeheader()
+        w.writerows(pred_rows)
     with (output_dir / "assr_failure_cases.csv").open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["trial_id", "reason", "observed_modulation_rate_hz"])
         w.writeheader()
         w.writerows(metrics["failure_cases"])
+        w.writerow(
+            {
+                "trial_id": "",
+                "reason": "comparison_unavailable_noncommensurate_output",
+                "observed_modulation_rate_hz": "",
+            }
+        )
 
-    evidence_category = "plumbing_verified" if use_fixture else "partially_supported"
+    evidence_category = "plumbing_verified" if use_fixture else "not_yet_evidence_usable"
     res_ok = None
     min_epoch_duration_s = None
     max_epoch_duration_s = None
@@ -148,13 +200,16 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
             "observed_target_band_strength",
             "observed_target_vs_control_strength_delta",
             "observed_dominant_modulation_hz_error",
-            "prediction_vs_observation_error_not_yet_available",
+            "comparison_unavailable_noncommensurate_output",
         ],
         "evidence_category": evidence_category,
-        "limitations": [] if use_fixture else ["Observation-side metrics only; NMM-vs-observed comparison pending."],
+        "limitations": [] if use_fixture else [
+            "Source lineage is not fully verified; this run is not yet evidence-usable.",
+            "NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.",
+        ],
         "input_kind": "fixture" if use_fixture else "preprocessed_intermediate",
         "provenance_status": provenance_status,
-        "provenance_verified": provenance_status == "source_verified",
+        "provenance_verified": False,
         "min_epoch_duration_s": min_epoch_duration_s,
         "max_epoch_duration_s": max_epoch_duration_s,
         "max_frequency_resolution_hz": max_frequency_resolution_hz,
@@ -170,6 +225,8 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         f"Observed target rate recovery accuracy: `{metrics['observed_target_rate_recovery_accuracy']:.3f}`",
         f"Observed target-vs-control strength delta: `{metrics['observed_target_vs_control_strength_delta']:.3f}`",
         f"Observed dominant modulation 40 Hz error: `{metrics['observed_dominant_modulation_hz_error']:.3f}`",
+        "Prediction rows: `unavailable_model_bridge_not_implemented`",
+        "Comparison metrics: `unavailable_noncommensurate_output`",
         f"Evidence category: `{evidence_category}`",
     ]
     write_markdown_report(output_dir / "assr_benchmark_report.md", "ASSR Benchmark Report", lines)

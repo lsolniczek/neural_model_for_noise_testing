@@ -315,6 +315,8 @@ class Stage8cPublicEegTests(unittest.TestCase):
             self.assertTrue(result["all_rows_resolution_sufficient"])
             self.assertTrue((out / "assr_observed_metrics.csv").exists())
             self.assertTrue((out / "assr_prediction_metrics.csv").exists())
+            self.assertTrue((out / "assr_comparison_metrics.csv").exists())
+            self.assertTrue((out / "assr_prediction_rows.csv").exists())
 
     def test_short_epoch_is_rejected_for_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -612,6 +614,72 @@ class Stage8cPublicEegTests(unittest.TestCase):
         self.assertTrue(placeholders)
         for d in placeholders:
             self.assertFalse(d["evidence_usable"])
+
+    def test_stage8d_converter_remains_non_evidence_scaffold(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            out = td_path / "converted"
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
+                    "--source-root",
+                    str(DS005048_FIXTURE),
+                    "--out-root",
+                    str(out),
+                    "--source-version",
+                    "fixture_v1",
+                ],
+                check=True,
+            )
+            manifest = json.loads((out / "nmm_benchmark_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_dataset_id"], "ds005048")
+            self.assertTrue(manifest["source_paths"])
+            self.assertTrue(manifest["intermediate_paths"])
+            self.assertEqual(manifest["provenance_status_hint"], "intermediate_verified")
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                    "--dataset",
+                    "ds005048",
+                    "--dataset-root",
+                    str(out),
+                    "--output-dir",
+                    str(out / "bench"),
+                ],
+                check=True,
+            )
+            result = json.loads((out / "bench" / "assr_benchmark_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["provenance_status"], "intermediate_verified")
+            self.assertIn("comparison_unavailable_noncommensurate_output", result["metrics_computed"])
+            self.assertEqual(result["evidence_category"], "not_yet_evidence_usable")
+
+    def test_non_fixture_assr_result_lists_both_downgrade_limitations(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                    "--dataset",
+                    "ds005048",
+                    "--dataset-root",
+                    str(DS005048_FIXTURE),
+                    "--output-dir",
+                    str(out),
+                ],
+                check=True,
+            )
+            result = json.loads((out / "assr_benchmark_result.json").read_text(encoding="utf-8"))
+            self.assertIn(
+                "Source lineage is not fully verified; this run is not yet evidence-usable.",
+                result["limitations"],
+            )
+            self.assertIn(
+                "NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.",
+                result["limitations"],
+            )
 
 
 if __name__ == "__main__":

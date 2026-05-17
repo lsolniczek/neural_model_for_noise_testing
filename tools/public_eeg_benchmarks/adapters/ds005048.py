@@ -158,6 +158,10 @@ class Ds005048PreprocessedAdapter:
                 return "declared_only"
             if self._hash_file(actual_path) != expected:
                 raise DatasetLayoutError(f"intermediate hash mismatch for consumed file '{p}'")
+        # Stage 8d closure downgrade:
+        # this adapter currently verifies only files available inside the intermediate
+        # dataset root. Without a distinct, independently verified raw source tree,
+        # source lineage cannot be proven. Keep status at intermediate_verified.
         return "intermediate_verified"
 
     def load_subjects(self) -> List[str]:
