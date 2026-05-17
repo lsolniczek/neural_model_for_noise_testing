@@ -1364,6 +1364,7 @@ fn surrogate_csv_header() -> String {
         "arousal_model".into(),
         "acoustic_score_fusion".into(),
         "constrained".into(),
+        "active_scoring_profile".into(),
         "jr_sigma".into(),
         "gaba_b_rate".into(),
         "gaba_b_gain".into(),
@@ -1372,6 +1373,10 @@ fn surrogate_csv_header() -> String {
     cols.extend(
         [
             "score",
+            "score_legacy_v1_neural",
+            "score_legacy_v1_fused",
+            "score_candidate_research_v2",
+            "score_product_acoustic",
             "legacy_nmm_score",
             "fused_score",
             "acoustic_goal_score",
@@ -1536,6 +1541,7 @@ fn surrogate_csv_row(
         },
         bool01(config.acoustic_score_fusion_enabled),
         bool01(config.acoustic_constraints_enabled),
+        config.scoring_profile.to_string(),
         format!("{:.6}", config.jr_stochastic_sigma),
         format!("{:.6}", config.cet_b_slow_rate),
         format!("{:.6}", config.cet_b_slow_gain),
@@ -1543,6 +1549,10 @@ fn surrogate_csv_row(
     cols.extend(genome_str);
     cols.extend([
         format!("{score:.6}"),
+        fmt_opt(result.multi_score.legacy_v1_neural),
+        fmt_opt(result.multi_score.legacy_v1_fused),
+        fmt_opt(result.multi_score.candidate_research_v2),
+        fmt_opt(result.multi_score.product_acoustic),
         fmt_opt(acoustic.and_then(|a| a.legacy_nmm_score)),
         fmt_opt(acoustic.and_then(|a| a.fused_score_preview)),
         fmt_opt(acoustic.and_then(|a| a.acoustic_goal_score)),
@@ -4938,13 +4948,20 @@ mod tests {
 
         assert_eq!(cols[0], "example_id");
         assert_eq!(cols[7], "goal");
-        assert_eq!(cols[20], "gaba_b_gain");
-        assert_eq!(cols[21], "g0");
+        let gaba_idx = cols
+            .iter()
+            .position(|c| *c == "gaba_b_gain")
+            .expect("gaba_b_gain column");
+        assert_eq!(cols[gaba_idx + 1], "g0");
         assert_eq!(
-            cols[21 + surrogate::GENOME_DIM - 1],
+            cols[gaba_idx + 1 + surrogate::GENOME_DIM - 1],
             format!("g{}", surrogate::GENOME_DIM - 1)
         );
         assert!(cols.contains(&"score"));
+        assert!(cols.contains(&"score_legacy_v1_neural"));
+        assert!(cols.contains(&"score_legacy_v1_fused"));
+        assert!(cols.contains(&"score_candidate_research_v2"));
+        assert!(cols.contains(&"score_product_acoustic"));
         assert!(cols.contains(&"violation"));
         assert!(cols.contains(&"speech_privacy"));
         assert!(cols.contains(&"aperiodic_exponent"));
@@ -5026,6 +5043,14 @@ mod tests {
             &result,
         );
         let cols: Vec<&str> = row.split(',').collect();
+        let header = surrogate_csv_header();
+        let header_cols: Vec<&str> = header.split(',').collect();
+        let idx = |name: &str| {
+            header_cols
+                .iter()
+                .position(|c| *c == name)
+                .expect("column should exist")
+        };
         let meta_start = 0usize;
         let expected_goal_id = GoalKind::all()
             .iter()
@@ -5050,12 +5075,12 @@ mod tests {
         assert_eq!(cols[meta_start + 13], "0");
         assert_eq!(cols[meta_start + 14], "1");
         assert_eq!(cols[meta_start + 15], "1");
-        assert_eq!(cols[meta_start + 18], "100.000000");
-        assert_eq!(cols[meta_start + 19], "25.000000");
-        assert_eq!(cols[meta_start + 20], "18.000000");
-        assert_eq!(cols[meta_start + 21], "0.500000");
+        assert_eq!(cols[idx("jr_sigma")], "100.000000");
+        assert_eq!(cols[idx("gaba_b_rate")], "25.000000");
+        assert_eq!(cols[idx("gaba_b_gain")], "18.000000");
+        assert_eq!(cols[idx("g0")], "0.500000");
         assert_eq!(
-            cols[meta_start + 21 + surrogate::GENOME_DIM],
+            cols[idx("score")],
             format!("{:.6}", result.score)
         );
         assert!(

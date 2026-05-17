@@ -37,12 +37,16 @@ pub enum PipelineVariant {
 #[serde(rename_all = "snake_case")]
 pub enum ScoringProfile {
     LegacyV1,
+    CandidateResearchV2,
+    ProductAcoustic,
 }
 
 impl fmt::Display for ScoringProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ScoringProfile::LegacyV1 => write!(f, "legacy_v1"),
+            ScoringProfile::CandidateResearchV2 => write!(f, "candidate_research_v2"),
+            ScoringProfile::ProductAcoustic => write!(f, "product_acoustic"),
         }
     }
 }

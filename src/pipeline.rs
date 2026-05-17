@@ -176,6 +176,8 @@ pub struct SimulationConfig {
     pub acoustic_constraints_enabled: bool,
     /// Explicit model version for reproducible scientific baselines.
     pub model_version: ModelVersion,
+    /// Active scalar scoring profile for this run.
+    pub scoring_profile: ScoringProfile,
     /// Optional run seed when an outer command has an explicit reproducibility seed.
     /// Does not affect simulation behavior by itself; metadata only.
     pub reproducibility_seed: Option<u64>,
@@ -261,6 +263,7 @@ impl Default for SimulationConfig {
             acoustic_score_fusion_enabled: false,
             acoustic_constraints_enabled: false,
             model_version: ModelVersion::LegacyV1,
+            scoring_profile: ScoringProfile::LegacyV1,
             reproducibility_seed: None,
             arousal_model: ArousalModel::LegacyHeuristic,
             fixed_arousal: None,
@@ -279,7 +282,7 @@ impl SimulationConfig {
                 ModelVersion::LegacyV1 => PipelineVariant::EvaluateCanonical,
                 ModelVersion::CandidateV2 => PipelineVariant::EvaluateCandidateV2,
             },
-            scoring_profile: ScoringProfile::LegacyV1,
+            scoring_profile: self.scoring_profile,
             normalization_mode: NormalizationMode::GlobalPerEar,
             brain_type: self.brain_type,
             audio_sample_rate_hz: SAMPLE_RATE,
@@ -322,6 +325,7 @@ impl SimulationConfig {
 pub struct SimulationResult {
     pub model_signature: ModelSignature,
     pub score: f64,
+    pub multi_score: MultiScoreResult,
     pub fhn_firing_rate: f64,
     pub fhn_isi_cv: f64,
     pub dominant_freq: f64,
@@ -346,6 +350,14 @@ pub struct SimulationResult {
     pub scientific_diagnostics: Option<ScientificDiagnostics>,
     /// Optional acoustic-scoring payload reserved for later rollout phases.
     pub acoustic_score: Option<AcousticScoreResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiScoreResult {
+    pub legacy_v1_neural: Option<f64>,
+    pub legacy_v1_fused: Option<f64>,
+    pub candidate_research_v2: Option<f64>,
+    pub product_acoustic: Option<f64>,
 }
 
 pub struct DetailedSimulationResult {
@@ -940,6 +952,42 @@ fn compute_scalar_score(
     neural_score
 }
 
+fn compute_candidate_research_forty_hz_score(cortical: &CanonicalCorticalStageOutput) -> f64 {
+    let peak_term = cortical
+        .bilateral
+        .combined
+        .band_powers
+        .normalized()
+        .gamma
+        .clamp(0.0, 1.0);
+    let plv_term = cortical.performance.plv.unwrap_or(0.0).clamp(0.0, 1.0);
+    let envelope_term = cortical
+        .performance
+        .envelope_plv
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let freq_term = (cortical.bilateral.combined.dominant_freq / 40.0).clamp(0.0, 1.0);
+    (0.35 * plv_term + 0.25 * envelope_term + 0.20 * peak_term + 0.20 * freq_term).clamp(0.0, 1.0)
+}
+
+fn compute_product_acoustic_score(acoustic: Option<&AcousticScoreResult>) -> Option<f64> {
+    let acoustic = acoustic?;
+    let privacy = acoustic.speech_privacy?;
+    let intelligibility = acoustic.intelligibility_proxy?;
+    let features = &acoustic.features;
+    let comfort_lufs = features
+        .lufs_asymmetry_lu
+        .map(|v| (1.0 - (v / 2.0)).clamp(0.0, 1.0))
+        .unwrap_or(0.5);
+    let comfort_peak = features
+        .true_peak_dbfs
+        .map(|v| (1.0 - ((v + 6.0) / 6.0).max(0.0)).clamp(0.0, 1.0))
+        .unwrap_or(0.5);
+    let comfort = 0.5 * comfort_lufs + 0.5 * comfort_peak;
+    let masking = (0.7 * privacy + 0.3 * (1.0 - intelligibility)).clamp(0.0, 1.0);
+    Some((0.65 * masking + 0.35 * comfort).clamp(0.0, 1.0))
+}
+
 fn max_abs_slope(sweep: &[ArousalSweepPoint]) -> f64 {
     if sweep.len() < 2 {
         return 0.0;
@@ -1140,6 +1188,9 @@ fn evaluate_preset_detailed_internal(
             "invalid SimulationConfig: acoustic constraints are incompatible with acoustic score fusion (would double-count comfort)"
         );
     }
+    if config.scoring_profile == ScoringProfile::ProductAcoustic && !config.acoustic_scoring_enabled {
+        panic!("invalid SimulationConfig: product_acoustic scoring requires acoustic scoring");
+    }
     let auditory = prepare_canonical_auditory_state(preset, config);
     let mut acoustic_score = config
         .acoustic_scoring_enabled
@@ -1180,11 +1231,32 @@ fn evaluate_preset_detailed_internal(
     } else {
         None
     };
+    let candidate_research_v2 = match goal.kind() {
+        crate::scoring::GoalKind::Ignition => Some(compute_candidate_research_forty_hz_score(&cortical)),
+        _ => None,
+    };
+    let product_acoustic = compute_product_acoustic_score(acoustic_score.as_ref());
+    let multi_score = MultiScoreResult {
+        legacy_v1_neural: Some(neural_score),
+        legacy_v1_fused: if config.acoustic_score_fusion_enabled { Some(score) } else { None },
+        candidate_research_v2,
+        product_acoustic,
+    };
+    let active_score = match config.scoring_profile {
+        ScoringProfile::LegacyV1 => score,
+        ScoringProfile::CandidateResearchV2 => multi_score
+            .candidate_research_v2
+            .unwrap_or_else(|| panic!("selected CandidateResearchV2 profile unavailable for goal {}", goal.kind())),
+        ScoringProfile::ProductAcoustic => multi_score
+            .product_acoustic
+            .unwrap_or_else(|| panic!("selected ProductAcoustic profile unavailable for current evaluation inputs")),
+    };
     let norm_bands = jr_result.band_powers.normalized();
 
     let summary = SimulationResult {
         model_signature: config.model_signature(),
-        score,
+        score: active_score,
+        multi_score,
         fhn_firing_rate: cortical.fhn.firing_rate,
         fhn_isi_cv: cortical.fhn.isi_cv,
         dominant_freq: jr_result.dominant_freq,

@@ -1139,6 +1139,10 @@ mod tests {
             sig.scoring_profile,
             crate::model_signature::ScoringProfile::LegacyV1
         );
+        assert_eq!(result.multi_score.legacy_v1_neural, Some(result.score));
+        assert!(result.multi_score.legacy_v1_fused.is_none());
+        assert!(result.multi_score.candidate_research_v2.is_none());
+        assert!(result.multi_score.product_acoustic.is_none());
         assert_eq!(
             sig.normalization_mode,
             crate::model_signature::NormalizationMode::GlobalPerEar
@@ -1193,6 +1197,95 @@ mod tests {
                 .wc_adaptive_entrainment_range_hz
                 .to_bits(),
             5.0f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn scoring_profile_variants_serialize_distinctly() {
+        use crate::model_signature::ScoringProfile;
+        let legacy = serde_json::to_string(&ScoringProfile::LegacyV1).unwrap();
+        let candidate = serde_json::to_string(&ScoringProfile::CandidateResearchV2).unwrap();
+        let product = serde_json::to_string(&ScoringProfile::ProductAcoustic).unwrap();
+        assert_eq!(legacy, "\"legacy_v1\"");
+        assert_eq!(candidate, "\"candidate_research_v2\"");
+        assert_eq!(product, "\"product_acoustic\"");
+    }
+
+    #[test]
+    fn candidate_research_v2_is_separate_from_legacy_v1() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Ignition);
+        let mut config = canonical_config(6.0, BrainType::Normal);
+        config.scoring_profile = crate::model_signature::ScoringProfile::CandidateResearchV2;
+        let result = evaluate_preset(&preset, &goal, &config);
+        assert!(result.multi_score.legacy_v1_neural.is_some());
+        assert!(result.multi_score.candidate_research_v2.is_some());
+        assert_eq!(
+            result.score,
+            result.multi_score.candidate_research_v2.unwrap()
+        );
+    }
+
+    #[test]
+    fn candidate_research_v2_is_unavailable_for_unsupported_legacy_goal() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Sleep);
+        let config = canonical_config(6.0, BrainType::Normal);
+        let result = evaluate_preset(&preset, &goal, &config);
+        assert!(result.multi_score.candidate_research_v2.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "CandidateResearchV2 profile unavailable")]
+    fn selected_profile_never_silently_falls_back() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Sleep);
+        let mut config = canonical_config(6.0, BrainType::Normal);
+        config.scoring_profile = crate::model_signature::ScoringProfile::CandidateResearchV2;
+        let _ = evaluate_preset(&preset, &goal, &config);
+    }
+
+    #[test]
+    fn product_acoustic_score_is_neural_independent() {
+        let preset = fixture_bright_modulated_symmetric();
+        let goal = Goal::new(GoalKind::Shield);
+        let mut config = canonical_config(6.0, BrainType::Normal);
+        config.acoustic_scoring_enabled = true;
+        config.scoring_profile = crate::model_signature::ScoringProfile::ProductAcoustic;
+        let result = evaluate_preset(&preset, &goal, &config);
+        assert!(result.multi_score.product_acoustic.is_some());
+        assert_eq!(result.score, result.multi_score.product_acoustic.unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "product_acoustic scoring requires acoustic scoring")]
+    fn product_acoustic_requires_acoustic_scoring() {
+        let preset = fixture_bright_modulated_symmetric();
+        let goal = Goal::new(GoalKind::Shield);
+        let mut config = canonical_config(6.0, BrainType::Normal);
+        config.scoring_profile = crate::model_signature::ScoringProfile::ProductAcoustic;
+        let _ = evaluate_preset(&preset, &goal, &config);
+    }
+
+    #[test]
+    fn legacy_multiscore_channels_distinguish_neural_and_fused() {
+        let preset = fixture_bright_modulated_symmetric();
+        let goal = Goal::new(GoalKind::Shield);
+        let mut config = canonical_config(6.0, BrainType::Normal);
+        config.acoustic_scoring_enabled = true;
+        config.acoustic_score_fusion_enabled = true;
+        let result = evaluate_preset(&preset, &goal, &config);
+        assert!(result.multi_score.legacy_v1_neural.is_some());
+        assert!(result.multi_score.legacy_v1_fused.is_some());
+        assert_eq!(result.score, result.multi_score.legacy_v1_fused.unwrap());
+    }
+
+    #[test]
+    fn default_optimizer_path_stays_legacy_v1() {
+        let config = SimulationConfig::default();
+        assert_eq!(
+            config.scoring_profile,
+            crate::model_signature::ScoringProfile::LegacyV1
         );
     }
 

@@ -713,11 +713,22 @@ enum ScoringProfile {
 }
 
 struct MultiScoreResult {
-    legacy_v1: Option<f64>,
+    legacy_v1_neural: Option<f64>,
+    legacy_v1_fused: Option<f64>,
     candidate_research_v2: Option<f64>,
     product_acoustic: Option<f64>,
 }
 ```
+
+Stage 6 semantic guardrails:
+- `CandidateResearchV2` must expose only explicitly implemented research endpoints.
+  Unsupported endpoints/goals are unavailable (`None`) rather than fabricated.
+- Current conservative implementation may expose only `forty_hz_response` as a
+  provisional research endpoint.
+- `ProductAcoustic` must be computed from acoustic/product features only, not by
+  reusing legacy neural-acoustic fusion helpers.
+- Selecting an unavailable profile must fail explicitly; no silent fallback to
+  another score meaning.
 
 ### Regression requirements
 

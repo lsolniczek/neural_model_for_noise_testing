@@ -175,6 +175,7 @@ impl DisturbConfig {
             acoustic_score_fusion_enabled: false,
             acoustic_constraints_enabled: false,
             model_version: self.model_version,
+            scoring_profile: ScoringProfile::LegacyV1,
             reproducibility_seed: self.reproducibility_seed,
             arousal_model: self.arousal_model,
             fixed_arousal: self.fixed_arousal,
