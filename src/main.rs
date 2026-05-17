@@ -23,9 +23,10 @@ use std::time::Instant;
 
 use brain_type::BrainType;
 use optimizer::DifferentialEvolution;
+use crate::auditory::ArousalModel;
 use pipeline::{
-    evaluate_preset, evaluate_preset_detailed, validate_analysis_window, DetailedSimulationResult,
-    SimulationConfig, SimulationResult,
+    evaluate_preset, evaluate_preset_detailed, validate_analysis_window,
+    DetailedSimulationResult, SimulationConfig, SimulationResult,
 };
 use preset::Preset;
 use scoring::{Goal, GoalKind, MetricStatus};
@@ -415,6 +416,14 @@ enum Commands {
         #[arg(long = "acoustic-score-fusion", default_value_t = false)]
         acoustic_score_fusion: bool,
 
+        /// Arousal model used to set cortical operating state provenance.
+        #[arg(long = "arousal-model", default_value = "legacy_heuristic")]
+        arousal_model: String,
+
+        /// Fixed arousal assumption in [0,1], used when --arousal-model=fixed.
+        #[arg(long = "fixed-arousal")]
+        fixed_arousal: Option<f64>,
+
         /// Priority 18a — Stochastic noise sigma on JR input drive.
         ///
         /// Use this to replay the same P18 neural retune that may have been
@@ -554,6 +563,14 @@ enum Commands {
         #[arg(long = "phys-gate", default_value_t = false)]
         phys_gate: bool,
 
+        /// Arousal model used for generated rows.
+        #[arg(long = "arousal-model", default_value = "legacy_heuristic")]
+        arousal_model: String,
+
+        /// Fixed arousal assumption in [0,1], used when --arousal-model=fixed.
+        #[arg(long = "fixed-arousal")]
+        fixed_arousal: Option<f64>,
+
         /// Random seed
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -637,6 +654,8 @@ fn build_eval_config(
     flags: EvaluateFeatureFlags,
     acoustic_scoring_enabled: bool,
     acoustic_score_fusion_enabled: bool,
+    arousal_model: ArousalModel,
+    fixed_arousal: Option<f64>,
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
@@ -650,6 +669,8 @@ fn build_eval_config(
         physiological_thalamic_gate_enabled: flags.phys_gate,
         acoustic_scoring_enabled,
         acoustic_score_fusion_enabled,
+        arousal_model,
+        fixed_arousal,
         jr_stochastic_sigma: jr_sigma,
         cet_b_slow_rate: gaba_b_rate,
         cet_b_slow_gain: gaba_b_gain,
@@ -661,14 +682,46 @@ fn build_generate_data_config(
     duration: f32,
     brain_type: BrainType,
     phys_gate: bool,
+    arousal_model: ArousalModel,
+    fixed_arousal: Option<f64>,
     seed: u64,
 ) -> SimulationConfig {
     SimulationConfig {
         duration_secs: duration,
         brain_type,
         physiological_thalamic_gate_enabled: phys_gate,
+        arousal_model,
+        fixed_arousal,
         reproducibility_seed: Some(seed),
         ..SimulationConfig::default()
+    }
+}
+
+fn resolve_arousal_model_or_exit(model: &str, fixed_arousal: Option<f64>) -> ArousalModel {
+    let model = model.trim().to_ascii_lowercase();
+    match model.as_str() {
+        "legacy_heuristic" => {
+            if fixed_arousal.is_some() {
+                eprintln!("--fixed-arousal requires --arousal-model=fixed");
+                std::process::exit(2);
+            }
+            ArousalModel::LegacyHeuristic
+        }
+        "fixed" => {
+            let value = fixed_arousal.unwrap_or_else(|| {
+                eprintln!("--arousal-model=fixed requires --fixed-arousal <0..1>");
+                std::process::exit(2);
+            });
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                eprintln!("--fixed-arousal must be finite and in [0,1], got {value}");
+                std::process::exit(2);
+            }
+            ArousalModel::Fixed
+        }
+        _ => {
+            eprintln!("Unknown --arousal-model '{model}'. Valid: legacy_heuristic, fixed");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -706,6 +759,8 @@ fn build_disturb_config(
         habituation_enabled: true,
         stochastic_jr_enabled: true,
         reproducibility_seed: None,
+        arousal_model: ArousalModel::LegacyHeuristic,
+        fixed_arousal: None,
         jr_stochastic_sigma: jr_sigma,
         cet_b_slow_rate: gaba_b_rate,
         cet_b_slow_gain: gaba_b_gain,
@@ -1306,6 +1361,7 @@ fn surrogate_csv_header() -> String {
         "thalamic_gate".into(),
         "cet".into(),
         "phys_gate".into(),
+        "arousal_model".into(),
         "acoustic_score_fusion".into(),
         "constrained".into(),
         "jr_sigma".into(),
@@ -1474,6 +1530,10 @@ fn surrogate_csv_row(
         bool01(config.thalamic_gate_enabled),
         bool01(config.cet_enabled),
         bool01(config.physiological_thalamic_gate_enabled),
+        match config.arousal_model {
+            ArousalModel::LegacyHeuristic => "legacy_heuristic".to_string(),
+            ArousalModel::Fixed => "fixed".to_string(),
+        },
         bool01(config.acoustic_score_fusion_enabled),
         bool01(config.acoustic_constraints_enabled),
         format!("{:.6}", config.jr_stochastic_sigma),
@@ -1537,15 +1597,9 @@ fn surrogate_csv_row(
         fmt_opt(candidate_latent.map(|l| l.estimated_arousal)),
         candidate_latent
             .map(|l| match l.arousal_source {
-                crate::auditory::CandidateArousalSource::LegacyHeuristicGate => {
-                    "legacy_heuristic_gate".to_string()
-                }
-                crate::auditory::CandidateArousalSource::PhysiologicalGateHeuristic => {
-                    "physiological_gate_heuristic".to_string()
-                }
-                crate::auditory::CandidateArousalSource::NeutralDefault => {
-                    "neutral_default".to_string()
-                }
+                crate::auditory::ArousalSource::LegacyHeuristic => "legacy_heuristic".to_string(),
+                crate::auditory::ArousalSource::Fixed => "fixed".to_string(),
+                crate::auditory::ArousalSource::NeutralDefault => "neutral_default".to_string(),
             })
             .unwrap_or_default(),
         fmt_opt(features.and_then(|f| f.broadband_level_db)),
@@ -1658,6 +1712,8 @@ fn evaluate_score_matrix(
     duration: f32,
     flags: EvaluateFeatureFlags,
     acoustic_score_fusion: bool,
+    arousal_model: ArousalModel,
+    fixed_arousal: Option<f64>,
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
@@ -1675,6 +1731,8 @@ fn evaluate_score_matrix(
                         flags,
                         acoustic_score_fusion,
                         acoustic_score_fusion,
+                        arousal_model,
+                        fixed_arousal,
                         jr_sigma,
                         gaba_b_rate,
                         gaba_b_gain,
@@ -2049,6 +2107,8 @@ fn main() {
             phys_gate,
             acoustic_score,
             acoustic_score_fusion,
+            arousal_model,
+            fixed_arousal,
             jr_sigma,
             gaba_b_rate,
             gaba_b_gain,
@@ -2071,6 +2131,8 @@ fn main() {
                 flags,
                 acoustic_score,
                 acoustic_score_fusion,
+                &arousal_model,
+                fixed_arousal,
                 jr_sigma,
                 gaba_b_rate,
                 gaba_b_gain,
@@ -2130,6 +2192,8 @@ fn main() {
             duration,
             threads,
             phys_gate,
+            arousal_model,
+            fixed_arousal,
             seed,
         } => {
             run_generate_data(
@@ -2140,6 +2204,8 @@ fn main() {
                 duration,
                 threads,
                 phys_gate,
+                &arousal_model,
+                fixed_arousal,
                 seed,
             );
         }
@@ -3204,6 +3270,8 @@ fn run_evaluate(
     flags: EvaluateFeatureFlags,
     acoustic_score: bool,
     acoustic_score_fusion: bool,
+    arousal_model_str: &str,
+    fixed_arousal: Option<f64>,
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
@@ -3214,6 +3282,7 @@ fn run_evaluate(
         duration,
         SimulationConfig::default().warmup_discard_secs,
     );
+    let arousal_model = resolve_arousal_model_or_exit(arousal_model_str, fixed_arousal);
 
     // Load preset from JSON
     let json = std::fs::read_to_string(preset_path).unwrap_or_else(|e| {
@@ -3280,6 +3349,13 @@ fn run_evaluate(
         "  Features: assr={}  thalamic_gate={}  cet={}  phys_gate={}",
         flags.assr, flags.thalamic_gate, flags.cet, flags.phys_gate
     );
+    println!(
+        "  Arousal:  model={}{}",
+        arousal_model_str,
+        fixed_arousal
+            .map(|v| format!(" ({v:.3})"))
+            .unwrap_or_default()
+    );
     if (jr_sigma - 15.0).abs() > 1e-12
         || (gaba_b_rate - 5.0).abs() > 1e-12
         || (gaba_b_gain - 10.0).abs() > 1e-12
@@ -3312,6 +3388,8 @@ fn run_evaluate(
             duration,
             flags,
             acoustic_score_fusion,
+            arousal_model,
+            fixed_arousal,
             jr_sigma,
             gaba_b_rate,
             gaba_b_gain,
@@ -3322,6 +3400,8 @@ fn run_evaluate(
             flags,
             acoustic_score_fusion,
             acoustic_score_fusion,
+            arousal_model,
+            fixed_arousal,
             jr_sigma,
             gaba_b_rate,
             gaba_b_gain,
@@ -3349,6 +3429,8 @@ fn run_evaluate(
             flags,
             show_acoustic,
             acoustic_score_fusion,
+            arousal_model,
+            fixed_arousal,
             jr_sigma,
             gaba_b_rate,
             gaba_b_gain,
@@ -3745,6 +3827,8 @@ fn print_comparison_matrix(
     duration: f32,
     flags: EvaluateFeatureFlags,
     acoustic_score_fusion: bool,
+    arousal_model: ArousalModel,
+    fixed_arousal: Option<f64>,
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
@@ -3756,6 +3840,8 @@ fn print_comparison_matrix(
         duration,
         flags,
         acoustic_score_fusion,
+        arousal_model,
+        fixed_arousal,
         jr_sigma,
         gaba_b_rate,
         gaba_b_gain,
@@ -4221,10 +4307,13 @@ fn run_generate_data(
     duration: f32,
     threads: usize,
     phys_gate: bool,
+    arousal_model_str: &str,
+    fixed_arousal: Option<f64>,
     seed: u64,
 ) {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+    let arousal_model = resolve_arousal_model_or_exit(arousal_model_str, fixed_arousal);
 
     ensure_analysis_window_or_exit(
         "generate-data",
@@ -4280,7 +4369,21 @@ fn run_generate_data(
         "  Phys gate:      {}",
         if phys_gate { "enabled" } else { "disabled" }
     );
-    let signature_preview = build_generate_data_config(duration, brain_types[0], phys_gate, seed);
+    println!(
+        "  Arousal model:  {}{}",
+        arousal_model_str,
+        fixed_arousal
+            .map(|v| format!(" ({v:.3})"))
+            .unwrap_or_default()
+    );
+    let signature_preview = build_generate_data_config(
+        duration,
+        brain_types[0],
+        phys_gate,
+        arousal_model,
+        fixed_arousal,
+        seed,
+    );
     print_model_signature(&signature_preview.model_signature());
     println!("  Output:         {}", output.display());
     println!();
@@ -4350,7 +4453,14 @@ fn run_generate_data(
                     let (preset_idx, ref genome, goal_kind, bt) = work[i];
                     let preset = Preset::from_genome(genome);
                     let goal = Goal::new(goal_kind);
-                    let config = build_generate_data_config(duration, bt, phys_gate, seed);
+                    let config = build_generate_data_config(
+                        duration,
+                        bt,
+                        phys_gate,
+                        arousal_model,
+                        fixed_arousal,
+                        seed,
+                    );
                     let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
 
                     results.lock().unwrap().push((
@@ -4447,7 +4557,18 @@ mod tests {
             phys_gate: true,
         };
 
-        let config = build_eval_config(7.5, BrainType::Aging, flags, true, true, 15.0, 5.0, 10.0);
+        let config = build_eval_config(
+            7.5,
+            BrainType::Aging,
+            flags,
+            true,
+            true,
+            ArousalModel::LegacyHeuristic,
+            None,
+            15.0,
+            5.0,
+            10.0,
+        );
         assert!((config.duration_secs - 7.5).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Aging);
         assert!(!config.assr_enabled);
@@ -4475,6 +4596,8 @@ mod tests {
             flags,
             false,
             false,
+            ArousalModel::LegacyHeuristic,
+            None,
             100.0,
             25.0,
             18.0,
@@ -4486,7 +4609,14 @@ mod tests {
 
     #[test]
     fn build_generate_data_config_carries_phys_gate() {
-        let config = build_generate_data_config(3.5, BrainType::Adhd, true, 42);
+        let config = build_generate_data_config(
+            3.5,
+            BrainType::Adhd,
+            true,
+            ArousalModel::LegacyHeuristic,
+            None,
+            42,
+        );
         assert!((config.duration_secs - 3.5).abs() < 1e-12);
         assert_eq!(config.brain_type, BrainType::Adhd);
         assert!(config.assr_enabled);
@@ -4970,7 +5100,14 @@ mod tests {
         preset.objects[0].bass_mod.param_b = 0.9;
         let genome = preset.to_genome();
 
-        let config = build_generate_data_config(3.0, BrainType::Normal, false, 12345);
+        let config = build_generate_data_config(
+            3.0,
+            BrainType::Normal,
+            false,
+            ArousalModel::LegacyHeuristic,
+            None,
+            12345,
+        );
         let goal_kind = GoalKind::Focus;
         let goal = Goal::new(goal_kind);
         let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
@@ -5042,7 +5179,14 @@ mod tests {
         preset.objects[0].bass_mod.param_b = 0.95;
         let genome = preset.to_genome();
 
-        let config = build_generate_data_config(3.0, BrainType::Normal, false, 12345);
+        let config = build_generate_data_config(
+            3.0,
+            BrainType::Normal,
+            false,
+            ArousalModel::LegacyHeuristic,
+            None,
+            12345,
+        );
         let goal_kind = GoalKind::Focus;
         let goal = Goal::new(goal_kind);
         let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
@@ -5098,7 +5242,14 @@ mod tests {
         preset.objects[0].volume = 0.8;
         let genome = preset.to_genome();
 
-        let config = build_generate_data_config(3.0, BrainType::Normal, false, 777);
+        let config = build_generate_data_config(
+            3.0,
+            BrainType::Normal,
+            false,
+            ArousalModel::LegacyHeuristic,
+            None,
+            777,
+        );
         let goal_kind = GoalKind::Focus;
         let goal = Goal::new(goal_kind);
         let mut result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
@@ -5337,7 +5488,18 @@ mod tests {
         let goal_kind = GoalKind::Meditation;
         let brain_type = BrainType::Anxious;
         let goal = Goal::new(goal_kind);
-        let config = build_eval_config(duration, brain_type, flags, false, false, 15.0, 5.0, 10.0);
+        let config = build_eval_config(
+            duration,
+            brain_type,
+            flags,
+            false,
+            false,
+            ArousalModel::LegacyHeuristic,
+            None,
+            15.0,
+            5.0,
+            10.0,
+        );
 
         let direct = evaluate_preset(&preset, &goal, &config);
         let matrix = evaluate_score_matrix(
@@ -5347,6 +5509,8 @@ mod tests {
             duration,
             flags,
             false,
+            ArousalModel::LegacyHeuristic,
+            None,
             15.0,
             5.0,
             10.0,

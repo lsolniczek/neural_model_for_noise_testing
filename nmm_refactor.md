@@ -612,10 +612,18 @@ That formula may be useful, but it is a prior, not established biology.
    - `ArousalModel::Fixed`
    - later `ArousalModel::Calibrated`
 2. Emit the estimated arousal and model source in metadata.
+   - `legacy_heuristic` means the acoustic heuristic prior was used.
+   - `fixed` means arousal was explicitly assumed for a controlled run.
+   - neither label implies measured ground-truth arousal in listeners.
 3. Add a sweep mode:
    - evaluate a preset over a configured arousal range,
    - return score sensitivity.
 4. Keep physiological thalamic gate separate from acoustic arousal estimation.
+   - the gate maps a chosen arousal value to cortical operating-point shifts;
+     it does not own preset -> arousal estimation provenance.
+   - arousal estimation/assumption is independent of gate enablement:
+     disabling gates means zero gate shift, not replacing latent arousal with neutral.
+   - fixed-arousal runs must serialize the numeric fixed value in model metadata.
 
 ### Suggested files
 

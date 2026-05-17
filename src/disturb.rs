@@ -15,6 +15,7 @@ use crate::pipeline::{
     run_canonical_cortical_stage, spectral_brightness, validate_analysis_window, SimulationConfig,
     DECIMATION_FACTOR, DEFAULT_WARMUP_DISCARD_SECS, NEURAL_SR, SAMPLE_RATE,
 };
+use crate::auditory::ArousalModel;
 use crate::preset::Preset;
 use rustfft::{num_complex::Complex, FftPlanner};
 
@@ -119,6 +120,8 @@ pub struct DisturbConfig {
     pub habituation_enabled: bool,
     pub stochastic_jr_enabled: bool,
     pub reproducibility_seed: Option<u64>,
+    pub arousal_model: ArousalModel,
+    pub fixed_arousal: Option<f64>,
     pub jr_stochastic_sigma: f64,
     pub cet_b_slow_rate: f64,
     pub cet_b_slow_gain: f64,
@@ -145,6 +148,8 @@ impl Default for DisturbConfig {
             habituation_enabled: true,
             stochastic_jr_enabled: true,
             reproducibility_seed: None,
+            arousal_model: ArousalModel::LegacyHeuristic,
+            fixed_arousal: None,
             jr_stochastic_sigma: 15.0,
             cet_b_slow_rate: 5.0,
             cet_b_slow_gain: 10.0,
@@ -171,6 +176,8 @@ impl DisturbConfig {
             acoustic_constraints_enabled: false,
             model_version: self.model_version,
             reproducibility_seed: self.reproducibility_seed,
+            arousal_model: self.arousal_model,
+            fixed_arousal: self.fixed_arousal,
             jr_stochastic_sigma: self.jr_stochastic_sigma,
             cet_b_slow_rate: self.cet_b_slow_rate,
             cet_b_slow_gain: self.cet_b_slow_gain,
@@ -663,6 +670,7 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
             acoustic_scoring_enabled: config.acoustic_scoring_enabled,
             acoustic_score_fusion_enabled: false,
             acoustic_constraints_enabled: false,
+            arousal_model: config.arousal_model,
         },
         neural_flags: NeuralFeatureFlags {
             stochastic_jr_enabled: false,
@@ -672,6 +680,7 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
             0.0,
             0.0,
             0.0,
+            config.fixed_arousal,
             false,
             false,
         ),

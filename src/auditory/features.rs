@@ -1,4 +1,5 @@
 use crate::neural::aperiodic::{compute_one_sided_psd, PowerSpectrum};
+use crate::auditory::thalamic_gate::ArousalSource;
 use serde::{Deserialize, Serialize};
 
 const MODULATION_MIN_HZ: f64 = 0.5;
@@ -8,14 +9,6 @@ const POWER_FLOOR: f64 = 1e-18;
 const WELCH_SEGMENT_SECONDS: f64 = 2.0;
 const WELCH_OVERLAP_FRACTION: f64 = 0.5;
 const WELCH_MIN_SEGMENT_SAMPLES: usize = 256;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CandidateArousalSource {
-    LegacyHeuristicGate,
-    PhysiologicalGateHeuristic,
-    NeutralDefault,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CochlearFeatures {
@@ -50,7 +43,7 @@ pub struct TemporalModulationFeatures {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatentStateEstimate {
     pub estimated_arousal: f64,
-    pub arousal_source: CandidateArousalSource,
+    pub arousal_source: ArousalSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,7 +60,7 @@ pub fn extract_candidate_auditory_features(
     brightness: f64,
     spectral_tilt_db_per_oct: Option<f64>,
     estimated_arousal: f64,
-    arousal_source: CandidateArousalSource,
+    arousal_source: ArousalSource,
     sample_rate_hz: f64,
 ) -> CandidateAuditoryFeatures {
     let cochlear = CochlearFeatures {

@@ -1,4 +1,5 @@
 use crate::brain_type::{BandModelType, BrainType, TonotopicParams};
+use crate::auditory::ArousalModel;
 use crate::neural::fhn::legacy_constants_snapshot as fhn_legacy_constants_snapshot;
 use crate::neural::jansen_rit::legacy_constants_snapshot;
 use crate::neural::wilson_cowan::{
@@ -173,6 +174,7 @@ pub struct AuditoryFeatureFlags {
     pub acoustic_scoring_enabled: bool,
     pub acoustic_score_fusion_enabled: bool,
     pub acoustic_constraints_enabled: bool,
+    pub arousal_model: ArousalModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +187,7 @@ pub struct NumericParamsSnapshot {
     pub jr_stochastic_sigma: f64,
     pub cet_b_slow_rate: f64,
     pub cet_b_slow_gain: f64,
+    pub fixed_arousal: Option<f64>,
 
     pub fhn_a: f64,
     pub fhn_b: f64,
@@ -244,6 +247,7 @@ impl NumericParamsSnapshot {
         jr_stochastic_sigma: f64,
         cet_b_slow_rate: f64,
         cet_b_slow_gain: f64,
+        fixed_arousal: Option<f64>,
         habituation_enabled: bool,
         cet_enabled: bool,
     ) -> Self {
@@ -256,6 +260,7 @@ impl NumericParamsSnapshot {
             jr_stochastic_sigma,
             cet_b_slow_rate,
             cet_b_slow_gain,
+            fixed_arousal,
             fhn_a: params.fhn.a,
             fhn_b: params.fhn.b,
             fhn_epsilon: params.fhn.epsilon,

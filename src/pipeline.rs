@@ -6,10 +6,10 @@ use crate::acoustic_score::{
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 use crate::auditory::{
-    apply_rir, diagnostics_for_modulation, extract_candidate_auditory_features, generate_rir,
-    AssrDiagnostics, AssrModulationSummary, AssrTransfer, ButterworthCrossover,
-    CandidateArousalSource, CandidateAuditoryFeatures, EnvironmentParams, GammatoneFilterbank,
-    PhysiologicalThalamicGate, ThalamicGate,
+    apply_rir, diagnostics_for_modulation, estimate_arousal, extract_candidate_auditory_features,
+    generate_rir, ArousalModel, ArousalSource, AssrDiagnostics, AssrModulationSummary,
+    AssrTransfer, ButterworthCrossover, CandidateAuditoryFeatures, EnvironmentParams,
+    GammatoneFilterbank, PhysiologicalThalamicGate, ThalamicGate,
 };
 use crate::brain_type::BrainType;
 use crate::model_signature::{
@@ -179,6 +179,10 @@ pub struct SimulationConfig {
     /// Optional run seed when an outer command has an explicit reproducibility seed.
     /// Does not affect simulation behavior by itself; metadata only.
     pub reproducibility_seed: Option<u64>,
+    /// Explicit arousal model for this run.
+    pub arousal_model: ArousalModel,
+    /// Fixed arousal value used when `arousal_model=fixed`.
+    pub fixed_arousal: Option<f64>,
 
     // ── Priority 18 — Theta-Alpha Coexistence parameters ───────────────
     //
@@ -258,6 +262,8 @@ impl Default for SimulationConfig {
             acoustic_constraints_enabled: false,
             model_version: ModelVersion::LegacyV1,
             reproducibility_seed: None,
+            arousal_model: ArousalModel::LegacyHeuristic,
+            fixed_arousal: None,
             jr_stochastic_sigma: 15.0,
             cet_b_slow_rate: 5.0,
             cet_b_slow_gain: 10.0,
@@ -288,6 +294,7 @@ impl SimulationConfig {
                 acoustic_scoring_enabled: self.acoustic_scoring_enabled,
                 acoustic_score_fusion_enabled: self.acoustic_score_fusion_enabled,
                 acoustic_constraints_enabled: self.acoustic_constraints_enabled,
+                arousal_model: self.arousal_model,
             },
             neural_flags: NeuralFeatureFlags {
                 stochastic_jr_enabled: self.stochastic_jr_enabled,
@@ -297,6 +304,7 @@ impl SimulationConfig {
                 self.jr_stochastic_sigma,
                 self.cet_b_slow_rate,
                 self.cet_b_slow_gain,
+                self.fixed_arousal,
                 self.habituation_enabled,
                 self.cet_enabled,
             ),
@@ -362,6 +370,7 @@ pub(crate) struct AuditoryPreparedState {
     pub cet_envelope_ref: Option<Vec<f64>>,
     pub brightness: f64,
     pub arousal: f64,
+    pub arousal_source: ArousalSource,
     pub thalamic_band_shifts: [f64; 4],
     pub target_lfo_freq: Option<f64>,
     pub assr_effective_gain: Option<f64>,
@@ -610,13 +619,9 @@ fn compute_thalamic_band_shifts_for_arousal(config: &SimulationConfig, arousal: 
     }
 }
 
-fn candidate_arousal_source(config: &SimulationConfig) -> CandidateArousalSource {
-    if config.physiological_thalamic_gate_enabled {
-        CandidateArousalSource::PhysiologicalGateHeuristic
-    } else if config.thalamic_gate_enabled {
-        CandidateArousalSource::LegacyHeuristicGate
-    } else {
-        CandidateArousalSource::NeutralDefault
+fn validate_arousal_model_config(config: &SimulationConfig) {
+    if matches!(config.arousal_model, ArousalModel::Fixed) && config.fixed_arousal.is_none() {
+        panic!("invalid SimulationConfig: arousal_model=fixed requires fixed_arousal");
     }
 }
 
@@ -624,6 +629,7 @@ pub(crate) fn prepare_canonical_auditory_state(
     preset: &Preset,
     config: &SimulationConfig,
 ) -> AuditoryPreparedState {
+    validate_arousal_model_config(config);
     let rendered_audio = render_preset_ear_signals(preset, config.duration_secs);
     let sr = rendered_audio.sample_rate_hz as f64;
     let left = rendered_audio.left.clone();
@@ -781,15 +787,13 @@ pub(crate) fn prepare_canonical_auditory_state(
         };
 
     // 5g. Thalamic gating control signals.
-    let arousal = if config.physiological_thalamic_gate_enabled || config.thalamic_gate_enabled {
-        if config.physiological_thalamic_gate_enabled {
-            PhysiologicalThalamicGate::compute_arousal(preset, brightness)
-        } else {
-            ThalamicGate::compute_arousal(preset, brightness)
-        }
-    } else {
-        0.5
-    };
+    let arousal_estimate = estimate_arousal(
+        preset,
+        brightness,
+        config.arousal_model,
+        config.fixed_arousal,
+    );
+    let arousal = arousal_estimate.value;
 
     let thalamic_band_shifts = compute_thalamic_band_shifts_for_arousal(config, arousal);
 
@@ -803,6 +807,7 @@ pub(crate) fn prepare_canonical_auditory_state(
         cet_envelope_ref,
         brightness,
         arousal,
+        arousal_source: arousal_estimate.source,
         thalamic_band_shifts,
         target_lfo_freq: extract_target_lfo_frequency_from_preset(preset),
         assr_effective_gain,
@@ -1033,7 +1038,7 @@ fn build_scientific_diagnostics(
         auditory.brightness,
         spectral_tilt_db_per_oct,
         auditory.arousal,
-        candidate_arousal_source(config),
+        auditory.arousal_source,
         NEURAL_SR,
     ));
     let candidate_cortical_response = if config.model_version == ModelVersion::CandidateV2 {
@@ -1118,6 +1123,7 @@ fn evaluate_preset_detailed_internal(
     config: &SimulationConfig,
     include_scientific_diagnostics: bool,
 ) -> DetailedSimulationResult {
+    validate_arousal_model_config(config);
     validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
         .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
     if config.acoustic_score_fusion_enabled && !config.acoustic_scoring_enabled {

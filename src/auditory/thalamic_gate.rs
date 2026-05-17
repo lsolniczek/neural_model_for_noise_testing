@@ -16,6 +16,28 @@
 /// Ref: Lopes da Silva FH (1991). "Neural mechanisms underlying brain waves."
 /// Ref: Suffczynski P et al. (2004). "Dynamics of non-convulsive epileptic phenomena."
 use crate::preset::Preset;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArousalModel {
+    LegacyHeuristic,
+    Fixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArousalSource {
+    LegacyHeuristic,
+    Fixed,
+    NeutralDefault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ArousalEstimate {
+    pub value: f64,
+    pub source: ArousalSource,
+}
 
 /// Thalamic gate that modulates the cortical operating point based on arousal.
 pub struct ThalamicGate {
@@ -190,6 +212,27 @@ impl ThalamicGate {
             + 0.20 * avg_movement;
 
         arousal.clamp(0.0, 1.0)
+    }
+}
+
+pub fn estimate_arousal(
+    preset: &Preset,
+    brightness: f64,
+    model: ArousalModel,
+    fixed_arousal: Option<f64>,
+) -> ArousalEstimate {
+    match model {
+        ArousalModel::LegacyHeuristic => ArousalEstimate {
+            value: ThalamicGate::compute_arousal(preset, brightness),
+            source: ArousalSource::LegacyHeuristic,
+        },
+        ArousalModel::Fixed => match fixed_arousal {
+            Some(value) => ArousalEstimate {
+                value: value.clamp(0.0, 1.0),
+                source: ArousalSource::Fixed,
+            },
+            None => panic!("invalid SimulationConfig: arousal_model=fixed requires fixed_arousal"),
+        },
     }
 }
 

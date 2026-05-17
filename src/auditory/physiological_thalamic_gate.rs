@@ -70,7 +70,6 @@
 /// - Steriade M, McCormick DA, Sejnowski TJ (1993). "Thalamocortical
 ///   oscillations in the sleeping and aroused brain." *Science*
 ///   262(5134):679-685. — frequency-selective burst-mode proportions.
-use crate::preset::Preset;
 
 // ── Cell parameters from Bazhenov 2002 (mS/cm² and mV) ─────────────────────
 //
@@ -500,12 +499,6 @@ impl PhysiologicalThalamicGate {
         self.cached_stats.map(|s| s.burstiness)
     }
 
-    /// Reuse the heuristic gate's preset → arousal mapping. Both gates
-    /// take arousal as their input; only the arousal → shift function
-    /// differs between them.
-    pub fn compute_arousal(preset: &Preset, brightness: f64) -> f64 {
-        crate::auditory::ThalamicGate::compute_arousal(preset, brightness)
-    }
 }
 
 #[cfg(test)]
@@ -776,20 +769,4 @@ mod tests {
         );
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Arousal computation — must match the heuristic exactly (delegation test)
-    // ═══════════════════════════════════════════════════════════════
-
-    #[test]
-    fn compute_arousal_delegates_to_heuristic() {
-        let preset = Preset::default();
-        let brightness = 0.5;
-        let phys = PhysiologicalThalamicGate::compute_arousal(&preset, brightness);
-        let heuristic = crate::auditory::ThalamicGate::compute_arousal(&preset, brightness);
-        assert_eq!(
-            phys.to_bits(),
-            heuristic.to_bits(),
-            "Physiological gate must reuse the heuristic gate's compute_arousal exactly"
-        );
-    }
 }

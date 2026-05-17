@@ -9,6 +9,7 @@
 mod tests {
     use crate::brain_type::BrainType;
     use crate::model_signature::ModelVersion;
+    use crate::auditory::{ArousalModel, ArousalSource, ThalamicGate};
     use crate::neural::fhn::*;
     use crate::neural::jansen_rit::*;
     use crate::optimizer::DifferentialEvolution;
@@ -221,6 +222,21 @@ mod tests {
             duration_secs,
             brain_type,
             model_version: ModelVersion::CandidateV2,
+            ..SimulationConfig::default()
+        }
+    }
+
+    fn candidate_v2_fixed_arousal_config(
+        duration_secs: f32,
+        brain_type: BrainType,
+        fixed_arousal: f64,
+    ) -> SimulationConfig {
+        SimulationConfig {
+            duration_secs,
+            brain_type,
+            model_version: ModelVersion::CandidateV2,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: Some(fixed_arousal),
             ..SimulationConfig::default()
         }
     }
@@ -1138,6 +1154,10 @@ mod tests {
         assert!(sig.auditory_flags.assr_enabled);
         assert!(sig.auditory_flags.thalamic_gate_enabled);
         assert!(sig.auditory_flags.cet_enabled);
+        assert_eq!(
+            sig.auditory_flags.arousal_model,
+            ArousalModel::LegacyHeuristic
+        );
         assert!(sig.neural_flags.stochastic_jr_enabled);
         assert_eq!(sig.warmup_discard_secs.to_bits(), 2.0f32.to_bits());
         assert_eq!(sig.duration_secs.to_bits(), 4.0f32.to_bits());
@@ -1795,6 +1815,230 @@ mod tests {
                 && rw.modulation_responsiveness_index < rs.modulation_responsiveness_index,
             "expected responsiveness ordering none < weak < strong"
         );
+    }
+
+    #[test]
+    fn legacy_default_arousal_model_matches_pre_stage5_heuristic() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(4.0, BrainType::Normal);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let diag = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics");
+        let candidate = diag
+            .candidate_auditory_features
+            .as_ref()
+            .expect("missing candidate diagnostics");
+        let expected = ThalamicGate::compute_arousal(&preset, detailed.summary.brightness);
+        assert_eq!(
+            candidate.latent_state.estimated_arousal.to_bits(),
+            expected.to_bits(),
+            "default arousal model must stay legacy heuristic for legacy_v1"
+        );
+        assert_eq!(candidate.latent_state.arousal_source, ArousalSource::LegacyHeuristic);
+    }
+
+    #[test]
+    fn candidate_fixed_arousal_is_reported_as_fixed() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let config = candidate_v2_fixed_arousal_config(4.0, BrainType::Normal, 0.8);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let candidate = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate diagnostics");
+        assert_eq!(
+            candidate.latent_state.estimated_arousal.to_bits(),
+            0.8f64.to_bits()
+        );
+        assert_eq!(candidate.latent_state.arousal_source, ArousalSource::Fixed);
+    }
+
+    #[test]
+    fn fixed_arousal_controls_candidate_latent_state() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let low = candidate_v2_fixed_arousal_config(4.0, BrainType::Normal, 0.2);
+        let high = candidate_v2_fixed_arousal_config(4.0, BrainType::Normal, 0.8);
+
+        let d_low = evaluate_preset_detailed(&preset, &goal, &low);
+        let d_high = evaluate_preset_detailed(&preset, &goal, &high);
+        let c_low = d_low
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate diagnostics for low fixed arousal");
+        let c_high = d_high
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate diagnostics for high fixed arousal");
+
+        assert_eq!(c_low.latent_state.estimated_arousal.to_bits(), 0.2f64.to_bits());
+        assert_eq!(
+            c_high.latent_state.estimated_arousal.to_bits(),
+            0.8f64.to_bits()
+        );
+        let a_low = d_low
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics")
+            .arousal_sensitivity
+            .estimated_arousal;
+        let a_high = d_high
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics")
+            .arousal_sensitivity
+            .estimated_arousal;
+        assert_eq!(a_low.to_bits(), 0.2f64.to_bits());
+        assert_eq!(a_high.to_bits(), 0.8f64.to_bits());
+    }
+
+    #[test]
+    fn same_fixed_arousal_different_gate_changes_gate_mapping_not_arousal_source() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let cfg_heuristic_gate = SimulationConfig {
+            duration_secs: 4.0,
+            model_version: ModelVersion::CandidateV2,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: Some(0.2),
+            thalamic_gate_enabled: true,
+            physiological_thalamic_gate_enabled: false,
+            ..SimulationConfig::default()
+        };
+        let cfg_phys_gate = SimulationConfig {
+            duration_secs: 4.0,
+            model_version: ModelVersion::CandidateV2,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: Some(0.2),
+            thalamic_gate_enabled: false,
+            physiological_thalamic_gate_enabled: true,
+            ..SimulationConfig::default()
+        };
+        let d_heur = evaluate_preset_detailed(&preset, &goal, &cfg_heuristic_gate);
+        let d_phys = evaluate_preset_detailed(&preset, &goal, &cfg_phys_gate);
+
+        let c_heur = d_heur
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate diagnostics (heur)");
+        let c_phys = d_phys
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate diagnostics (phys)");
+
+        assert_eq!(c_heur.latent_state.arousal_source, ArousalSource::Fixed);
+        assert_eq!(c_phys.latent_state.arousal_source, ArousalSource::Fixed);
+        assert_eq!(c_heur.latent_state.estimated_arousal.to_bits(), 0.2f64.to_bits());
+        assert_eq!(c_phys.latent_state.estimated_arousal.to_bits(), 0.2f64.to_bits());
+
+        let shifts_heur = d_heur
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics")
+            .arousal_sensitivity
+            .estimated_score;
+        let shifts_phys = d_phys
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics")
+            .arousal_sensitivity
+            .estimated_score;
+        assert!(
+            (shifts_heur - shifts_phys).abs() > 1e-10,
+            "same fixed arousal with different gate models should affect gate mapping"
+        );
+    }
+
+    #[test]
+    fn fixed_arousal_is_preserved_when_gates_are_disabled() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let config = SimulationConfig {
+            duration_secs: 4.0,
+            model_version: ModelVersion::CandidateV2,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: Some(0.8),
+            thalamic_gate_enabled: false,
+            physiological_thalamic_gate_enabled: false,
+            ..SimulationConfig::default()
+        };
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let diag = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing diagnostics");
+        let candidate = diag
+            .candidate_auditory_features
+            .as_ref()
+            .expect("missing candidate diagnostics");
+        assert_eq!(
+            candidate.latent_state.estimated_arousal.to_bits(),
+            0.8f64.to_bits()
+        );
+        assert_eq!(candidate.latent_state.arousal_source, ArousalSource::Fixed);
+        assert_eq!(diag.arousal_sensitivity.estimated_arousal.to_bits(), 0.8f64.to_bits());
+    }
+
+    #[test]
+    fn model_signature_distinguishes_fixed_arousal_values() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let cfg_02 = SimulationConfig {
+            duration_secs: 4.0,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: Some(0.2),
+            ..SimulationConfig::default()
+        };
+        let cfg_08 = SimulationConfig {
+            duration_secs: 4.0,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: Some(0.8),
+            ..SimulationConfig::default()
+        };
+        let r02 = evaluate_preset(&preset, &goal, &cfg_02);
+        let r08 = evaluate_preset(&preset, &goal, &cfg_08);
+        assert_ne!(
+            r02.model_signature.numeric_params.fixed_arousal,
+            r08.model_signature.numeric_params.fixed_arousal
+        );
+        let j02 = serde_json::to_string(&r02.model_signature).expect("signature json");
+        let j08 = serde_json::to_string(&r08.model_signature).expect("signature json");
+        assert!(j02.contains("\"fixed_arousal\":0.2"));
+        assert!(j08.contains("\"fixed_arousal\":0.8"));
+    }
+
+    #[test]
+    #[should_panic(expected = "arousal_model=fixed requires fixed_arousal")]
+    fn fixed_arousal_model_without_value_is_rejected() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Focus);
+        let cfg = SimulationConfig {
+            duration_secs: 4.0,
+            arousal_model: ArousalModel::Fixed,
+            fixed_arousal: None,
+            ..SimulationConfig::default()
+        };
+        let _ = evaluate_preset(&preset, &goal, &cfg);
     }
 
     #[test]
