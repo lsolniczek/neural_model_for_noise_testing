@@ -1,11 +1,14 @@
-use crate::acoustic_score::{extract_score_result_v1, AcousticScoreResult, RenderedStereoAudio};
+use crate::acoustic_score::{
+    extract_features_v1, extract_score_result_v1, AcousticScoreResult, RenderedStereoAudio,
+};
 /// Simulation pipeline: Engine → Auditory → Neural → Score.
 ///
 /// Wires together the noise engine, cochlear filterbank, and neural models
 /// into a single evaluation function that the optimizer calls.
 use crate::auditory::{
-    apply_rir, diagnostics_for_modulation, generate_rir, AssrDiagnostics, AssrModulationSummary,
-    AssrTransfer, ButterworthCrossover, EnvironmentParams, GammatoneFilterbank,
+    apply_rir, diagnostics_for_modulation, extract_candidate_auditory_features, generate_rir,
+    AssrDiagnostics, AssrModulationSummary, AssrTransfer, ButterworthCrossover,
+    CandidateArousalSource, CandidateAuditoryFeatures, EnvironmentParams, GammatoneFilterbank,
     PhysiologicalThalamicGate, ThalamicGate,
 };
 use crate::brain_type::BrainType;
@@ -387,6 +390,7 @@ pub struct ScientificDiagnostics {
     pub spectral_parameterization: SpectralParameterization,
     pub assr: AssrDiagnostics,
     pub arousal_sensitivity: ArousalSensitivityDiagnostics,
+    pub candidate_auditory_features: Option<CandidateAuditoryFeatures>,
 }
 
 /// Compute spectral brightness from audio via FFT.
@@ -598,6 +602,16 @@ fn compute_thalamic_band_shifts_for_arousal(config: &SimulationConfig, arousal: 
         gate.band_offset_shifts()
     } else {
         [0.0; 4]
+    }
+}
+
+fn candidate_arousal_source(config: &SimulationConfig) -> CandidateArousalSource {
+    if config.physiological_thalamic_gate_enabled {
+        CandidateArousalSource::PhysiologicalGateHeuristic
+    } else if config.thalamic_gate_enabled {
+        CandidateArousalSource::LegacyHeuristicGate
+    } else {
+        CandidateArousalSource::NeutralDefault
     }
 }
 
@@ -1004,6 +1018,19 @@ fn build_scientific_diagnostics(
         },
         config.assr_enabled,
     );
+    let spectral_tilt_db_per_oct = acoustic_score
+        .and_then(|a| a.features.spectral_tilt_db_per_oct)
+        .or_else(|| extract_features_v1(&auditory.rendered_audio).spectral_tilt_db_per_oct);
+    let candidate_features = Some(extract_candidate_auditory_features(
+        &auditory.left_bands_dec,
+        &auditory.right_bands_dec,
+        auditory.band_energy_fractions,
+        auditory.brightness,
+        spectral_tilt_db_per_oct,
+        auditory.arousal,
+        candidate_arousal_source(config),
+        NEURAL_SR,
+    ));
 
     let mut sweep = Vec::with_capacity(AROUSAL_SWEEP_GRID.len());
     for arousal in AROUSAL_SWEEP_GRID {
@@ -1052,6 +1079,7 @@ fn build_scientific_diagnostics(
             },
             score_span,
         },
+        candidate_auditory_features: candidate_features,
     }
 }
 

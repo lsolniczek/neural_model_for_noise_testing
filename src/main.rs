@@ -1351,6 +1351,21 @@ fn surrogate_csv_header() -> String {
             "arousal_score_span",
             "arousal_local_derivative",
             "arousal_max_abs_slope",
+            "candidate_dominant_modulation_hz",
+            "candidate_total_modulation_power",
+            "candidate_mod_slow_0p5_4_hz",
+            "candidate_mod_theta_4_8_hz",
+            "candidate_mod_alpha_8_13_hz",
+            "candidate_mod_beta_13_30_hz",
+            "candidate_mod_gamma_30_50_hz",
+            "candidate_cochlear_brightness",
+            "candidate_cochlear_band_energy_0",
+            "candidate_cochlear_band_energy_1",
+            "candidate_cochlear_band_energy_2",
+            "candidate_cochlear_band_energy_3",
+            "candidate_spectral_tilt_db_per_oct",
+            "candidate_estimated_arousal",
+            "candidate_arousal_source",
             "broadband_level_db",
             "speech_band_ratio",
             "modulation_depth",
@@ -1412,6 +1427,10 @@ fn surrogate_csv_row(
     let primary_peak = primary_peak_for_export(spectral);
     let assr_diag = diagnostics.map(|d| &d.assr);
     let arousal_diag = diagnostics.map(|d| &d.arousal_sensitivity);
+    let candidate = diagnostics.and_then(|d| d.candidate_auditory_features.as_ref());
+    let candidate_temporal = candidate.map(|c| &c.temporal_modulation);
+    let candidate_cochlear = candidate.map(|c| &c.cochlear);
+    let candidate_latent = candidate.map(|c| &c.latent_state);
     let violation = acoustic
         .map(|a| Goal::new(goal_kind).comfort_violation(&a.features))
         .unwrap_or(0.0);
@@ -1501,6 +1520,33 @@ fn surrogate_csv_row(
         fmt_opt(arousal_diag.map(|a| a.score_span)),
         fmt_opt(arousal_diag.map(|a| a.local_derivative)),
         fmt_opt(arousal_diag.map(|a| a.max_abs_slope)),
+        fmt_opt(candidate_temporal.and_then(|m| m.dominant_modulation_hz)),
+        fmt_opt(candidate_temporal.map(|m| m.total_modulation_power)),
+        fmt_opt(candidate_temporal.map(|m| m.band_power_by_mod_rate.slow_0p5_4_hz)),
+        fmt_opt(candidate_temporal.map(|m| m.band_power_by_mod_rate.theta_4_8_hz)),
+        fmt_opt(candidate_temporal.map(|m| m.band_power_by_mod_rate.alpha_8_13_hz)),
+        fmt_opt(candidate_temporal.map(|m| m.band_power_by_mod_rate.beta_13_30_hz)),
+        fmt_opt(candidate_temporal.map(|m| m.band_power_by_mod_rate.gamma_30_50_hz)),
+        fmt_opt(candidate_cochlear.map(|c| c.brightness)),
+        fmt_opt(candidate_cochlear.map(|c| c.band_energy_fractions[0])),
+        fmt_opt(candidate_cochlear.map(|c| c.band_energy_fractions[1])),
+        fmt_opt(candidate_cochlear.map(|c| c.band_energy_fractions[2])),
+        fmt_opt(candidate_cochlear.map(|c| c.band_energy_fractions[3])),
+        fmt_opt(candidate_cochlear.and_then(|c| c.spectral_tilt_db_per_oct)),
+        fmt_opt(candidate_latent.map(|l| l.estimated_arousal)),
+        candidate_latent
+            .map(|l| match l.arousal_source {
+                crate::auditory::CandidateArousalSource::LegacyHeuristicGate => {
+                    "legacy_heuristic_gate".to_string()
+                }
+                crate::auditory::CandidateArousalSource::PhysiologicalGateHeuristic => {
+                    "physiological_gate_heuristic".to_string()
+                }
+                crate::auditory::CandidateArousalSource::NeutralDefault => {
+                    "neutral_default".to_string()
+                }
+            })
+            .unwrap_or_default(),
         fmt_opt(features.and_then(|f| f.broadband_level_db)),
         fmt_opt(features.and_then(|f| f.speech_band_ratio)),
         fmt_opt(features.and_then(|f| f.modulation_depth)),
@@ -3584,6 +3630,30 @@ fn run_evaluate(
                 ar.score_span,
                 ar.max_abs_slope
             );
+            if let Some(candidate) = science.candidate_auditory_features.as_ref() {
+                println!(
+                    "    Candidate auditory features: dominant_mod={:?} Hz, total_mod_power={:.6}",
+                    candidate.temporal_modulation.dominant_modulation_hz,
+                    candidate.temporal_modulation.total_modulation_power
+                );
+                println!(
+                    "      Cochlear brightness={:.3}, band_energy=[{:.3}, {:.3}, {:.3}, {:.3}], tilt_db_per_oct={}",
+                    candidate.cochlear.brightness,
+                    candidate.cochlear.band_energy_fractions[0],
+                    candidate.cochlear.band_energy_fractions[1],
+                    candidate.cochlear.band_energy_fractions[2],
+                    candidate.cochlear.band_energy_fractions[3],
+                    candidate
+                        .cochlear
+                        .spectral_tilt_db_per_oct
+                        .map(|v| format!("{v:.3}"))
+                        .unwrap_or_else(|| "N/A".to_string())
+                );
+                println!(
+                    "      Latent arousal={:.3} ({:?})",
+                    candidate.latent_state.estimated_arousal, candidate.latent_state.arousal_source
+                );
+            }
         }
         println!();
 
@@ -4738,6 +4808,9 @@ mod tests {
         assert!(cols.contains(&"assr_phase_consistency_heuristic"));
         assert!(cols.contains(&"estimated_arousal"));
         assert!(cols.contains(&"arousal_score_span"));
+        assert!(cols.contains(&"candidate_dominant_modulation_hz"));
+        assert!(cols.contains(&"candidate_cochlear_brightness"));
+        assert!(cols.contains(&"candidate_arousal_source"));
         assert!(cols.contains(&"is_feasible"));
         assert!(cols.contains(&"model_signature_schema_version"));
         assert!(cols.contains(&"model_signature_json"));
@@ -4943,6 +5016,66 @@ mod tests {
     }
 
     #[test]
+    fn dataset_export_path_populates_stage3_candidate_feature_columns() {
+        let mut preset = Preset::default();
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 2; // brown
+        preset.objects[0].volume = 0.85;
+        preset.objects[0].bass_mod.kind = 4;
+        preset.objects[0].bass_mod.param_a = 5.0;
+        preset.objects[0].bass_mod.param_b = 0.95;
+        let genome = preset.to_genome();
+
+        let config = build_generate_data_config(3.0, BrainType::Normal, false, 12345);
+        let goal_kind = GoalKind::Focus;
+        let goal = Goal::new(goal_kind);
+        let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
+        let meta = CsvExampleMeta {
+            example_id: "ex_stage3".to_string(),
+            run_id: "run_stage3".to_string(),
+            parent_example_id: String::new(),
+            stage: "generate_data".to_string(),
+            source: "random".to_string(),
+            seed_eval: "12345".to_string(),
+            created_at: "2026-05-16T00:00:00Z".to_string(),
+        };
+        let row = surrogate_csv_row(
+            &meta,
+            &genome,
+            goal_kind,
+            BrainType::Normal,
+            &config,
+            &result,
+        );
+        let header = surrogate_csv_header();
+        let header_cols: Vec<&str> = header.split(',').collect();
+        let row_cols = parse_csv_fields(&row);
+        let idx = |name: &str| {
+            header_cols
+                .iter()
+                .position(|c| *c == name)
+                .expect("missing csv column")
+        };
+        assert!(
+            !row_cols[idx("candidate_dominant_modulation_hz")].is_empty(),
+            "candidate_dominant_modulation_hz should be populated"
+        );
+        assert!(
+            !row_cols[idx("candidate_total_modulation_power")].is_empty(),
+            "candidate_total_modulation_power should be populated"
+        );
+        assert!(
+            !row_cols[idx("candidate_cochlear_brightness")].is_empty(),
+            "candidate_cochlear_brightness should be populated"
+        );
+        assert!(
+            !row_cols[idx("candidate_arousal_source")].is_empty(),
+            "candidate_arousal_source should be populated"
+        );
+    }
+
+    #[test]
     fn surrogate_csv_primary_peak_prefers_strongest_detected_peak() {
         let mut preset = Preset::default();
         preset.source_count = 1;
@@ -4976,8 +5109,7 @@ mod tests {
                 < diagnostics.spectral_parameterization.peaks[1].center_hz,
             "test setup should keep the peak list frequency-sorted"
         );
-        let chosen =
-            primary_peak_for_export(Some(&diagnostics.spectral_parameterization)).unwrap();
+        let chosen = primary_peak_for_export(Some(&diagnostics.spectral_parameterization)).unwrap();
         assert_eq!(chosen.center_hz, 20.0);
 
         let meta = CsvExampleMeta {

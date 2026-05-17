@@ -694,6 +694,11 @@ pub struct JansenRitParams {
 }
 
 /// Which neural mass model to use for a given tonotopic band.
+///
+/// Legacy note: this enum underpins the `legacy_v1` architecture where
+/// tonotopic carrier band identity selects JR-vs-WC model family. Stage 3
+/// introduces candidate-side decoupled auditory features; this dispatch stays
+/// isolated for legacy reproducibility until candidate cortical routing lands.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BandModelType {
     /// Jansen-Rit / Wendling — rich biological texture, optimal for delta/theta/alpha (0.5-13 Hz).
@@ -757,8 +762,12 @@ pub struct TonotopicParams {
     /// Default: same as global v0 (6.0 for Normal).
     pub band_v0: [f64; 4],
     /// Which neural model to use per band.
-    /// Bands 0-1: JansenRit (delta/theta/alpha).
+    ///
+    /// Legacy-v1 coupling assumption:
+    /// Bands 0-1: JansenRit (delta/theta/alpha),
     /// Bands 2-3: WilsonCowan(target_hz) for SMR/beta/gamma.
+    /// Candidate-v2 feature extraction is intentionally separated from this
+    /// carrier-index dispatch so future cortical routing can be modulation-led.
     pub band_model_types: [BandModelType; 4],
 }
 

@@ -127,6 +127,86 @@ mod tests {
         preset
     }
 
+    fn fixture_single_source_with_modulation(
+        color: u8,
+        modulation_kind: u8,
+        modulation_hz: f32,
+        modulation_depth: f32,
+    ) -> Preset {
+        let mut preset = Preset::default();
+        preset.master_gain = 0.82;
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = color;
+        preset.objects[0].volume = 0.42;
+        preset.objects[0].x = 0.0;
+        preset.objects[0].z = 1.0;
+        preset.objects[0].reverb_send = 0.15;
+        preset.objects[0].movement.kind = 0;
+        preset.objects[0].bass_mod.kind = modulation_kind;
+        preset.objects[0].bass_mod.param_a = modulation_hz;
+        preset.objects[0].bass_mod.param_b = modulation_depth;
+        preset.objects[0].bass_mod.param_c = match modulation_kind {
+            5 => 0.5,   // Isochronic duty cycle
+            6 => 120.0, // RandomPulse duration (ms)
+            _ => 0.0,
+        };
+        preset.objects[0].satellite_mod.kind = 0;
+        preset.objects[0].satellite_mod.param_a = 0.0;
+        preset.objects[0].satellite_mod.param_b = 0.0;
+        preset.objects[0].satellite_mod.param_c = 0.0;
+        preset
+    }
+
+    fn fixture_single_tone_with_modulation(modulation_hz: f32, modulation_depth: f32) -> Preset {
+        let mut preset =
+            fixture_single_source_with_modulation(0, 4, modulation_hz, modulation_depth);
+        preset.objects[0].source_kind = 1; // tone source for clean rendered modulation probe
+        preset.objects[0].tone_freq = 220.0;
+        preset.objects[0].tone_amplitude = 0.9;
+        preset.objects[0].reverb_send = 0.0;
+        preset
+    }
+
+    fn fixture_single_noise_unmodulated_reference() -> Preset {
+        let mut preset = Preset::default();
+        preset.master_gain = 0.82;
+        preset.source_count = 1;
+        preset.objects[0].active = true;
+        preset.objects[0].color = 0; // white
+        preset.objects[0].volume = 0.85;
+        preset.objects[0].x = 0.0;
+        preset.objects[0].z = 1.0;
+        preset.objects[0].reverb_send = 0.0;
+        preset.objects[0].movement.kind = 0;
+        preset.objects[0].bass_mod.kind = 0;
+        preset.objects[0].satellite_mod.kind = 0;
+        preset
+    }
+
+    fn fixture_single_noise_with_modulation(
+        color: u8,
+        modulation_kind: u8,
+        modulation_hz: f32,
+        modulation_depth: f32,
+    ) -> Preset {
+        let mut preset = fixture_single_source_with_modulation(
+            color,
+            modulation_kind,
+            modulation_hz,
+            modulation_depth,
+        );
+        preset.objects[0].source_kind = 0; // rendered stochastic noise carrier path
+        preset.objects[0].reverb_send = 0.0;
+        preset.objects[0].volume = 0.85;
+        // Reinforce explicit rendered modulation in the carrier path.
+        preset.objects[0].satellite_mod.kind = modulation_kind;
+        preset.objects[0].satellite_mod.param_a = modulation_hz;
+        preset.objects[0].satellite_mod.param_b = modulation_depth;
+        preset.objects[0].satellite_mod.param_c = if modulation_kind == 5 { 0.5 } else { 0.0 };
+        preset
+    }
+
     fn canonical_config(duration_secs: f32, brain_type: BrainType) -> SimulationConfig {
         SimulationConfig {
             duration_secs,
@@ -1250,6 +1330,255 @@ mod tests {
         }
         assert_eq!(a1.sweep[0].arousal.to_bits(), 0.0f64.to_bits());
         assert_eq!(a1.sweep[4].arousal.to_bits(), 1.0f64.to_bits());
+    }
+
+    #[test]
+    fn stage3_candidate_features_are_present_and_score_inert() {
+        let preset = fixture_mid_modulated_lateralized();
+        let goal = Goal::new(GoalKind::Flow);
+        let config = canonical_config(4.0, BrainType::Normal);
+
+        let scalar = evaluate_preset(&preset, &goal, &config);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+
+        assert_eq!(scalar.score.to_bits(), detailed.summary.score.to_bits());
+        let diagnostics = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("detailed path should include scientific diagnostics");
+        let candidate = diagnostics
+            .candidate_auditory_features
+            .as_ref()
+            .expect("stage3 candidate auditory features should be present");
+        assert!(candidate.cochlear.brightness.is_finite());
+        assert!(candidate
+            .cochlear
+            .band_energy_fractions
+            .iter()
+            .all(|v| v.is_finite()));
+        assert!(candidate
+            .temporal_modulation
+            .total_modulation_power
+            .is_finite());
+    }
+
+    #[test]
+    fn stage3_candidate_temporal_modulation_tracks_modulation_rate() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(4.0, BrainType::Normal);
+
+        let preset_5hz = fixture_single_tone_with_modulation(5.0, 0.95);
+        let preset_40hz = fixture_single_tone_with_modulation(40.0, 0.95);
+        let d5 = evaluate_preset_detailed(&preset_5hz, &goal, &config);
+        let d40 = evaluate_preset_detailed(&preset_40hz, &goal, &config);
+        let c5 = d5
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate features for 5 Hz case");
+        let c40 = d40
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate features for 40 Hz case");
+        let dom_5 = c5
+            .temporal_modulation
+            .dominant_modulation_hz
+            .expect("5 Hz modulation should produce a dominant modulation estimate");
+        let dom_40 = c40
+            .temporal_modulation
+            .dominant_modulation_hz
+            .expect("40 Hz modulation should produce a dominant modulation estimate");
+        assert!(
+            (dom_5 - 5.0).abs() < 2.0,
+            "dominant modulation should be near 5 Hz"
+        );
+        assert!(
+            (dom_40 - 40.0).abs() < 4.0,
+            "rendered 40 Hz modulation should recover near 40 Hz; got {dom_40:.3} Hz"
+        );
+        let low_case_fast = c5.temporal_modulation.band_power_by_mod_rate.beta_13_30_hz
+            + c5.temporal_modulation.band_power_by_mod_rate.gamma_30_50_hz;
+        let low_case_slow = c5.temporal_modulation.band_power_by_mod_rate.slow_0p5_4_hz
+            + c5.temporal_modulation.band_power_by_mod_rate.theta_4_8_hz
+            + 1e-12;
+        let high_case_fast = c40.temporal_modulation.band_power_by_mod_rate.beta_13_30_hz
+            + c40
+                .temporal_modulation
+                .band_power_by_mod_rate
+                .gamma_30_50_hz;
+        let high_case_slow = c40.temporal_modulation.band_power_by_mod_rate.slow_0p5_4_hz
+            + c40.temporal_modulation.band_power_by_mod_rate.theta_4_8_hz
+            + 1e-12;
+        assert!(
+            high_case_fast / high_case_slow > low_case_fast / low_case_slow,
+            "higher-rate modulation should increase fast-vs-slow modulation power balance"
+        );
+    }
+
+    #[test]
+    fn stage3_candidate_rendered_unmodulated_noise_has_no_false_strong_modulation_peak() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(12.0, BrainType::Normal);
+        let preset_unmodulated = fixture_single_noise_unmodulated_reference();
+
+        let detailed = evaluate_preset_detailed(&preset_unmodulated, &goal, &config);
+        let candidate = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate auditory features");
+        let modulation = &candidate.temporal_modulation;
+        let max_share = if modulation.total_modulation_power <= 0.0 {
+            0.0
+        } else {
+            modulation
+                .modulation_psd
+                .iter()
+                .map(|p| p.power)
+                .fold(0.0_f64, f64::max)
+                / modulation.total_modulation_power
+        };
+        assert!(
+            modulation.dominant_modulation_hz.is_none(),
+            "rendered unmodulated noise must not report a dominant modulation rate; dominant={:?}, max_share={max_share:.6}",
+            modulation.dominant_modulation_hz
+        );
+        assert!(
+            max_share < 0.03,
+            "rendered unmodulated noise strongest-bin share must stay below dominant-peak threshold; max_share={max_share:.6}"
+        );
+    }
+
+    #[test]
+    fn stage3_candidate_rendered_noise_modulation_recovers_expected_rates() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(12.0, BrainType::Normal);
+
+        let pink_5hz = fixture_single_noise_with_modulation(1, 4, 5.0, 0.95);
+        let brown_40hz = fixture_single_noise_with_modulation(2, 5, 40.0, 0.95);
+
+        let d5 = evaluate_preset_detailed(&pink_5hz, &goal, &config);
+        let d40 = evaluate_preset_detailed(&brown_40hz, &goal, &config);
+
+        let c5 = d5
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate features for pink 5 Hz AM case");
+        let c40 = d40
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate features for brown 40 Hz AM case");
+
+        let dom_5 = c5
+            .temporal_modulation
+            .dominant_modulation_hz
+            .expect("rendered pink 5 Hz AM should produce a dominant modulation estimate");
+        let dom_40 = c40
+            .temporal_modulation
+            .dominant_modulation_hz
+            .expect("rendered brown 40 Hz AM should produce a dominant modulation estimate");
+
+        assert!(
+            (dom_5 - 5.0).abs() < 2.0,
+            "rendered pink 5 Hz AM should recover near 5 Hz; got {dom_5:.3} Hz"
+        );
+        assert!(
+            (dom_40 - 40.0).abs() < 5.0,
+            "rendered brown 40 Hz AM should recover near 40 Hz; got {dom_40:.3} Hz"
+        );
+    }
+
+    #[test]
+    fn stage3_candidate_decouples_carrier_from_modulation_features() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(4.0, BrainType::Normal);
+
+        let brown_5hz = fixture_single_source_with_modulation(2, 4, 5.0, 0.95);
+        let white_5hz = fixture_single_source_with_modulation(0, 4, 5.0, 0.95);
+        let db = evaluate_preset_detailed(&brown_5hz, &goal, &config);
+        let dw = evaluate_preset_detailed(&white_5hz, &goal, &config);
+        let cb = db
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate features for brown case");
+        let cw = dw
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .and_then(|d| d.candidate_auditory_features.as_ref())
+            .expect("missing candidate features for white case");
+
+        let dom_b = cb
+            .temporal_modulation
+            .dominant_modulation_hz
+            .expect("brown 5 Hz should have a dominant modulation estimate");
+        let dom_w = cw
+            .temporal_modulation
+            .dominant_modulation_hz
+            .expect("white 5 Hz should have a dominant modulation estimate");
+        assert!(
+            (dom_b - dom_w).abs() < 1.5,
+            "temporal modulation should follow modulation rate instead of carrier color"
+        );
+
+        let brightness_delta = (cb.cochlear.brightness - cw.cochlear.brightness).abs();
+        assert!(
+            brightness_delta > 0.05,
+            "cochlear brightness should preserve carrier differences; delta={brightness_delta:.6}"
+        );
+        let band_l1 = cb
+            .cochlear
+            .band_energy_fractions
+            .iter()
+            .zip(cw.cochlear.band_energy_fractions.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>();
+        assert!(
+            band_l1 > 0.05,
+            "cochlear band fractions should differ across carriers; L1={band_l1:.6}"
+        );
+    }
+
+    #[test]
+    fn stage3_candidate_modulation_comes_from_rendered_envelope_not_assr_metadata() {
+        let goal = Goal::new(GoalKind::Focus);
+        let config = canonical_config(4.0, BrainType::Normal);
+        // SineLfo (kind=1) modulates rendered envelopes but is intentionally
+        // excluded from ASSR metadata's active-modulator summary.
+        let preset = fixture_single_source_with_modulation(1, 1, 1.0, 0.95);
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let diagnostics = detailed
+            .summary
+            .scientific_diagnostics
+            .as_ref()
+            .expect("missing detailed diagnostics");
+        assert!(
+            diagnostics.assr.dominant_modulation_hz.is_none(),
+            "ASSR metadata should not expose SineLfo modulation as dominant"
+        );
+        let candidate = diagnostics
+            .candidate_auditory_features
+            .as_ref()
+            .expect("missing candidate auditory features");
+        assert!(
+            !candidate.temporal_modulation.modulation_psd.is_empty(),
+            "candidate modulation extraction should derive PSD from rendered envelopes"
+        );
+        assert!(
+            candidate.temporal_modulation.total_modulation_power > 0.0,
+            "candidate modulation power should be positive for actively modulated rendered input"
+        );
     }
 
     #[test]

@@ -1064,7 +1064,9 @@ pub fn simulate_tonotopic(
                 .collect()
         };
 
-        // Dispatch: JansenRit or WilsonCowan per band
+        // Legacy-v1 dispatch: carrier/tonotopic band index selects
+        // JansenRit vs WilsonCowan family. Candidate-v2 decoupled feature
+        // work intentionally avoids exposing this assumption.
         let (band_eeg, band_inhib) = match tono.band_model_types[b] {
             BandModelType::JansenRit => {
                 let (a_rate, b_rate) = tono.band_rates[b];
@@ -1403,7 +1405,9 @@ fn run_hemisphere_tonotopic(
             bands[b].iter().map(|&x| (x * gain).min(1.0)).collect()
         };
 
-        // Dispatch: JansenRit or WilsonCowan per band
+        // Legacy-v1 dispatch: carrier/tonotopic band index selects
+        // JansenRit vs WilsonCowan family. Candidate-v2 decoupled feature
+        // work intentionally avoids exposing this assumption.
         let (band_eeg, band_inhib) = match params.band_model_types[b] {
             BandModelType::JansenRit => {
                 let (a_rate, b_rate) = params.band_rates[b];

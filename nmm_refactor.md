@@ -423,10 +423,13 @@ Carrier frequency and modulation rate are distinct experimental dimensions. The 
    - loudness,
    - spectral tilt,
    - optional calibrated arousal priors.
-3. Extract modulation spectra from envelopes independently of carrier band:
-   - broadband weighted modulation spectrum,
-   - optionally per-ear modulation spectrum,
-   - optionally per-band spectra for diagnostics only.
+3. Extract candidate modulation features from cochlear envelopes independently of carrier-color weighting:
+   - build a bilateral per-band envelope signal,
+   - standardize each band's envelope to zero mean / unit variance,
+   - combine bands with equal weights,
+   - run Welch PSD on the combined signal,
+   - summarize modulation spectrum features from that PSD.
+   - optionally keep per-ear or per-band spectra as diagnostics only.
 4. Remove the assumption:
    - low carrier band -> theta,
    - high carrier band -> beta/gamma.
@@ -456,17 +459,37 @@ struct TemporalModulationFeatures {
     band_power_by_mod_rate: ModulationBands,
 }
 
-fn extract_temporal_modulation(envelopes: &[Vec<f64>; 4]) -> TemporalModulationFeatures {
-    let weighted_envelope = energy_weighted_average(envelopes);
-    let ac = remove_mean(weighted_envelope);
+fn extract_temporal_modulation(envelopes_l: &[Vec<f64>; 4], envelopes_r: &[Vec<f64>; 4]) -> TemporalModulationFeatures {
+    let mut combined = vec![0.0; n];
+    for b in 0..4 {
+        let bilateral = 0.5 * (envelopes_l[b] + envelopes_r[b]);
+        let z = zscore(bilateral);           // zero-mean, unit-variance per band
+        combined += 0.25 * z;               // equal band weighting
+    }
+    let ac = remove_mean(combined);
     let psd = welch_psd(ac);
     summarize_modulation_spectrum(psd)
 }
 ```
 
+### Candidate-feature semantics note
+
+For candidate Stage 3, this formulation is intentional:
+
+- `TemporalModulationFeatures` is a candidate engineering descriptor for modulation structure that reduces direct carrier-energy dominance.
+- `CochlearFeatures` remains the carrier descriptor (brightness, band-energy profile, tilt).
+- `total_modulation_power` in this candidate path is therefore a normalized modulation-spectrum magnitude (unitless), not an absolute acoustic-energy proxy.
+- This keeps carrier and modulation dimensions explicitly separable before Stage 4 cortical routing.
+
+This is an architecture choice for refactor safety, not a claim that biology literally computes equal-weight z-scored cross-band envelopes.
+
 ### Important scientific guardrail
 
 The candidate model may still allow carrier-dependent **gain weighting** if human calibration later supports it. What it must not do by construction is assign the neural rhythm class from carrier band alone.
+
+### Scientific scope of this Stage 3 extractor
+
+The literature supports separation between spectral/carrier and temporal-envelope dimensions, but does not support a strong claim of full carrier invariance (Baumann et al., 2015; Malone et al., 2013). Temporal-envelope coding can still depend on spectral context and carrier type. Stage 3 therefore treats this extractor as a provisional candidate feature for deconfounding the legacy carrier-color -> rhythm mapping, not as a finalized physiological model.
 
 ### Regression requirements
 
@@ -886,3 +909,5 @@ Do not do these before Stage 2 diagnostics exist:
 7. Johnson TD et al. Network resonance and the auditory steady state response. *Sci Rep*. 2024. DOI: 10.1038/s41598-024-66697-4.
 8. Ngo HVV et al. Auditory closed-loop stimulation of the sleep slow oscillation enhances memory. *Neuron*. 2013. PMID: 23583623.
 9. Slater BJ, Isaacson JS. Interhemispheric Callosal Projections Sharpen Frequency Tuning and Enforce Response Fidelity in Primary Auditory Cortex. *eNeuro*. 2020. PMID: 32769158.
+10. Baumann S et al. The topography of frequency and time representation in primate auditory cortices. *eLife*. 2015.
+11. Malone BJ, Scott BH, Semple MN. Spectral context affects temporal processing in awake auditory cortex. *J Neurosci*. 2013. PMID: 23658174.
