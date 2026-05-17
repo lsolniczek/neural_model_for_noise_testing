@@ -1,0 +1,32 @@
+{
+  "dataset_id": "ds005048",
+  "subjects": ["sub-01", "sub-02"],
+  "source_dataset_id": "ds005048",
+  "source_dataset_version": "mock_v1",
+  "source_paths": [
+    "sub-01/eeg/sub-01_task-assr_events.tsv",
+    "sub-01/eeg/sub-01_task-assr_timeseries.csv",
+    "sub-02/eeg/sub-02_task-assr_events.tsv",
+    "sub-02/eeg/sub-02_task-assr_timeseries.csv"
+  ],
+  "source_file_hashes": {
+    "sub-01/eeg/sub-01_task-assr_events.tsv": "sha256:bc43c6f74f5099f75cac466cb470c4317bae7ff3ffd9c6f9f26e6f43924d8bdb",
+    "sub-01/eeg/sub-01_task-assr_timeseries.csv": "sha256:06a6317f82f6038b841b7f719eb8fd8d89757153125ab7d7ed664131d22d1908",
+    "sub-02/eeg/sub-02_task-assr_events.tsv": "sha256:bc43c6f74f5099f75cac466cb470c4317bae7ff3ffd9c6f9f26e6f43924d8bdb",
+    "sub-02/eeg/sub-02_task-assr_timeseries.csv": "sha256:901dcff02c577a15617a557bc5f0f0abeb1fa0b2ef3f3dd0ff790505159198ba"
+  },
+  "intermediate_paths": [
+    "sub-01/eeg/sub-01_task-assr_events.tsv",
+    "sub-01/eeg/sub-01_task-assr_timeseries.csv",
+    "sub-02/eeg/sub-02_task-assr_events.tsv",
+    "sub-02/eeg/sub-02_task-assr_timeseries.csv"
+  ],
+  "intermediate_file_hashes": {
+    "sub-01/eeg/sub-01_task-assr_events.tsv": "sha256:bc43c6f74f5099f75cac466cb470c4317bae7ff3ffd9c6f9f26e6f43924d8bdb",
+    "sub-01/eeg/sub-01_task-assr_timeseries.csv": "sha256:06a6317f82f6038b841b7f719eb8fd8d89757153125ab7d7ed664131d22d1908",
+    "sub-02/eeg/sub-02_task-assr_events.tsv": "sha256:bc43c6f74f5099f75cac466cb470c4317bae7ff3ffd9c6f9f26e6f43924d8bdb",
+    "sub-02/eeg/sub-02_task-assr_timeseries.csv": "sha256:901dcff02c577a15617a557bc5f0f0abeb1fa0b2ef3f3dd0ff790505159198ba"
+  },
+  "conversion_tool_version": "convert_ds005048_to_nmm_intermediate.py@v1",
+  "conversion_timestamp": "2026-05-17T00:00:00Z"
+}

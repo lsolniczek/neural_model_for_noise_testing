@@ -1,0 +1,3 @@
+onset	duration	modulation_rate_hz	condition_label
+0.000	1.000	40.0	target_40hz
+1.000	1.000	10.0	control_10hz

@@ -1,0 +1,7 @@
+benchmark_family,dataset_id,subject_id,trial_id,condition_id,stimulus_type,modulation_rate_hz,carrier_or_task_label,eeg_signal_ref,behavior_available,expected_effect_label
+assr,fixture_public_eeg,s01,t001,c40,am_noise,40.0,pink,sub-s01_task-assr_eeg.edf,false,target_entrainment
+assr,fixture_public_eeg,s01,t002,c10,am_noise,10.0,pink,sub-s01_task-assr_eeg.edf,false,non_target
+aperiodic,fixture_public_eeg,s02,t101,rest_open,rest,0.0,eyes_open,sub-s02_task-rest_eeg.edf,false,aperiodic_plausible
+aperiodic,fixture_public_eeg,s02,t102,rest_closed,rest,0.0,eyes_closed,sub-s02_task-rest_eeg.edf,false,aperiodic_plausible
+auditory_attention,fixture_public_eeg,s03,t201,distractor_low,auditory_attention,5.0,distractor_low,sub-s03_task-attn_eeg.edf,true,attention_link_expected
+auditory_attention,fixture_public_eeg,s03,t202,distractor_high,auditory_attention,40.0,distractor_high,sub-s03_task-attn_eeg.edf,true,attention_link_expected

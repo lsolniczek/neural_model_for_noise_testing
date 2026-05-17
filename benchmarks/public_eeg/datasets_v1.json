@@ -1,0 +1,148 @@
+{
+  "registry_version": "public_eeg_datasets_v1",
+  "created_at": "2026-05-17T00:00:00Z",
+  "datasets": [
+    {
+      "dataset_id": "ds005048",
+      "name": "40Hz Auditory Entrainment (OpenNeuro)",
+      "source_url": "https://openneuro.org/datasets/ds005048",
+      "license": "See source dataset license",
+      "modality": "eeg",
+      "task": "auditory_entrainment_40hz",
+      "participants": null,
+      "stimulus_factors_available": [
+        "modulation_rate_hz",
+        "auditory_condition_labels"
+      ],
+      "measures_available": [
+        "assr_plv",
+        "modulation_locked_power",
+        "periodic_peak_candidates"
+      ],
+      "nmm_components_supported": [
+        "assr_diagnostics",
+        "candidate_temporal_modulation_features",
+        "candidate_v2_gamma_module"
+      ],
+      "limitations": [
+        "Does not validate final preset efficacy",
+        "Cohort/task specifics may not match product users"
+      ],
+      "dataset_status": "selected",
+      "evidence_usable": true,
+      "download_status": "not_downloaded",
+      "adapter_status": "scaffold_ready",
+      "raw_adapter_status": "not_started",
+      "intermediate_adapter_status": "implemented",
+      "conversion_status": "not_started",
+      "expected_local_layout": "Intermediate format with provenance-preserving nmm_benchmark_manifest.json and converted *_events.tsv + *_timeseries.csv under sub-*/eeg",
+      "benchmark_ready": false
+    },
+    {
+      "dataset_id": "ds003800",
+      "name": "Auditory Gamma Entrainment (OpenNeuro)",
+      "source_url": "https://openneuro.org/datasets/ds003800",
+      "license": "See source dataset license",
+      "modality": "eeg",
+      "task": "auditory_gamma_entrainment",
+      "participants": null,
+      "stimulus_factors_available": [
+        "modulation_rate_hz",
+        "condition_labels"
+      ],
+      "measures_available": [
+        "gamma_band_response",
+        "assr_plv",
+        "periodic_peak_candidates"
+      ],
+      "nmm_components_supported": [
+        "assr_diagnostics",
+        "candidate_temporal_modulation_features",
+        "candidate_v2_gamma_module"
+      ],
+      "limitations": [
+        "No direct product comfort labels",
+        "Not a clinical efficacy validation set"
+      ],
+      "dataset_status": "selected",
+      "evidence_usable": true,
+      "download_status": "not_downloaded",
+      "adapter_status": "scaffold_ready",
+      "raw_adapter_status": "not_started",
+      "intermediate_adapter_status": "not_started",
+      "conversion_status": "not_started",
+      "expected_local_layout": "dataset-specific adapter not implemented yet",
+      "benchmark_ready": false
+    },
+    {
+      "dataset_id": "resting_aperiodic_placeholder",
+      "name": "Resting-state EEG Aperiodic Benchmark (dataset placeholder)",
+      "source_url": "to_be_selected_by_study_team",
+      "license": "to_be_confirmed",
+      "modality": "eeg",
+      "task": "resting_state",
+      "participants": null,
+      "stimulus_factors_available": [
+        "rest_condition_label"
+      ],
+      "measures_available": [
+        "aperiodic_exponent",
+        "aperiodic_offset",
+        "periodic_peak_candidates"
+      ],
+      "nmm_components_supported": [
+        "stage2_periodic_aperiodic_parameterization"
+      ],
+      "limitations": [
+        "Concrete dataset source still needs study-team selection"
+      ],
+      "dataset_status": "placeholder",
+      "evidence_usable": false,
+      "download_status": "not_downloaded",
+      "adapter_status": "scaffold_ready",
+      "raw_adapter_status": "not_started",
+      "intermediate_adapter_status": "not_started",
+      "conversion_status": "not_started",
+      "expected_local_layout": "placeholder",
+      "benchmark_ready": false
+    },
+    {
+      "dataset_id": "auditory_attention_placeholder",
+      "name": "Auditory Distraction EEG + Behavior Benchmark (dataset placeholder)",
+      "source_url": "to_be_selected_by_study_team",
+      "license": "to_be_confirmed",
+      "modality": "eeg_behavior",
+      "task": "auditory_attention_under_distraction",
+      "participants": null,
+      "stimulus_factors_available": [
+        "distractor_condition",
+        "modulation_rate_hz",
+        "carrier_or_noise_label"
+      ],
+      "measures_available": [
+        "vigilance_accuracy",
+        "reaction_time_ms",
+        "reaction_time_variability_ms",
+        "eeg_attention_markers"
+      ],
+      "nmm_components_supported": [
+        "candidate_temporal_modulation_features",
+        "candidate_v2_diagnostics",
+        "stage8_behavior_linkage_calibration"
+      ],
+      "limitations": [
+        "Cannot establish clinical treatment efficacy",
+        "Task definitions may differ across datasets"
+      ],
+      "dataset_status": "placeholder",
+      "evidence_usable": false,
+      "download_status": "not_downloaded",
+      "adapter_status": "scaffold_ready",
+      "raw_adapter_status": "not_started",
+      "intermediate_adapter_status": "not_started",
+      "conversion_status": "not_started",
+      "expected_local_layout": "placeholder",
+      "benchmark_ready": false
+    }
+  ]
+}
