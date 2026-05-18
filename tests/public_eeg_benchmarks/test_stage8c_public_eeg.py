@@ -701,7 +701,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
                 "Source lineage is not fully verified; this run is not yet evidence-usable.",
                 result["limitations"],
             )
-            self.assertIn("comparison_unavailable_noncommensurate_output", result["metrics_computed"])
+            self.assertIn("predicted_gamma_assr_response_strength_surrogate", result["metrics_computed"])
+            self.assertIn("dominant_rate_comparison_unavailable", result["metrics_computed"])
+            self.assertIn("prediction_bridge", result)
+            self.assertEqual(result["prediction_bridge"]["prediction_level"], "condition_level")
+            self.assertEqual(
+                result["prediction_bridge"]["predicted_dominant_modulation_hz_status"],
+                "unavailable_no_independent_model_rate_estimator_stage8d_b",
+            )
             self.assertEqual(result["evidence_category"], "not_yet_evidence_usable")
             with (out / "bench" / "assr_observed_metrics.csv").open("r", encoding="utf-8", newline="") as f:
                 observed_metrics = list(csv.DictReader(f))
@@ -864,7 +871,7 @@ class Stage8cPublicEegTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("sample rate too low for target modulation frequency", result.stdout)
 
-    def test_non_fixture_assr_result_lists_both_downgrade_limitations(self) -> None:
+    def test_non_fixture_assr_result_lists_dominant_rate_unavailable_limitations(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
             subprocess.run(
@@ -886,9 +893,21 @@ class Stage8cPublicEegTests(unittest.TestCase):
                 result["limitations"],
             )
             self.assertIn(
-                "NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.",
+                "Dominant-rate prediction/comparison is unavailable: no independent model rate estimator is exposed in Stage 8d-B.",
                 result["limitations"],
             )
+            self.assertIn(
+                "Strength outputs are surrogate-only and not same-scale EEG power; control/rank/sign comparisons remain unavailable.",
+                result["limitations"],
+            )
+
+    def test_stage8d_b_readme_no_longer_claims_predictions_unavailable(self) -> None:
+        readme = (ROOT / "benchmarks" / "public_eeg" / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "prediction/comparison outputs are explicitly unavailable pending model bridge implementation.",
+            readme,
+        )
+        self.assertIn("predicted_gamma_assr_response_strength", readme)
 
     def test_registry_ds005048_conversion_status_truthfulness(self) -> None:
         reg = load_registry()

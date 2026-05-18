@@ -108,13 +108,19 @@ Current Stage 8d status:
   - semantic parse inputs are `*_eeg.fdt` + `*_eeg.json` + `*_events.tsv` + `*_channels.tsv`; `*_eeg.set` is currently lineage-only (hashed/required for provenance, not semantically parsed in Stage 8d-A-Real);
   - manifest stores `source_root_ref`, `source_paths/source_file_hashes`, `intermediate_paths/intermediate_file_hashes`, and `conversion_inputs_by_intermediate`;
   - adapter verifies intermediate hashes and source hashes, and enforces source-input coverage per consumed intermediate file.
-- ASSR benchmark emits observation-side metrics and explicit unavailable status for prediction/comparison metrics until a real NMM prediction bridge is implemented (Stage 8d-B).
+- Stage 8d-B adds a deterministic condition-level model bridge for **surrogate gamma/ASSR strength only**.
 
 Current scientifically valid ASSR outputs:
 - observed target-rate recovery from `observed_dominant_modulation_hz`
 - observed target-band strength
 - observed target-vs-control strength delta only when control rows are present; otherwise reported unavailable/not-applicable (no silent zero fallback)
 - observed dominant modulation error
-- prediction/comparison outputs are explicitly unavailable pending model bridge implementation.
+- available model-side output: condition-level `predicted_gamma_assr_response_strength` surrogate.
+- unavailable in current Stage 8d-B:
+  - dominant-rate prediction (`predicted_dominant_modulation_hz`)
+  - `predicted_target_rate_recovery_accuracy`
+  - `prediction_observation_target_rate_agreement`
+  - target-vs-control/rank/sign comparisons
+  These remain unavailable because the bridge does not expose an independent model dominant-rate estimator and strength is not same-scale EEG power.
 
 `observed_assr_plv` is intentionally not used/named because true cross-trial PLV is not implemented yet in this path.

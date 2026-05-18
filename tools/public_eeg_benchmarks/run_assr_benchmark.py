@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import subprocess
 import sys
 from pathlib import Path
 from statistics import mean
@@ -79,18 +81,40 @@ def compute_assr_metrics(rows: list[dict[str, str]]) -> dict:
 
 
 def compute_prediction_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    # Stage 8d closure guardrail:
-    # prediction rows are intentionally unavailable until a real model-derived bridge
-    # is implemented. Do not derive "predictions" from benchmark labels.
+    cache: dict[float, dict[str, object]] = {}
     out: list[dict[str, str]] = []
     for r in rows:
+        mod_rate = float(r.get("modulation_rate_hz", "0") or 0.0)
+        if mod_rate not in cache:
+            proc = subprocess.run(
+                [
+                    "cargo",
+                    "run",
+                    "--quiet",
+                    "--bin",
+                    "assr_condition_bridge",
+                    "--",
+                    "--modulation-rate-hz",
+                    str(mod_rate),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            cache[mod_rate] = json.loads(proc.stdout.strip())
+        p = cache[mod_rate]
         out.append(
             {
                 "trial_id": r["trial_id"],
                 "condition_id": r["condition_id"],
-                "predicted_dominant_modulation_hz": "",
-                "predicted_gamma_assr_response_strength": "",
-                "prediction_status": "unavailable_model_bridge_not_implemented",
+                "predicted_dominant_modulation_hz": "" if p["predicted_dominant_modulation_hz"] is None else str(p["predicted_dominant_modulation_hz"]),
+                "predicted_dominant_modulation_hz_status": str(p["dominant_rate_status"]),
+                "predicted_gamma_assr_response_strength": str(p["predicted_gamma_assr_response_strength"]),
+                "prediction_level": str(p["prediction_level"]),
+                "prediction_status": str(p["prediction_status"]),
+                "bridge_version": str(p["bridge_version"]),
+                "model_version": str(p["model_version"]),
+                "strength_scale": str(p["strength_scale"]),
             }
         )
     return out
@@ -104,7 +128,7 @@ def compute_prediction_metrics(rows: list[dict[str, str]], pred_rows: list[dict[
         "prediction_observation_target_rate_agreement": None,
         "prediction_observation_condition_rank_agreement": None,
         "prediction_observation_strength_delta_sign_agreement": None,
-        "comparison_status": "unavailable_noncommensurate_output",
+        "comparison_status": "unavailable_no_independent_model_rate_estimator_stage8d_b",
         "joined_rows": joined,
     }
 
@@ -155,16 +179,30 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         w.writeheader()
         w.writerow({"metric": "predicted_target_rate_recovery_accuracy", "value": ""})
         w.writerow({"metric": "predicted_target_vs_control_strength_delta", "value": ""})
-        w.writerow({"metric": "status", "value": "unavailable_model_bridge_not_implemented"})
+        w.writerow({"metric": "status", "value": "surrogate_strength_only"})
     with (output_dir / "assr_comparison_metrics.csv").open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["metric", "value"])
         w.writeheader()
         w.writerow({"metric": "prediction_observation_target_rate_agreement", "value": ""})
         w.writerow({"metric": "prediction_observation_condition_rank_agreement", "value": ""})
         w.writerow({"metric": "prediction_observation_strength_delta_sign_agreement", "value": ""})
-        w.writerow({"metric": "status", "value": "comparison_unavailable_noncommensurate_output"})
+        w.writerow({"metric": "status", "value": pred_metrics["comparison_status"]})
     with (output_dir / "assr_prediction_rows.csv").open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["trial_id", "condition_id", "predicted_dominant_modulation_hz", "predicted_gamma_assr_response_strength", "prediction_status"])
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "trial_id",
+                "condition_id",
+                "predicted_dominant_modulation_hz",
+                "predicted_dominant_modulation_hz_status",
+                "predicted_gamma_assr_response_strength",
+                "prediction_level",
+                "prediction_status",
+                "bridge_version",
+                "model_version",
+                "strength_scale",
+            ],
+        )
         w.writeheader()
         w.writerows(pred_rows)
     with (output_dir / "assr_failure_cases.csv").open("w", encoding="utf-8", newline="") as f:
@@ -174,7 +212,21 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         w.writerow(
             {
                 "trial_id": "",
-                "reason": "comparison_unavailable_noncommensurate_output",
+                "reason": "prediction_observation_condition_rank_agreement_unavailable_no_control_rows",
+                "observed_modulation_rate_hz": "",
+            }
+        )
+        w.writerow(
+            {
+                "trial_id": "",
+                "reason": "prediction_observation_strength_delta_sign_agreement_unavailable_surrogate_strength",
+                "observed_modulation_rate_hz": "",
+            }
+        )
+        w.writerow(
+            {
+                "trial_id": "",
+                "reason": "prediction_observation_target_rate_agreement_unavailable_no_independent_model_rate_estimator_stage8d_b",
                 "observed_modulation_rate_hz": "",
             }
         )
@@ -196,7 +248,18 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
     if not use_fixture and provenance_status != "source_verified":
         limitations.append("Source lineage is not fully verified; this run is not yet evidence-usable.")
     if not use_fixture:
-        limitations.append("NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.")
+        limitations.append("Dominant-rate prediction/comparison is unavailable: no independent model rate estimator is exposed in Stage 8d-B.")
+        limitations.append("Strength outputs are surrogate-only and not same-scale EEG power; control/rank/sign comparisons remain unavailable.")
+
+    bridge_meta = {}
+    if pred_rows:
+        bridge_meta = {
+            "prediction_level": pred_rows[0].get("prediction_level"),
+            "bridge_version": pred_rows[0].get("bridge_version"),
+            "model_version": pred_rows[0].get("model_version"),
+            "strength_scale": pred_rows[0].get("strength_scale"),
+            "predicted_dominant_modulation_hz_status": pred_rows[0].get("predicted_dominant_modulation_hz_status"),
+        }
 
     result = {
         "dataset_id": dataset_id,
@@ -209,7 +272,8 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
             "observed_target_band_strength",
             "observed_target_vs_control_strength_delta",
             "observed_dominant_modulation_hz_error",
-            "comparison_unavailable_noncommensurate_output",
+            "predicted_gamma_assr_response_strength_surrogate",
+            "dominant_rate_comparison_unavailable",
         ],
         "evidence_category": evidence_category,
         "limitations": limitations,
@@ -221,6 +285,7 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         "max_frequency_resolution_hz": max_frequency_resolution_hz,
         "all_rows_resolution_sufficient": res_ok,
         "resolution_sufficient_for_target_metric": res_ok,
+        "prediction_bridge": bridge_meta if bridge_meta else None,
     }
     write_result_json(output_dir / "assr_benchmark_result.json", result)
 
@@ -236,8 +301,9 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
             else "`unavailable_no_control_rows`"
         ),
         f"Observed dominant modulation 40 Hz error: `{metrics['observed_dominant_modulation_hz_error']:.3f}`",
-        "Prediction rows: `unavailable_model_bridge_not_implemented`",
-        "Comparison metrics: `unavailable_noncommensurate_output`",
+        "Predicted dominant-rate metrics: `unavailable_no_independent_model_rate_estimator_stage8d_b`",
+        "Predicted surrogate strength: `available_condition_level_surrogate`",
+        "Unavailable comparisons: `target_rate_agreement`, `target_vs_control_delta`, `condition_rank_agreement`, `strength_delta_sign_agreement`",
         f"Evidence category: `{evidence_category}`",
     ]
     write_markdown_report(output_dir / "assr_benchmark_report.md", "ASSR Benchmark Report", lines)
