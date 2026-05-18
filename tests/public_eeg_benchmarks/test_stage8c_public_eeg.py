@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "benchmarks" / "public_eeg" / "datasets_v1.json"
 REGISTRY_SCHEMA = ROOT / "benchmarks" / "public_eeg" / "schema" / "public_eeg_registry_v1.schema.json"
 DS005048_FIXTURE = ROOT / "tests" / "public_eeg_benchmarks" / "fixtures" / "ds005048_mock"
+DS005048_SOURCE_FIXTURE = ROOT / "tests" / "public_eeg_benchmarks" / "fixtures" / "ds005048_source_mock"
 
 
 class Stage8cPublicEegTests(unittest.TestCase):
@@ -624,7 +626,7 @@ class Stage8cPublicEegTests(unittest.TestCase):
                     "python3",
                     "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
                     "--source-root",
-                    str(DS005048_FIXTURE),
+                    str(DS005048_SOURCE_FIXTURE),
                     "--out-root",
                     str(out),
                     "--source-version",
@@ -636,7 +638,10 @@ class Stage8cPublicEegTests(unittest.TestCase):
             self.assertEqual(manifest["source_dataset_id"], "ds005048")
             self.assertTrue(manifest["source_paths"])
             self.assertTrue(manifest["intermediate_paths"])
+            self.assertNotEqual(set(manifest["source_paths"]), set(manifest["intermediate_paths"]))
             self.assertEqual(manifest["provenance_status_hint"], "intermediate_verified")
+            self.assertIn("source_root_ref", manifest)
+            self.assertIn("conversion_inputs_by_intermediate", manifest)
             subprocess.run(
                 [
                     "python3",
@@ -651,9 +656,171 @@ class Stage8cPublicEegTests(unittest.TestCase):
                 check=True,
             )
             result = json.loads((out / "bench" / "assr_benchmark_result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result["provenance_status"], "intermediate_verified")
+            self.assertEqual(result["provenance_status"], "source_verified")
+            self.assertTrue(result["provenance_verified"])
+            self.assertNotIn(
+                "Source lineage is not fully verified; this run is not yet evidence-usable.",
+                result["limitations"],
+            )
             self.assertIn("comparison_unavailable_noncommensurate_output", result["metrics_computed"])
             self.assertEqual(result["evidence_category"], "not_yet_evidence_usable")
+
+    def test_source_verified_downgrades_when_source_root_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            out = td_path / "converted"
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
+                    "--source-root",
+                    str(DS005048_SOURCE_FIXTURE),
+                    "--out-root",
+                    str(out),
+                    "--source-version",
+                    "fixture_v1",
+                ],
+                check=True,
+            )
+            manifest_path = out / "nmm_benchmark_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_root_ref"] = str(td_path / "missing_source_root")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            adapter = Ds005048PreprocessedAdapter(out)
+            adapter.export_benchmark_rows()
+            self.assertEqual(adapter.last_provenance_status(), "intermediate_verified")
+
+    def test_source_verified_rejected_on_source_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            src_copy = td_path / "source_copy"
+            shutil.copytree(DS005048_SOURCE_FIXTURE, src_copy)
+            out = td_path / "converted"
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
+                    "--source-root",
+                    str(src_copy),
+                    "--out-root",
+                    str(out),
+                    "--source-version",
+                    "fixture_v1",
+                ],
+                check=True,
+            )
+            manifest_path = out / "nmm_benchmark_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            src_root = Path(manifest["source_root_ref"])
+            first_src = manifest["source_paths"][0]
+            original = src_root / first_src
+            original.write_text(original.read_text(encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
+            adapter = Ds005048PreprocessedAdapter(out)
+            with self.assertRaises(DatasetLayoutError):
+                adapter.export_benchmark_rows()
+
+    def test_source_coverage_gap_prevents_source_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            src_copy = td_path / "source_copy"
+            shutil.copytree(DS005048_SOURCE_FIXTURE, src_copy)
+            out = td_path / "converted"
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
+                    "--source-root",
+                    str(src_copy),
+                    "--out-root",
+                    str(out),
+                    "--source-version",
+                    "fixture_v1",
+                ],
+                check=True,
+            )
+            manifest_path = out / "nmm_benchmark_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            missing_src = Path(manifest["source_root_ref"]) / manifest["source_paths"][-1]
+            missing_src.unlink()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            adapter = Ds005048PreprocessedAdapter(out)
+            adapter.export_benchmark_rows()
+            self.assertEqual(adapter.last_provenance_status(), "intermediate_verified")
+
+    def test_manifest_underreporting_conversion_inputs_prevents_source_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            src_copy = td_path / "source_copy"
+            shutil.copytree(DS005048_SOURCE_FIXTURE, src_copy)
+            out = td_path / "converted"
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
+                    "--source-root",
+                    str(src_copy),
+                    "--out-root",
+                    str(out),
+                    "--source-version",
+                    "fixture_v1",
+                ],
+                check=True,
+            )
+            manifest_path = out / "nmm_benchmark_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            any_intermediate = next(iter(manifest["conversion_inputs_by_intermediate"]))
+            manifest["conversion_inputs_by_intermediate"][any_intermediate] = []
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            adapter = Ds005048PreprocessedAdapter(out)
+            adapter.export_benchmark_rows()
+            self.assertEqual(adapter.last_provenance_status(), "intermediate_verified")
+
+    def test_low_sample_rate_rejected_for_40hz_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            eeg = td_path / "sub-01" / "eeg"
+            eeg.mkdir(parents=True)
+            ev_rel = "sub-01/eeg/sub-01_task-assr_events.tsv"
+            ts_rel = "sub-01/eeg/sub-01_task-assr_timeseries.csv"
+            events_path = td_path / ev_rel
+            ts_path = td_path / ts_rel
+            events_path.write_text("onset\tduration\tmodulation_rate_hz\tcondition_label\n0.0\t1.2\t40.0\ttarget\n", encoding="utf-8")
+            ts_rows = ["time,sample_rate_hz,eeg"] + [f"{i/10:.1f},10,0.0" for i in range(20)]
+            ts_path.write_text("\n".join(ts_rows) + "\n", encoding="utf-8")
+            import hashlib
+            ev_hash = "sha256:" + hashlib.sha256(events_path.read_bytes()).hexdigest()
+            ts_hash = "sha256:" + hashlib.sha256(ts_path.read_bytes()).hexdigest()
+            manifest = {
+                "dataset_id": "ds005048",
+                "subjects": ["sub-01"],
+                "source_dataset_id": "ds005048",
+                "source_dataset_version": "x",
+                "source_root_ref": str(td_path),
+                "source_paths": [ev_rel, ts_rel],
+                "source_file_hashes": {ev_rel: ev_hash, ts_rel: ts_hash},
+                "intermediate_paths": [ev_rel, ts_rel],
+                "intermediate_file_hashes": {ev_rel: ev_hash, ts_rel: ts_hash},
+                "conversion_inputs_by_intermediate": {ev_rel: [ev_rel], ts_rel: [ts_rel]},
+                "conversion_tool_version": "x",
+                "conversion_timestamp": "2026-01-01T00:00:00Z",
+            }
+            (td_path / "nmm_benchmark_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                    "--dataset",
+                    "ds005048",
+                    "--dataset-root",
+                    str(td_path),
+                    "--output-dir",
+                    str(td_path / "out"),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("sample rate too low for target modulation frequency", result.stdout)
 
     def test_non_fixture_assr_result_lists_both_downgrade_limitations(self) -> None:
         with tempfile.TemporaryDirectory() as td:

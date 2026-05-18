@@ -35,7 +35,7 @@
       "raw_adapter_status": "not_started",
       "intermediate_adapter_status": "implemented",
       "conversion_status": "not_started",
-      "expected_local_layout": "Intermediate format with provenance-preserving nmm_benchmark_manifest.json and converted *_events.tsv + *_timeseries.csv under sub-*/eeg",
+      "expected_local_layout": "Synthetic source-contract scaffold only: sub-*/eeg/*_source_events.csv + *_source_signal.csv converted into intermediate *_events.tsv + *_timeseries.csv with source/intermediate lineage metadata. Real ds005048 public-source ingestion is pending.",
       "benchmark_ready": false
     },
     {

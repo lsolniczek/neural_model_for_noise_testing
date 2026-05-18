@@ -189,6 +189,13 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         min_epoch_duration_s = min(epoch_durations)
         max_epoch_duration_s = max(epoch_durations)
         max_frequency_resolution_hz = max(freq_res)
+    provenance_verified = provenance_status == "source_verified" if not use_fixture else False
+    limitations = []
+    if not use_fixture and provenance_status != "source_verified":
+        limitations.append("Source lineage is not fully verified; this run is not yet evidence-usable.")
+    if not use_fixture:
+        limitations.append("NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.")
+
     result = {
         "dataset_id": dataset_id,
         "benchmark_family": "assr",
@@ -203,13 +210,10 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
             "comparison_unavailable_noncommensurate_output",
         ],
         "evidence_category": evidence_category,
-        "limitations": [] if use_fixture else [
-            "Source lineage is not fully verified; this run is not yet evidence-usable.",
-            "NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.",
-        ],
+        "limitations": limitations,
         "input_kind": "fixture" if use_fixture else "preprocessed_intermediate",
         "provenance_status": provenance_status,
-        "provenance_verified": False,
+        "provenance_verified": provenance_verified,
         "min_epoch_duration_s": min_epoch_duration_s,
         "max_epoch_duration_s": max_epoch_duration_s,
         "max_frequency_resolution_hz": max_frequency_resolution_hz,

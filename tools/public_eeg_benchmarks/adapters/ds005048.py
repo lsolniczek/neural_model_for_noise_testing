@@ -126,7 +126,6 @@ class Ds005048PreprocessedAdapter:
 
     def compute_provenance_status(self, consumed_relative_paths: List[str]) -> str:
         # provenance_status contract: fixture | declared_only | intermediate_verified | source_verified
-        # This adapter cannot currently perform raw-source verification.
         required = [
             "source_dataset_id",
             "source_dataset_version",
@@ -142,9 +141,12 @@ class Ds005048PreprocessedAdapter:
                 return "declared_only"
         intermediate_paths = self._manifest.get("intermediate_paths")
         intermediate_hashes = self._manifest.get("intermediate_file_hashes")
+        conversion_inputs = self._manifest.get("conversion_inputs_by_intermediate")
         if not isinstance(intermediate_paths, list) or not intermediate_paths:
             return "declared_only"
         if not isinstance(intermediate_hashes, dict) or not intermediate_hashes:
+            return "declared_only"
+        if conversion_inputs is not None and (not isinstance(conversion_inputs, dict) or not conversion_inputs):
             return "declared_only"
         listed = {str(p) for p in intermediate_paths if isinstance(p, str) and p.strip()}
         if not all(p in listed for p in consumed_relative_paths):
@@ -158,11 +160,47 @@ class Ds005048PreprocessedAdapter:
                 return "declared_only"
             if self._hash_file(actual_path) != expected:
                 raise DatasetLayoutError(f"intermediate hash mismatch for consumed file '{p}'")
-        # Stage 8d closure downgrade:
-        # this adapter currently verifies only files available inside the intermediate
-        # dataset root. Without a distinct, independently verified raw source tree,
-        # source lineage cannot be proven. Keep status at intermediate_verified.
-        return "intermediate_verified"
+        source_root_ref = str(self._manifest.get("source_root_ref", "")).strip()
+        if not source_root_ref:
+            return "intermediate_verified"
+        source_root = Path(source_root_ref)
+        if not source_root.exists():
+            return "intermediate_verified"
+        source_paths = self._manifest.get("source_paths")
+        source_hashes = self._manifest.get("source_file_hashes")
+        if not isinstance(source_paths, list) or not source_paths:
+            return "intermediate_verified"
+        if not isinstance(source_hashes, dict) or not source_hashes:
+            return "intermediate_verified"
+        # Source coverage rule: every consumed intermediate must declare every source input used to generate it.
+        # Missing conversion-input links prevent source_verified even when hashes exist.
+        if isinstance(conversion_inputs, dict):
+            for p in consumed_relative_paths:
+                mapped_sources = conversion_inputs.get(p)
+                if not isinstance(mapped_sources, list) or not mapped_sources:
+                    return "intermediate_verified"
+                for src_p in mapped_sources:
+                    if not isinstance(src_p, str) or not src_p.strip():
+                        return "intermediate_verified"
+                    if src_p not in source_paths:
+                        return "intermediate_verified"
+                    expected_src_hash = source_hashes.get(src_p, "")
+                    if not self._is_sha256(expected_src_hash):
+                        return "intermediate_verified"
+        else:
+            return "intermediate_verified"
+        for p in source_paths:
+            if not isinstance(p, str) or not p.strip():
+                return "intermediate_verified"
+            expected = source_hashes.get(p, "")
+            if not self._is_sha256(expected):
+                return "intermediate_verified"
+            actual_path = source_root / p
+            if not actual_path.exists():
+                return "intermediate_verified"
+            if self._hash_file(actual_path) != expected:
+                raise DatasetLayoutError(f"source hash mismatch for source file '{p}'")
+        return "source_verified"
 
     def load_subjects(self) -> List[str]:
         self.verify_layout()
@@ -214,6 +252,11 @@ class Ds005048PreprocessedAdapter:
             onset_s = float(ev["onset"])
             duration_s = float(ev["duration"])
             target_hz = float(ev["modulation_rate_hz"])
+            nyquist_hz = sample_rate_hz / 2.0
+            if nyquist_hz < (target_hz + TARGET_RECOVERY_TOLERANCE_HZ):
+                raise DatasetLayoutError(
+                    f"sample rate too low for target modulation frequency: sr={sample_rate_hz:.3f}Hz nyquist={nyquist_hz:.3f}Hz target={target_hz:.3f}Hz"
+                )
             condition_label = ev.get("condition_label", "")
             start = int(onset_s * sample_rate_hz)
             end = int((onset_s + duration_s) * sample_rate_hz)
@@ -255,8 +298,13 @@ def _compute_assr_observations(signal: List[float], sample_rate_hz: float, targe
     n = len(signal)
     mean_sig = sum(signal) / n
     centered = [x - mean_sig for x in signal]
-    # simple DFT over 5..60 Hz for deterministic offline baseline
-    freqs = [float(f) for f in range(5, 61)]
+    # simple DFT over 5..min(60, nyquist) Hz for deterministic offline baseline
+    nyquist_hz = sample_rate_hz / 2.0
+    max_analyzed_hz = min(60.0, nyquist_hz)
+    upper = int(math.floor(max_analyzed_hz))
+    if upper < 5:
+        raise DatasetLayoutError("sample rate too low for ASSR analysis band")
+    freqs = [float(f) for f in range(5, upper + 1)]
     power = []
     for f in freqs:
         re = 0.0

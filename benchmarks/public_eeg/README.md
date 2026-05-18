@@ -101,9 +101,12 @@ The current adapter is `Ds005048PreprocessedAdapter` and requires `nmm_benchmark
 Current Stage 8d status:
 - observation-side benchmarking is implemented;
 - fixture runs are plumbing only;
-- conversion scaffold exists via `tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py`, but does not yet provide independently verified raw-source lineage;
-- ASSR benchmark emits observation-side metrics and explicit unavailable status for prediction/comparison metrics until a real NMM prediction bridge is implemented;
-- ds005048 remains not evidence-promotable (`benchmark_ready=false`, `conversion_status=not_started`).
+- Stage 8d-A currently provides a **synthetic source-contract scaffold** via `tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py`:
+  - source files (`*_source_events.csv`, `*_source_signal.csv`) are structurally distinct from emitted intermediate files (`*_events.tsv`, `*_timeseries.csv`);
+  - manifest stores `source_root_ref`, `source_paths/source_file_hashes`, `intermediate_paths/intermediate_file_hashes`, and `conversion_inputs_by_intermediate`;
+  - adapter verifies intermediate hashes and source hashes, and enforces source-input coverage per consumed intermediate file.
+  - this is still **not** demonstrated ingestion of actual public ds005048 raw/BIDS files, so ds005048 remains not evidence-promotable (`conversion_status=not_started`, `benchmark_ready=false`).
+- ASSR benchmark emits observation-side metrics and explicit unavailable status for prediction/comparison metrics until a real NMM prediction bridge is implemented (Stage 8d-B).
 
 Current scientifically valid ASSR outputs:
 - observed target-rate recovery from `observed_dominant_modulation_hz`
