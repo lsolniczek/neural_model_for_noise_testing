@@ -34,8 +34,8 @@
       "adapter_status": "scaffold_ready",
       "raw_adapter_status": "not_started",
       "intermediate_adapter_status": "implemented",
-      "conversion_status": "not_started",
-      "expected_local_layout": "Synthetic source-contract scaffold only: sub-*/eeg/*_source_events.csv + *_source_signal.csv converted into intermediate *_events.tsv + *_timeseries.csv with source/intermediate lineage metadata. Real ds005048 public-source ingestion is pending.",
+      "conversion_status": "implemented",
+      "expected_local_layout": "Real ds005048 BIDS/EEGLAB source layout: sub-*/eeg/*_task-40HzAuditoryEntrainment_eeg.set, *_eeg.fdt, *_eeg.json, *_events.tsv, *_channels.tsv plus task-40HzAuditoryEntrainment_events.json at root. Converter emits intermediate *_events.tsv + *_timeseries.csv with source/intermediate lineage metadata.",
       "benchmark_ready": false
     },
     {

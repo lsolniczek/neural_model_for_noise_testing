@@ -101,17 +101,19 @@ The current adapter is `Ds005048PreprocessedAdapter` and requires `nmm_benchmark
 Current Stage 8d status:
 - observation-side benchmarking is implemented;
 - fixture runs are plumbing only;
-- Stage 8d-A currently provides a **synthetic source-contract scaffold** via `tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py`:
-  - source files (`*_source_events.csv`, `*_source_signal.csv`) are structurally distinct from emitted intermediate files (`*_events.tsv`, `*_timeseries.csv`);
+- Stage 8d-A now provides a **real ds005048 BIDS/EEGLAB converter** via `tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py`:
+  - source files consumed per subject: `*_eeg.set`, `*_eeg.fdt`, `*_eeg.json`, `*_events.tsv`, `*_channels.tsv`;
+  - root task metadata consumed: `task-40HzAuditoryEntrainment_events.json`;
+  - converter emits intermediate `*_events.tsv` and `*_timeseries.csv`;
+  - semantic parse inputs are `*_eeg.fdt` + `*_eeg.json` + `*_events.tsv` + `*_channels.tsv`; `*_eeg.set` is currently lineage-only (hashed/required for provenance, not semantically parsed in Stage 8d-A-Real);
   - manifest stores `source_root_ref`, `source_paths/source_file_hashes`, `intermediate_paths/intermediate_file_hashes`, and `conversion_inputs_by_intermediate`;
   - adapter verifies intermediate hashes and source hashes, and enforces source-input coverage per consumed intermediate file.
-  - this is still **not** demonstrated ingestion of actual public ds005048 raw/BIDS files, so ds005048 remains not evidence-promotable (`conversion_status=not_started`, `benchmark_ready=false`).
 - ASSR benchmark emits observation-side metrics and explicit unavailable status for prediction/comparison metrics until a real NMM prediction bridge is implemented (Stage 8d-B).
 
 Current scientifically valid ASSR outputs:
 - observed target-rate recovery from `observed_dominant_modulation_hz`
 - observed target-band strength
-- observed target-vs-control strength delta
+- observed target-vs-control strength delta only when control rows are present; otherwise reported unavailable/not-applicable (no silent zero fallback)
 - observed dominant modulation error
 - prediction/comparison outputs are explicitly unavailable pending model bridge implementation.
 

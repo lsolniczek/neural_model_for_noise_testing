@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -17,10 +16,43 @@ ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "benchmarks" / "public_eeg" / "datasets_v1.json"
 REGISTRY_SCHEMA = ROOT / "benchmarks" / "public_eeg" / "schema" / "public_eeg_registry_v1.schema.json"
 DS005048_FIXTURE = ROOT / "tests" / "public_eeg_benchmarks" / "fixtures" / "ds005048_mock"
-DS005048_SOURCE_FIXTURE = ROOT / "tests" / "public_eeg_benchmarks" / "fixtures" / "ds005048_source_mock"
 
 
 class Stage8cPublicEegTests(unittest.TestCase):
+    def _build_real_layout_source_fixture(self, root: Path, sample_rate: float = 250.0) -> Path:
+        import struct
+        src = root / "ds005048_source_real_layout"
+        eeg_dir = src / "sub-01" / "eeg"
+        eeg_dir.mkdir(parents=True)
+        (src / "dataset_description.json").write_text(json.dumps({"Name": "40Hz Auditory Entrainment", "DatasetVersion": "v1.0.1"}), encoding="utf-8")
+        (src / "task-40HzAuditoryEntrainment_events.json").write_text(
+            json.dumps({"value": {"Levels": {"1": "Rest", "2": "Stimulus"}}}), encoding="utf-8"
+        )
+        stem = "sub-01_task-40HzAuditoryEntrainment"
+        (eeg_dir / f"{stem}_eeg.set").write_bytes(b"EEGLAB_PLACEHOLDER")
+        # 19 channels, 500 samples => 2.0 seconds at 250 Hz
+        n_channels = 19
+        n_samples = 500
+        data = []
+        for t in range(n_samples):
+            # first channel carries 40 Hz sinusoid; other channels zeros
+            ch0 = 0.5 if (t % 6) < 3 else -0.5
+            data.append(ch0)
+            data.extend([0.0] * (n_channels - 1))
+        (eeg_dir / f"{stem}_eeg.fdt").write_bytes(struct.pack("<" + ("f" * len(data)), *data))
+        (eeg_dir / f"{stem}_eeg.json").write_text(
+            json.dumps({"TaskName": "40HzAuditoryEntrainment", "SamplingFrequency": sample_rate}), encoding="utf-8"
+        )
+        (eeg_dir / f"{stem}_channels.tsv").write_text(
+            "name\ttype\tunits\nFp1\tn/a\tn/a\nFp2\tn/a\tn/a\nF7\tn/a\tn/a\nF3\tn/a\tn/a\nFz\tn/a\tn/a\nF4\tn/a\tn/a\nF8\tn/a\tn/a\nT7\tn/a\tn/a\nC3\tn/a\tn/a\nCz\tn/a\tn/a\nC4\tn/a\tn/a\nT8\tn/a\tn/a\nP7\tn/a\tn/a\nP3\tn/a\tn/a\nPz\tn/a\tn/a\nP4\tn/a\tn/a\nP8\tn/a\tn/a\nO1\tn/a\tn/a\nO2\tn/a\tn/a\n",
+            encoding="utf-8",
+        )
+        (eeg_dir / f"{stem}_events.tsv").write_text(
+            "onset\tduration\tsample\tvalue\ttrial_type\n0\t1.2\t1\t2\tStimulus\n1.2\t0.8\t301\t1\tRest\n",
+            encoding="utf-8",
+        )
+        return src
+
     def test_registry_has_required_component_support_and_limitations(self) -> None:
         reg = load_registry()
         self.assertEqual(reg["registry_version"], "public_eeg_datasets_v1")
@@ -266,10 +298,12 @@ class Stage8cPublicEegTests(unittest.TestCase):
                 check=True,
             )
             with (out / "assr_metrics.csv").open("r", encoding="utf-8", newline="") as f:
-                rows = {r["metric"]: float(r["value"]) for r in csv.DictReader(f)}
+                parsed = {r["metric"]: r["value"] for r in csv.DictReader(f)}
+            rows = {k: float(v) for k, v in parsed.items() if k != "observed_target_vs_control_strength_delta_status"}
             self.assertIn("observed_target_rate_recovery_accuracy", rows)
             self.assertIn("observed_target_vs_control_strength_delta", rows)
             self.assertIn("observed_dominant_modulation_hz_error", rows)
+            self.assertEqual(parsed["observed_target_vs_control_strength_delta_status"], "ok")
             self.assertGreaterEqual(rows["observed_target_rate_recovery_accuracy"], 0.0)
             self.assertGreaterEqual(rows["observed_dominant_modulation_hz_error"], 0.0)
 
@@ -620,13 +654,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
     def test_stage8d_converter_remains_non_evidence_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
+            real_src = self._build_real_layout_source_fixture(td_path)
             out = td_path / "converted"
             subprocess.run(
                 [
                     "python3",
                     "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
                     "--source-root",
-                    str(DS005048_SOURCE_FIXTURE),
+                    str(real_src),
                     "--out-root",
                     str(out),
                     "--source-version",
@@ -639,9 +674,13 @@ class Stage8cPublicEegTests(unittest.TestCase):
             self.assertTrue(manifest["source_paths"])
             self.assertTrue(manifest["intermediate_paths"])
             self.assertNotEqual(set(manifest["source_paths"]), set(manifest["intermediate_paths"]))
-            self.assertEqual(manifest["provenance_status_hint"], "intermediate_verified")
+            self.assertEqual(manifest["provenance_status_hint"], "source_verified")
             self.assertIn("source_root_ref", manifest)
             self.assertIn("conversion_inputs_by_intermediate", manifest)
+            self.assertIn("source_contract", manifest)
+            self.assertIn("semantic_source_inputs", manifest["source_contract"])
+            self.assertIn("lineage_only_inputs", manifest["source_contract"])
+            self.assertIn("*_eeg.set", manifest["source_contract"]["lineage_only_inputs"])
             subprocess.run(
                 [
                     "python3",
@@ -664,17 +703,23 @@ class Stage8cPublicEegTests(unittest.TestCase):
             )
             self.assertIn("comparison_unavailable_noncommensurate_output", result["metrics_computed"])
             self.assertEqual(result["evidence_category"], "not_yet_evidence_usable")
+            with (out / "bench" / "assr_observed_metrics.csv").open("r", encoding="utf-8", newline="") as f:
+                observed_metrics = list(csv.DictReader(f))
+            observed_by_name = {r["metric"]: r["value"] for r in observed_metrics}
+            self.assertEqual(observed_by_name["observed_target_vs_control_strength_delta_status"], "unavailable_no_control_rows")
+            self.assertEqual(observed_by_name["observed_target_vs_control_strength_delta"], "")
 
     def test_source_verified_downgrades_when_source_root_missing(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
+            real_src = self._build_real_layout_source_fixture(td_path)
             out = td_path / "converted"
             subprocess.run(
                 [
                     "python3",
                     "tools/public_eeg_benchmarks/convert_ds005048_to_nmm_intermediate.py",
                     "--source-root",
-                    str(DS005048_SOURCE_FIXTURE),
+                    str(real_src),
                     "--out-root",
                     str(out),
                     "--source-version",
@@ -693,8 +738,7 @@ class Stage8cPublicEegTests(unittest.TestCase):
     def test_source_verified_rejected_on_source_hash_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
-            src_copy = td_path / "source_copy"
-            shutil.copytree(DS005048_SOURCE_FIXTURE, src_copy)
+            src_copy = self._build_real_layout_source_fixture(td_path)
             out = td_path / "converted"
             subprocess.run(
                 [
@@ -714,7 +758,7 @@ class Stage8cPublicEegTests(unittest.TestCase):
             src_root = Path(manifest["source_root_ref"])
             first_src = manifest["source_paths"][0]
             original = src_root / first_src
-            original.write_text(original.read_text(encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
+            original.write_bytes(original.read_bytes() + b"\n# tamper\n")
             adapter = Ds005048PreprocessedAdapter(out)
             with self.assertRaises(DatasetLayoutError):
                 adapter.export_benchmark_rows()
@@ -722,8 +766,7 @@ class Stage8cPublicEegTests(unittest.TestCase):
     def test_source_coverage_gap_prevents_source_verified(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
-            src_copy = td_path / "source_copy"
-            shutil.copytree(DS005048_SOURCE_FIXTURE, src_copy)
+            src_copy = self._build_real_layout_source_fixture(td_path)
             out = td_path / "converted"
             subprocess.run(
                 [
@@ -750,8 +793,7 @@ class Stage8cPublicEegTests(unittest.TestCase):
     def test_manifest_underreporting_conversion_inputs_prevents_source_verified(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
-            src_copy = td_path / "source_copy"
-            shutil.copytree(DS005048_SOURCE_FIXTURE, src_copy)
+            src_copy = self._build_real_layout_source_fixture(td_path)
             out = td_path / "converted"
             subprocess.run(
                 [
@@ -847,6 +889,12 @@ class Stage8cPublicEegTests(unittest.TestCase):
                 "NMM prediction bridge is not implemented; prediction/comparison metrics are unavailable.",
                 result["limitations"],
             )
+
+    def test_registry_ds005048_conversion_status_truthfulness(self) -> None:
+        reg = load_registry()
+        ds = next(d for d in reg["datasets"] if d["dataset_id"] == "ds005048")
+        self.assertEqual(ds["conversion_status"], "implemented")
+        self.assertFalse(ds["benchmark_ready"])
 
 
 if __name__ == "__main__":

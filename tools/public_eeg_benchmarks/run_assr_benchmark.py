@@ -54,8 +54,8 @@ def compute_assr_metrics(rows: list[dict[str, str]]) -> dict:
     target_correct = sum(1 for r in target if abs(r["observed_dominant_modulation_hz"] - 40.0) <= 2.0)
     target_recovery = target_correct / len(target) if target else 0.0
     target_strength = mean([r["observed_assr_strength"] for r in target]) if target else 0.0
-    control_strength = mean([r["observed_assr_strength"] for r in control]) if control else 0.0
-    delta = target_strength - control_strength
+    control_strength = mean([r["observed_assr_strength"] for r in control]) if control else None
+    delta = (target_strength - control_strength) if control_strength is not None else None
     hz_err = mean([abs(r["observed_dominant_modulation_hz"] - 40.0) for r in target]) if target else 0.0
     strength_summary = mean([r["observed_assr_strength"] for r in parsed])
     failures = [
@@ -71,6 +71,7 @@ def compute_assr_metrics(rows: list[dict[str, str]]) -> dict:
         "observed_target_rate_recovery_accuracy": target_recovery,
         "observed_target_band_strength": target_strength,
         "observed_target_vs_control_strength_delta": delta,
+        "observed_target_vs_control_strength_delta_status": "ok" if delta is not None else "unavailable_no_control_rows",
         "observed_dominant_modulation_hz_error": hz_err,
         "observed_assr_strength_summary": strength_summary,
         "failure_cases": failures,
@@ -138,6 +139,7 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         {"metric": "observed_target_rate_recovery_accuracy", "value": metrics["observed_target_rate_recovery_accuracy"]},
         {"metric": "observed_target_band_strength", "value": metrics["observed_target_band_strength"]},
         {"metric": "observed_target_vs_control_strength_delta", "value": metrics["observed_target_vs_control_strength_delta"]},
+        {"metric": "observed_target_vs_control_strength_delta_status", "value": metrics["observed_target_vs_control_strength_delta_status"]},
         {"metric": "observed_dominant_modulation_hz_error", "value": metrics["observed_dominant_modulation_hz_error"]},
         {"metric": "observed_assr_strength_summary", "value": metrics["observed_assr_strength_summary"]},
     ]
@@ -227,7 +229,12 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         f"Rows: `{len(rows)}`",
         f"Run mode: `{run_mode}`",
         f"Observed target rate recovery accuracy: `{metrics['observed_target_rate_recovery_accuracy']:.3f}`",
-        f"Observed target-vs-control strength delta: `{metrics['observed_target_vs_control_strength_delta']:.3f}`",
+        "Observed target-vs-control strength delta: "
+        + (
+            f"`{metrics['observed_target_vs_control_strength_delta']:.3f}`"
+            if metrics["observed_target_vs_control_strength_delta"] is not None
+            else "`unavailable_no_control_rows`"
+        ),
         f"Observed dominant modulation 40 Hz error: `{metrics['observed_dominant_modulation_hz_error']:.3f}`",
         "Prediction rows: `unavailable_model_bridge_not_implemented`",
         "Comparison metrics: `unavailable_noncommensurate_output`",
