@@ -3792,6 +3792,11 @@ fn run_evaluate(
             }
         }
 
+        for line in practical_report_lines(goal_kind, result, &diagnosis) {
+            println!("{line}");
+        }
+        println!();
+
         // Verdict
         let verdict_detail = match diagnosis.verdict {
             scoring::Verdict::Good => "neural rhythms align well with goal",
@@ -3967,6 +3972,105 @@ fn goal_meaning_lines(goal_kind: GoalKind) -> Vec<String> {
         format!("    Does not prove: {}", unsupported),
         format!("    Evidence level: {}", semantics.evidence_level.as_str()),
     ]
+}
+
+fn practical_status(score: f64) -> &'static str {
+    if score >= 0.80 {
+        "strong"
+    } else if score >= 0.60 {
+        "usable"
+    } else if score >= 0.40 {
+        "weak"
+    } else {
+        "poor"
+    }
+}
+
+fn practical_report_lines(
+    goal_kind: GoalKind,
+    result: &SimulationResult,
+    diagnosis: &scoring::Diagnosis,
+) -> Vec<String> {
+    let semantics = goal_kind.semantics();
+    let mut reasons: Vec<String> = Vec::new();
+
+    let mut failing_bands = diagnosis
+        .bands
+        .iter()
+        .filter(|b| matches!(b.status, scoring::MetricStatus::Fail))
+        .map(|b| b.name.to_lowercase())
+        .collect::<Vec<_>>();
+    failing_bands.sort();
+    if !failing_bands.is_empty() {
+        reasons.push(format!("bands out of target ({})", failing_bands.join(", ")));
+    }
+
+    if !matches!(diagnosis.firing_rate_status, scoring::MetricStatus::Pass) {
+        let detail = if diagnosis.firing_rate < diagnosis.firing_rate_range.0 {
+            "too low"
+        } else {
+            "too high"
+        };
+        reasons.push(format!("firing rate {detail}"));
+    }
+    if !matches!(diagnosis.isi_status, scoring::MetricStatus::Pass) {
+        reasons.push("spike regularity off target".to_string());
+    }
+
+    if let Some(primary_proxy) = semantics.primary_neural_proxies.first() {
+        let dom = diagnosis.dominant_band_name().to_lowercase();
+        let expected_bands = concrete_proxy_bands(primary_proxy);
+        if !expected_bands.is_empty() && !expected_bands.iter().any(|b| *b == dom) {
+            reasons.push(format!(
+                "dominant frequency is {} while primary proxy emphasizes {}",
+                dom, primary_proxy
+            ));
+        }
+    }
+
+    if reasons.is_empty() {
+        reasons.push("no major proxy-target failures detected".to_string());
+    }
+
+    let acoustic_line = if let Some(acoustic) = &result.acoustic_score {
+        let comfort = acoustic
+            .comfort_score
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "N/A".to_string());
+        let privacy = acoustic
+            .speech_privacy
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "N/A".to_string());
+        format!("Acoustic masking/comfort: comfort={comfort}, speech_privacy={privacy}.")
+    } else {
+        "Acoustic masking/comfort: not scored in this run.".to_string()
+    };
+
+    vec![
+        "  Practical Report:".to_string(),
+        format!("    Status: {}", practical_status(result.score)),
+        format!("    Intended use: {}", semantics.product_objective),
+        format!("    Top reasons: {}", reasons.join("; ")),
+        format!(
+            "    Interpretation: Intended objective: {}. Current proxy alignment is {}.",
+            semantics.product_objective.trim_end_matches('.'),
+            practical_status(result.score)
+        ),
+        format!("    {acoustic_line}"),
+        "    Limitation: This is a model-based proxy report, not proof of human efficacy."
+            .to_string(),
+    ]
+}
+
+fn concrete_proxy_bands(proxy: &str) -> Vec<&'static str> {
+    let proxy_lc = proxy.to_lowercase();
+    let mut bands = Vec::new();
+    for band in ["delta", "theta", "alpha", "beta", "gamma"] {
+        if proxy_lc.contains(band) {
+            bands.push(band);
+        }
+    }
+    bands
 }
 
 fn print_preset_summary(preset: &Preset) {
@@ -5603,6 +5707,177 @@ mod tests {
         assert!(text.contains("does not prove:"));
         assert!(!text.contains("does not prove: does not prove"));
         assert!(text.contains("slow-wave"));
+    }
+
+    #[test]
+    fn practical_report_status_thresholds_are_stable() {
+        assert_eq!(practical_status(0.80), "strong");
+        assert_eq!(practical_status(0.79), "usable");
+        assert_eq!(practical_status(0.60), "usable");
+        assert_eq!(practical_status(0.59), "weak");
+        assert_eq!(practical_status(0.40), "weak");
+        assert_eq!(practical_status(0.39), "poor");
+    }
+
+    #[test]
+    fn practical_report_contains_required_honest_sections() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let config = SimulationConfig::default();
+        let result = evaluate_preset(&preset, &goal, &config);
+        let diagnosis = scoring::Diagnosis {
+            score: result.score,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+
+        let lines = practical_report_lines(GoalKind::Shield, &result, &diagnosis);
+        let text = lines.join("\n").to_lowercase();
+        assert!(text.contains("practical report"));
+        assert!(text.contains("status:"));
+        assert!(text.contains("limitation: this is a model-based proxy report"));
+        assert!(!text.contains("proven human efficacy"));
+    }
+
+    #[test]
+    fn practical_report_handles_acoustic_presence_and_absence() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let diagnosis = scoring::Diagnosis {
+            score: 0.55,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+
+        let no_acoustic = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let text_no = practical_report_lines(GoalKind::Shield, &no_acoustic, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(text_no.contains("acoustic masking/comfort: not scored in this run."));
+
+        let with_acoustic = evaluate_preset(
+            &preset,
+            &goal,
+            &SimulationConfig {
+                acoustic_scoring_enabled: true,
+                ..SimulationConfig::default()
+            },
+        );
+        let text_yes = practical_report_lines(GoalKind::Shield, &with_acoustic, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(text_yes.contains("acoustic masking/comfort: comfort="));
+        assert!(text_yes.contains("speech_privacy="));
+    }
+
+    #[test]
+    fn practical_report_helpers_do_not_mutate_results_or_scores() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let config = SimulationConfig::default();
+
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let result_before = detailed.summary.score;
+        let diagnosis = diagnose_detailed_result(&goal, &detailed);
+
+        let score_after = detailed.summary.score;
+        let lines = practical_report_lines(GoalKind::Shield, &detailed.summary, &diagnosis);
+
+        assert_eq!(result_before, score_after);
+        assert!(lines.iter().any(|l| l.contains("Practical Report")));
+    }
+
+    #[test]
+    fn practical_report_isolation_does_not_invent_flat_proxy_dominant_mismatch() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Isolation);
+        let result = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let diagnosis = scoring::Diagnosis {
+            score: result.score,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 1.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+        let text = practical_report_lines(GoalKind::Isolation, &result, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(!text.contains("dominant frequency is delta while primary proxy emphasizes flat"));
+    }
+
+    #[test]
+    fn practical_report_shield_can_emit_concrete_dominant_mismatch() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let result = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let diagnosis = scoring::Diagnosis {
+            score: result.score,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 1.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+        let text = practical_report_lines(GoalKind::Shield, &result, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(text.contains("dominant frequency is delta while primary proxy emphasizes"));
+        assert!(text.contains("alpha+beta"));
+    }
+
+    #[test]
+    fn practical_report_interpretation_avoids_targets_prefix_awkwardness() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let result = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let diagnosis = scoring::Diagnosis {
+            score: result.score,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+        let text = practical_report_lines(GoalKind::Shield, &result, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(text.contains("interpretation: intended objective:"));
+        assert!(text.contains(". current proxy alignment is"));
+        assert!(!text.contains("proxy current proxy alignment"));
+        assert!(!text.contains("targets blend"));
+        assert!(!text.contains("targets prioritize"));
     }
 
     // ── Calibrate-comfort helpers ──────────────────────────────────────
