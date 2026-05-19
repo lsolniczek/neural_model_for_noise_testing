@@ -3272,6 +3272,26 @@ fn run_optimize(
 
 // ── Evaluate ─────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvaluateOutputMode {
+    Matrix,
+    SingleGoalDetailed,
+}
+
+fn evaluate_output_mode(goals: &[GoalKind], brain_types: &[BrainType]) -> EvaluateOutputMode {
+    if goals.len() > 1 || brain_types.len() > 1 {
+        EvaluateOutputMode::Matrix
+    } else {
+        EvaluateOutputMode::SingleGoalDetailed
+    }
+}
+
+impl EvaluateOutputMode {
+    fn prints_single_goal_sections(self) -> bool {
+        matches!(self, EvaluateOutputMode::SingleGoalDetailed)
+    }
+}
+
 fn run_evaluate(
     preset_path: &PathBuf,
     goal_str: &str,
@@ -3348,7 +3368,7 @@ fn run_evaluate(
         })]
     };
 
-    let is_matrix = goals.len() > 1 || brain_types.len() > 1;
+    let output_mode = evaluate_output_mode(&goals, &brain_types);
 
     println!();
     println!("  Preset Evaluation");
@@ -3383,7 +3403,7 @@ fn run_evaluate(
     }
     println!();
 
-    if is_matrix {
+    if matches!(output_mode, EvaluateOutputMode::Matrix) {
         if log_evaluations_path.is_some() {
             eprintln!(
                 "--log-evaluations is currently supported only for single goal/brain evaluate"
@@ -5878,6 +5898,193 @@ mod tests {
         assert!(!text.contains("proxy current proxy alignment"));
         assert!(!text.contains("targets blend"));
         assert!(!text.contains("targets prioritize"));
+    }
+
+    #[test]
+    fn workflow_single_goal_evaluate_includes_goal_meaning_and_practical_report() {
+        let meaning = goal_meaning_lines(GoalKind::Shield).join("\n");
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let result = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let diagnosis = scoring::Diagnosis {
+            score: result.score,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+        let practical = practical_report_lines(GoalKind::Shield, &result, &diagnosis).join("\n");
+
+        let text = format!("{meaning}\n{practical}").to_lowercase();
+        assert!(text.contains("goal meaning:"));
+        assert!(text.contains("practical report:"));
+        assert!(text.contains("limitation: this is a model-based proxy report"));
+        assert!(!text.contains("proven efficacy"));
+        assert!(!text.contains("clinically validated"));
+    }
+
+    #[test]
+    fn workflow_single_goal_evaluate_branch_prints_goal_meaning_and_practical_report() {
+        let mode = evaluate_output_mode(&[GoalKind::Shield], &[BrainType::Normal]);
+        assert_eq!(mode, EvaluateOutputMode::SingleGoalDetailed);
+        assert!(mode.prints_single_goal_sections());
+    }
+
+    #[test]
+    fn workflow_goal_all_matrix_branch_suppresses_single_goal_sections() {
+        let mode_goals = evaluate_output_mode(GoalKind::all(), &[BrainType::Normal]);
+        assert_eq!(mode_goals, EvaluateOutputMode::Matrix);
+        assert!(!mode_goals.prints_single_goal_sections());
+
+        let mode_brains = evaluate_output_mode(&[GoalKind::Shield], BrainType::all());
+        assert_eq!(mode_brains, EvaluateOutputMode::Matrix);
+        assert!(!mode_brains.prints_single_goal_sections());
+    }
+
+    #[test]
+    fn workflow_export_includes_goal_semantics_contract() {
+        let best_genome = Preset::default().to_genome();
+        let goal_kind = GoalKind::Focus;
+        let goal = Goal::new(goal_kind);
+        let config = SimulationConfig {
+            duration_secs: 3.0,
+            brain_type: BrainType::Normal,
+            ..SimulationConfig::default()
+        };
+        let output_path = std::env::temp_dir().join("workflow_export_goal_semantics_contract.json");
+        let _ = std::fs::remove_file(&output_path);
+        let seed_ctx = SeedPresetContext::default();
+
+        let _ = export_best_genome(
+            &output_path,
+            &best_genome,
+            &goal,
+            goal_kind,
+            99,
+            config.duration_secs,
+            &config,
+            &seed_ctx,
+        )
+        .expect("best-genome export should succeed");
+
+        let json = std::fs::read_to_string(&output_path).expect("exported JSON should exist");
+        let exported: serde_json::Value =
+            serde_json::from_str(&json).expect("exported JSON should parse");
+        assert_eq!(exported["meta"]["goal_semantics"]["goal"].as_str(), Some("focus"));
+        assert!(
+            exported["meta"]["goal_semantics"]["plain_language_purpose"]
+                .as_str()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        );
+        assert!(
+            exported["meta"]["goal_semantics"]["unsupported_claims"]
+                .as_array()
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false)
+        );
+        assert!(
+            exported["meta"]["goal_semantics"]["evidence_level"]
+                .as_str()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        );
+
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn workflow_matrix_or_batch_preserves_goal_rows() {
+        let preset = Preset::default();
+        let goals = [GoalKind::Shield, GoalKind::Isolation, GoalKind::Focus];
+        let brains = [BrainType::Normal];
+        let flags = EvaluateFeatureFlags {
+            assr: false,
+            thalamic_gate: false,
+            cet: false,
+            phys_gate: false,
+        };
+        let matrix = evaluate_score_matrix(
+            &preset,
+            &goals,
+            &brains,
+            5.0,
+            flags,
+            false,
+            ArousalModel::LegacyHeuristic,
+            None,
+            15.0,
+            5.0,
+            10.0,
+        );
+        assert_eq!(matrix.len(), brains.len());
+        assert_eq!(matrix[0].len(), goals.len());
+        for (i, goal_kind) in goals.iter().enumerate() {
+            let score = matrix[0][i];
+            assert!(
+                score.is_finite(),
+                "matrix score for goal {} should be finite",
+                goal_kind
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_disturb_smoke_returns_finite_values() {
+        let preset = Preset::default();
+        let config = disturb::DisturbConfig {
+            duration_secs: 8.0,
+            ..disturb::DisturbConfig::default()
+        };
+        let result = disturb::run_disturb(&preset, &config);
+        assert!(!result.bilateral.combined.eeg.is_empty());
+        assert!(result.bilateral.combined.dominant_freq.is_finite());
+        assert!(result.spectral_resilience.is_finite());
+    }
+
+    #[test]
+    fn workflow_acoustic_report_distinguishes_scored_vs_not_scored() {
+        let preset = Preset::default();
+        let goal = Goal::new(GoalKind::Shield);
+        let diagnosis = scoring::Diagnosis {
+            score: 0.55,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+
+        let no_acoustic = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let no_text = practical_report_lines(GoalKind::Shield, &no_acoustic, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(no_text.contains("acoustic masking/comfort: not scored in this run."));
+
+        let with_acoustic = evaluate_preset(
+            &preset,
+            &goal,
+            &SimulationConfig {
+                acoustic_scoring_enabled: true,
+                ..SimulationConfig::default()
+            },
+        );
+        let yes_text = practical_report_lines(GoalKind::Shield, &with_acoustic, &diagnosis)
+            .join("\n")
+            .to_lowercase();
+        assert!(yes_text.contains("acoustic masking/comfort: comfort="));
+        assert!(yes_text.contains("speech_privacy="));
     }
 
     // ── Calibrate-comfort helpers ──────────────────────────────────────
