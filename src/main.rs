@@ -16,6 +16,7 @@ mod surrogate;
 mod validate;
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ use pipeline::{
     DetailedSimulationResult, SimulationConfig, SimulationResult,
 };
 use preset::Preset;
-use scoring::{Goal, GoalKind, MetricStatus};
+use scoring::{Goal, GoalKind, GoalSemantics, MetricStatus};
 
 #[derive(Parser)]
 #[command(name = "neural-preset-optimizer")]
@@ -452,6 +453,10 @@ enum Commands {
         /// a sibling runs CSV entry next to the requested file.
         #[arg(long)]
         log_evaluations: Option<PathBuf>,
+
+        /// Write a machine-readable JSON report for single goal + single brain evaluation.
+        #[arg(long = "json-report")]
+        json_report: Option<PathBuf>,
     },
 
     /// Run disturbance resilience test — inject acoustic spike and measure recovery.
@@ -2123,6 +2128,7 @@ fn main() {
             gaba_b_rate,
             gaba_b_gain,
             log_evaluations,
+            json_report,
         } => {
             let flags = resolve_evaluate_feature_flags(
                 assr,
@@ -2147,6 +2153,7 @@ fn main() {
                 gaba_b_rate,
                 gaba_b_gain,
                 log_evaluations.as_deref(),
+                json_report.as_deref(),
             );
         }
         Commands::Disturb {
@@ -3306,6 +3313,7 @@ fn run_evaluate(
     gaba_b_rate: f64,
     gaba_b_gain: f64,
     log_evaluations_path: Option<&Path>,
+    json_report_path: Option<&Path>,
 ) {
     ensure_analysis_window_or_exit(
         "evaluate",
@@ -3369,6 +3377,10 @@ fn run_evaluate(
     };
 
     let output_mode = evaluate_output_mode(&goals, &brain_types);
+    if let Err(msg) = validate_json_report_mode(output_mode, json_report_path) {
+        eprintln!("{msg}");
+        std::process::exit(2);
+    }
 
     println!();
     println!("  Preset Evaluation");
@@ -3817,6 +3829,24 @@ fn run_evaluate(
         }
         println!();
 
+        if let Some(json_path) = json_report_path {
+            let report = build_single_evaluate_structured_report(
+                preset_path.as_path(),
+                goal_kind,
+                bt,
+                result,
+                &diagnosis,
+            );
+            write_single_evaluate_structured_report(json_path, &report).unwrap_or_else(|e| {
+                eprintln!(
+                    "Failed to write JSON report to '{}': {}",
+                    json_path.display(),
+                    e
+                );
+                std::process::exit(1);
+            });
+        }
+
         // Verdict
         let verdict_detail = match diagnosis.verdict {
             scoring::Verdict::Good => "neural rhythms align well with goal",
@@ -3857,6 +3887,28 @@ fn run_evaluate(
     }
 
     println!();
+}
+
+fn validate_json_report_mode(
+    output_mode: EvaluateOutputMode,
+    json_report_path: Option<&Path>,
+) -> Result<(), String> {
+    if json_report_path.is_some() && matches!(output_mode, EvaluateOutputMode::Matrix) {
+        return Err(
+            "--json-report is only supported for single goal and single brain evaluations"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn write_single_evaluate_structured_report(
+    output_path: &Path,
+    report: &SingleEvaluateStructuredReport,
+) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).expect("single evaluate structured report serializes");
+    std::fs::write(output_path, json)
 }
 
 fn print_comparison_matrix(
@@ -4012,6 +4064,101 @@ fn practical_report_lines(
     diagnosis: &scoring::Diagnosis,
 ) -> Vec<String> {
     let semantics = goal_kind.semantics();
+    let reasons = practical_reasons(goal_kind, diagnosis);
+    let acoustic_line = match acoustic_summary_report(result) {
+        AcousticSummaryReport::NotScored { note } => note,
+        AcousticSummaryReport::Scored {
+            comfort,
+            speech_privacy,
+        } => {
+            let comfort = comfort
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            let privacy = speech_privacy
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            format!("Acoustic masking/comfort: comfort={comfort}, speech_privacy={privacy}.")
+        }
+    };
+
+    vec![
+        "  Practical Report:".to_string(),
+        format!("    Status: {}", practical_status(result.score)),
+        format!("    Intended use: {}", semantics.product_objective),
+        format!("    Top reasons: {}", reasons.join("; ")),
+        format!(
+            "    Interpretation: Intended objective: {}. Current proxy alignment is {}.",
+            semantics.product_objective.trim_end_matches('.'),
+            practical_status(result.score)
+        ),
+        format!("    {acoustic_line}"),
+        "    Limitation: This is a model-based proxy report, not proof of human efficacy."
+            .to_string(),
+    ]
+}
+
+fn concrete_proxy_bands(proxy: &str) -> Vec<&'static str> {
+    let proxy_lc = proxy.to_lowercase();
+    let mut bands = Vec::new();
+    for band in ["delta", "theta", "alpha", "beta", "gamma"] {
+        if proxy_lc.contains(band) {
+            bands.push(band);
+        }
+    }
+    bands
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvaluateBandPowersReport {
+    delta: f64,
+    theta: f64,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AcousticSummaryReport {
+    NotScored {
+        note: String,
+    },
+    Scored {
+        comfort: Option<f64>,
+        speech_privacy: Option<f64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PracticalReportExport {
+    status: String,
+    intended_use: String,
+    top_reasons: Vec<String>,
+    interpretation: String,
+    acoustic_summary: AcousticSummaryReport,
+    limitation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SingleEvaluateStructuredReport {
+    preset_path: String,
+    goal: String,
+    brain_type: String,
+    score: f64,
+    practical_status: String,
+    goal_semantics: GoalSemantics,
+    practical_report: PracticalReportExport,
+    band_powers: EvaluateBandPowersReport,
+    dominant_frequency_hz: f64,
+    fhn_firing_rate: f64,
+    fhn_isi_cv: f64,
+    acoustic_summary: AcousticSummaryReport,
+    model_signature: crate::model_signature::ModelSignature,
+    limitations: Vec<String>,
+}
+
+fn practical_reasons(goal_kind: GoalKind, diagnosis: &scoring::Diagnosis) -> Vec<String> {
+    let semantics = goal_kind.semantics();
     let mut reasons: Vec<String> = Vec::new();
 
     let mut failing_bands = diagnosis
@@ -4051,46 +4198,70 @@ fn practical_report_lines(
     if reasons.is_empty() {
         reasons.push("no major proxy-target failures detected".to_string());
     }
-
-    let acoustic_line = if let Some(acoustic) = &result.acoustic_score {
-        let comfort = acoustic
-            .comfort_score
-            .map(|v| format!("{v:.3}"))
-            .unwrap_or_else(|| "N/A".to_string());
-        let privacy = acoustic
-            .speech_privacy
-            .map(|v| format!("{v:.3}"))
-            .unwrap_or_else(|| "N/A".to_string());
-        format!("Acoustic masking/comfort: comfort={comfort}, speech_privacy={privacy}.")
-    } else {
-        "Acoustic masking/comfort: not scored in this run.".to_string()
-    };
-
-    vec![
-        "  Practical Report:".to_string(),
-        format!("    Status: {}", practical_status(result.score)),
-        format!("    Intended use: {}", semantics.product_objective),
-        format!("    Top reasons: {}", reasons.join("; ")),
-        format!(
-            "    Interpretation: Intended objective: {}. Current proxy alignment is {}.",
-            semantics.product_objective.trim_end_matches('.'),
-            practical_status(result.score)
-        ),
-        format!("    {acoustic_line}"),
-        "    Limitation: This is a model-based proxy report, not proof of human efficacy."
-            .to_string(),
-    ]
+    reasons
 }
 
-fn concrete_proxy_bands(proxy: &str) -> Vec<&'static str> {
-    let proxy_lc = proxy.to_lowercase();
-    let mut bands = Vec::new();
-    for band in ["delta", "theta", "alpha", "beta", "gamma"] {
-        if proxy_lc.contains(band) {
-            bands.push(band);
+fn acoustic_summary_report(result: &SimulationResult) -> AcousticSummaryReport {
+    if let Some(acoustic) = &result.acoustic_score {
+        AcousticSummaryReport::Scored {
+            comfort: acoustic.comfort_score,
+            speech_privacy: acoustic.speech_privacy,
+        }
+    } else {
+        AcousticSummaryReport::NotScored {
+            note: "Acoustic masking/comfort: not scored in this run.".to_string(),
         }
     }
-    bands
+}
+
+fn build_single_evaluate_structured_report(
+    preset_path: &Path,
+    goal_kind: GoalKind,
+    brain_type: BrainType,
+    result: &SimulationResult,
+    diagnosis: &scoring::Diagnosis,
+) -> SingleEvaluateStructuredReport {
+    let semantics = goal_kind.semantics();
+    let status = practical_status(result.score).to_string();
+    let reasons = practical_reasons(goal_kind, diagnosis);
+    let acoustic_summary = acoustic_summary_report(result);
+    let interpretation = format!(
+        "Intended objective: {}. Current proxy alignment is {}.",
+        semantics.product_objective.trim_end_matches('.'),
+        status
+    );
+    let limitation = "This is a model-based proxy report, not proof of human efficacy.".to_string();
+    let practical_report = PracticalReportExport {
+        status: status.clone(),
+        intended_use: semantics.product_objective.to_string(),
+        top_reasons: reasons,
+        interpretation,
+        acoustic_summary: acoustic_summary.clone(),
+        limitation: limitation.clone(),
+    };
+
+    SingleEvaluateStructuredReport {
+        preset_path: preset_path.display().to_string(),
+        goal: goal_kind.to_string(),
+        brain_type: brain_type.to_string(),
+        score: result.score,
+        practical_status: status,
+        goal_semantics: semantics,
+        practical_report,
+        band_powers: EvaluateBandPowersReport {
+            delta: result.delta_power,
+            theta: result.theta_power,
+            alpha: result.alpha_power,
+            beta: result.beta_power,
+            gamma: result.gamma_power,
+        },
+        dominant_frequency_hz: diagnosis.dominant_freq,
+        fhn_firing_rate: diagnosis.firing_rate,
+        fhn_isi_cv: diagnosis.isi_cv,
+        acoustic_summary,
+        model_signature: result.model_signature.clone(),
+        limitations: vec![limitation],
+    }
 }
 
 fn print_preset_summary(preset: &Preset) {
@@ -6085,6 +6256,235 @@ mod tests {
             .to_lowercase();
         assert!(yes_text.contains("acoustic masking/comfort: comfort="));
         assert!(yes_text.contains("speech_privacy="));
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_contains_goal_semantics_and_status() {
+        let preset = Preset::default();
+        let goal_kind = GoalKind::Shield;
+        let goal = Goal::new(goal_kind);
+        let result = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let diagnosis = scoring::Diagnosis {
+            score: result.score,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+        let report = build_single_evaluate_structured_report(
+            Path::new("presets/the_shield_v5.json"),
+            goal_kind,
+            BrainType::Normal,
+            &result,
+            &diagnosis,
+        );
+        let report_json = serde_json::to_value(&report).expect("report should serialize");
+        assert_eq!(report.goal, "shield");
+        assert!(!report.practical_status.trim().is_empty());
+        assert_eq!(report_json["goal_semantics"]["goal"], "shield");
+        assert!(
+            report
+                .limitations
+                .iter()
+                .any(|l| l.contains("model-based proxy report"))
+        );
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_contains_band_and_model_signature() {
+        let preset = Preset::default();
+        let goal_kind = GoalKind::Shield;
+        let goal = Goal::new(goal_kind);
+        let config = SimulationConfig::default();
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let diagnosis = diagnose_detailed_result(&goal, &detailed);
+        let report = build_single_evaluate_structured_report(
+            Path::new("presets/the_shield_v5.json"),
+            goal_kind,
+            BrainType::Normal,
+            &detailed.summary,
+            &diagnosis,
+        );
+
+        for value in [
+            report.band_powers.delta,
+            report.band_powers.theta,
+            report.band_powers.alpha,
+            report.band_powers.beta,
+            report.band_powers.gamma,
+            report.dominant_frequency_hz,
+            report.fhn_firing_rate,
+        ] {
+            assert!(value.is_finite());
+        }
+        let sig_json = serde_json::to_value(&report.model_signature).expect("signature serializes");
+        assert!(sig_json["version"].as_str().is_some());
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_acoustic_summary_tracks_scored_state() {
+        let preset = Preset::default();
+        let goal_kind = GoalKind::Shield;
+        let goal = Goal::new(goal_kind);
+        let diagnosis = scoring::Diagnosis {
+            score: 0.55,
+            bands: vec![],
+            firing_rate: 6.0,
+            firing_rate_range: (4.0, 12.0),
+            firing_rate_status: scoring::MetricStatus::Pass,
+            isi_cv: 0.12,
+            target_isi_cv: Some(0.12),
+            isi_status: scoring::MetricStatus::Pass,
+            dominant_freq: 10.0,
+            verdict: scoring::Verdict::Ok,
+            performance: None,
+        };
+
+        let no_acoustic = evaluate_preset(&preset, &goal, &SimulationConfig::default());
+        let report_no = build_single_evaluate_structured_report(
+            Path::new("presets/the_shield_v5.json"),
+            goal_kind,
+            BrainType::Normal,
+            &no_acoustic,
+            &diagnosis,
+        );
+        match report_no.acoustic_summary {
+            AcousticSummaryReport::NotScored { .. } => {}
+            AcousticSummaryReport::Scored { .. } => panic!("expected not_scored acoustic summary"),
+        }
+
+        let with_acoustic = evaluate_preset(
+            &preset,
+            &goal,
+            &SimulationConfig {
+                acoustic_scoring_enabled: true,
+                ..SimulationConfig::default()
+            },
+        );
+        let report_yes = build_single_evaluate_structured_report(
+            Path::new("presets/the_shield_v5.json"),
+            goal_kind,
+            BrainType::Normal,
+            &with_acoustic,
+            &diagnosis,
+        );
+        match report_yes.acoustic_summary {
+            AcousticSummaryReport::NotScored { .. } => {
+                panic!("expected scored acoustic summary when enabled")
+            }
+            AcousticSummaryReport::Scored { .. } => {}
+        }
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_score_matches_pipeline() {
+        let preset = Preset::default();
+        let goal_kind = GoalKind::Shield;
+        let goal = Goal::new(goal_kind);
+        let config = SimulationConfig::default();
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let diagnosis = diagnose_detailed_result(&goal, &detailed);
+        let report = build_single_evaluate_structured_report(
+            Path::new("presets/the_shield_v5.json"),
+            goal_kind,
+            BrainType::Normal,
+            &detailed.summary,
+            &diagnosis,
+        );
+        assert_eq!(report.score, detailed.summary.score);
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_json_write_roundtrip() {
+        let preset = Preset::default();
+        let goal_kind = GoalKind::Shield;
+        let goal = Goal::new(goal_kind);
+        let config = SimulationConfig::default();
+        let detailed = evaluate_preset_detailed(&preset, &goal, &config);
+        let diagnosis = diagnose_detailed_result(&goal, &detailed);
+        let report = build_single_evaluate_structured_report(
+            Path::new("presets/the_shield_v5.json"),
+            goal_kind,
+            BrainType::Normal,
+            &detailed.summary,
+            &diagnosis,
+        );
+        let output_path =
+            std::env::temp_dir().join("workflow_structured_evaluate_report_json_write.json");
+        let _ = std::fs::remove_file(&output_path);
+        write_single_evaluate_structured_report(&output_path, &report)
+            .expect("json report should be written");
+        let written = std::fs::read_to_string(&output_path).expect("json report should be readable");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&written).expect("json report should parse");
+        assert_eq!(parsed["goal"], "shield");
+        assert_eq!(parsed["score"], serde_json::json!(detailed.summary.score));
+        assert_eq!(parsed["goal_semantics"]["goal"], "shield");
+        assert!(parsed["model_signature"]["version"].as_str().is_some());
+        assert!(parsed["acoustic_summary"]["status"].as_str().is_some());
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_json_report_rejected_for_goal_all_or_brain_all() {
+        let mode_goal_all = evaluate_output_mode(GoalKind::all(), &[BrainType::Normal]);
+        let err_goal = validate_json_report_mode(mode_goal_all, Some(Path::new("report.json")))
+            .expect_err("goal=all should reject --json-report");
+        assert!(err_goal.contains("--json-report is only supported"));
+
+        let mode_brain_all = evaluate_output_mode(&[GoalKind::Shield], BrainType::all());
+        let err_brain =
+            validate_json_report_mode(mode_brain_all, Some(Path::new("report.json")))
+                .expect_err("brain-type=all should reject --json-report");
+        assert!(err_brain.contains("--json-report is only supported"));
+    }
+
+    #[test]
+    fn workflow_structured_evaluate_report_cli_path_writes_json() {
+        let output_path =
+            std::env::temp_dir().join("workflow_evaluate_json_report_cli_path.json");
+        let _ = std::fs::remove_file(&output_path);
+
+        let flags = EvaluateFeatureFlags {
+            assr: false,
+            thalamic_gate: true,
+            cet: true,
+            phys_gate: false,
+        };
+        run_evaluate(
+            &PathBuf::from("presets/isolation_normal_clean.json"),
+            "isolation",
+            "normal",
+            2.1,
+            flags,
+            false,
+            false,
+            "legacy_heuristic",
+            None,
+            15.0,
+            5.0,
+            10.0,
+            None,
+            Some(output_path.as_path()),
+        );
+
+        let json = std::fs::read_to_string(&output_path).expect("json report should be written");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json should parse");
+        assert_eq!(parsed["goal"], "isolation");
+        assert!(parsed["brain_type"].as_str().is_some());
+        assert!(parsed["score"].as_f64().is_some());
+        assert_eq!(parsed["goal_semantics"]["goal"], "isolation");
+        assert!(parsed["model_signature"]["version"].as_str().is_some());
+        assert!(parsed["acoustic_summary"]["status"].as_str().is_some());
+        assert!(parsed["practical_report"]["status"].as_str().is_some());
+
+        let _ = std::fs::remove_file(output_path);
     }
 
     // ── Calibrate-comfort helpers ──────────────────────────────────────
