@@ -2,9 +2,17 @@
 
 ## Goal
 
-Refactor the current neural mass model into a versioned, scientifically clearer system that can eventually assess noise presets against human-relevant outcomes without destroying reproducibility of the existing simulator.
+Refactor the current neural mass model into a versioned, interpretable, scientifically cleaner **practical preset-evaluation tool** without destroying reproducibility of the existing simulator.
 
-The plan deliberately avoids a direct rewrite. The current model should remain available as `legacy_v1`; the scientifically corrected architecture should be built beside it as `candidate_v2`, measured against the same presets, then promoted only after validation.
+For the current product need, success means:
+
+- any preset can be evaluated reproducibly,
+- any implemented brain type and goal can be compared consistently,
+- outputs clearly explain what the model says the preset is doing,
+- model assumptions are explicit rather than hidden,
+- and unsupported human-efficacy claims are not implied by the score.
+
+The plan deliberately avoids a direct rewrite. The current model should remain available as `legacy_v1`; the cleaner architecture should be built beside it as `candidate_v2`, measured against the same presets, and used as an inspectable decision aid. External EEG / human validation remains valuable future work, but it is **not required to finish the practical NMM**.
 
 ## Why a staged refactor is required
 
@@ -24,10 +32,10 @@ Its main problem is not low engineering quality. Its main problem is that severa
 3. **Product goals** and **validated neural states** are scored with the same certainty.
 4. **Preset heuristics** and **physiological mechanisms** are not always separated in the API.
 
-The refactor therefore has two requirements:
+The refactor therefore has two practical requirements:
 
 1. Keep all current behavior reproducible.
-2. Create a cleaner second architecture that can be validated against data instead of against the old simulator.
+2. Create a cleaner second architecture that is easier to inspect, reason about, and later validate if stronger human claims become necessary.
 
 ## Scientific basis for the refactor
 
@@ -783,94 +791,92 @@ The current ADHD, anxious, aging, and high-alpha profiles are plausible simulati
 
 - Brain-type differences are inspectable, testable, and later fit to data rather than hidden in comments.
 
-## Stage 8 - Validation dataset and calibration workflow
+## Stage 8 - Practical evaluation workflow and optional validation hooks
 
 ### Objective
 
-Make future model promotion depend on human evidence.
+Finish the NMM as a reliable practical tool for preset design while keeping clear hooks for later external validation.
 
-### Scientific rationale
+### Practical rationale
 
-No neural simulator can validate preset efficacy solely by being internally plausible. The model must predict held-out EEG and behavioral outcomes better than simpler baselines.
+For current product use, the model does not need to prove that every preset causes a human EEG or behavioral outcome. It needs to:
 
-### Minimum study design
+- evaluate presets consistently,
+- expose interpretable diagnostics,
+- separate product goals from biological claims,
+- and avoid math / implementation errors that would mislead preset selection.
 
-Participants:
+Public EEG and future owned studies remain useful for checking specific model components, but they are not blockers for practical preset ranking.
 
-- neurotypical adults,
-- elevated-ADHD-trait or clinically diagnosed ADHD cohort if ADHD claims remain in scope.
+### Required implementation work for the practical NMM
 
-Stimuli:
+1. Keep the existing public-EEG benchmark layer as **optional external validation infrastructure**, not as a gating dependency for ordinary preset evaluation.
+2. Finish a practical evaluation report that clearly surfaces:
+   - score by goal,
+   - normalized band proportions,
+   - periodic / aperiodic diagnostics,
+   - temporal modulation diagnostics,
+   - ASSR diagnostics where applicable,
+   - masking / comfort / disturbance metrics,
+   - model version and scoring profile,
+   - explicit assumption / limitation labels.
+3. Ensure every supported goal says what it optimizes in plain language:
+   - product objective,
+   - neural proxy used,
+   - unsupported claims it does **not** establish.
+4. Add workflow regression tests for the presets and goals actually used in production:
+   - evaluate,
+   - matrix evaluation,
+   - optimize,
+   - disturb,
+   - export / CSV / JSON reproducibility.
+5. Keep external-validation hooks available:
+   - public EEG benchmark registry,
+   - calibration schemas,
+   - provenance-aware result formats,
+   - but do not require them for practical-NMM completion.
 
-- controlled factorial design over:
-  - carrier color,
-  - modulation rate,
-  - modulation depth,
-  - reverb,
-  - movement,
-  - SPL.
+### Acceptance criteria for the practical NMM
 
-Measures:
+- Any preset can be evaluated reproducibly against any implemented brain type and goal.
+- Reports make it easy to explain *why* a preset scored well or poorly.
+- Product goals and biological claims are clearly separated.
+- Unsupported claims are labeled instead of implied.
+- Existing production workflows are regression-tested.
+- External EEG validation can be added later without rewriting the runtime model.
 
-- EEG:
-  - periodic peaks,
-  - aperiodic exponent and offset,
-  - PLV / envelope PLV,
-  - alpha peak frequency,
-  - asymmetry where relevant.
-- Behavioral:
-  - vigilance / CPT-style outcomes for attention claims,
-  - task performance if claiming focus benefit.
-- Acoustic / subjective:
-  - comfort,
-  - irritation,
-  - masking effectiveness.
-- Sleep:
-  - separate protocol if sleep claims remain in scope,
-  - closed-loop design required for slow-wave enhancement claims.
+## Stage 9 - Optional future validation and promotion policy
 
-### Required implementation work
+### Objective
 
-1. Add dataset schema and experiment identifiers.
-2. Add calibration scripts outside the runtime path.
-3. Fit:
+Provide the path for stronger human-efficacy claims later, without blocking current practical use.
+
+### When this stage becomes necessary
+
+Do Stage 9 only if you later want to say things like:
+
+- this preset improves human focus,
+- this profile is validated for ADHD users,
+- this sleep preset changes sleep physiology,
+- or `candidate_v2` should replace `legacy_v1` as a scientifically stronger default.
+
+### Future validation work
+
+1. Collect or use suitable human datasets for the specific claims in scope.
+2. Fit:
    - arousal model,
    - brain-profile parameters,
    - scoring weights,
    - uncertainty estimates.
-4. Compare candidate model against simple baselines:
-   - acoustic-only baseline,
-   - modulation-only baseline,
-   - legacy-v1 score baseline.
+3. Compare against simple baselines:
+   - acoustic-only,
+   - modulation-only,
+   - legacy-v1.
+4. Promote only components that improve held-out prediction without worsening safety / acoustic constraints.
 
-### Acceptance criteria
+### Future promotion rule
 
-- Candidate model improves held-out prediction over simpler baselines.
-- Failure cases are documented.
-- Calibration artifacts are versioned.
-
-## Stage 9 - Promotion policy
-
-### Objective
-
-Prevent plausible but unvalidated changes from becoming defaults.
-
-### Promotion rule
-
-No `candidate_v2` component becomes default unless:
-
-1. it improves held-out prediction of human data,
-2. it does not worsen safety / acoustic constraints,
-3. it survives prospective validation,
-4. and it remains interpretable enough to diagnose failure.
-
-### Required implementation work
-
-1. Keep side-by-side reporting:
-   - `legacy_v1`
-   - `candidate_v2`
-2. Add comparison reports.
-3. Add deprecation process only after evidence supports it.
+No claim stronger than “practical model recommendation” should be promoted unless it is supported by appropriate human data.
 
 ## Recommended implementation order
 
@@ -882,8 +888,8 @@ No `candidate_v2` component becomes default unless:
 6. Stage 5 - explicit arousal model abstraction.
 7. Stage 6 - multi-profile scoring.
 8. Stage 7 - brain-type redesign.
-9. Stage 8 - human validation / calibration.
-10. Stage 9 - evidence-based promotion.
+9. Stage 8 - practical evaluation workflow and optional validation hooks.
+10. Stage 9 - optional future validation / evidence-based promotion.
 
 ## What should not be done early
 

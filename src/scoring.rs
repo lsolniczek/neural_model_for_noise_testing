@@ -23,6 +23,41 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalEvidenceLevel {
+    PracticalModelHeuristic,
+    ComponentSupportedButNotGoalValidated,
+    RequiresHumanValidationForEfficacyClaim,
+}
+
+impl GoalEvidenceLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GoalEvidenceLevel::PracticalModelHeuristic => "practical_model_heuristic",
+            GoalEvidenceLevel::ComponentSupportedButNotGoalValidated => {
+                "component_supported_but_not_goal_validated"
+            }
+            GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim => {
+                "requires_human_validation_for_efficacy_claim"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GoalSemantics {
+    pub goal: GoalKind,
+    pub plain_language_purpose: &'static str,
+    pub product_objective: &'static str,
+    pub primary_neural_proxies: &'static [&'static str],
+    pub primary_acoustic_proxies: &'static [&'static str],
+    pub best_use_cases: &'static [&'static str],
+    pub unsupported_claims: &'static [&'static str],
+    pub evidence_level: GoalEvidenceLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GoalKind {
     DeepRelaxation,
     Focus,
@@ -86,6 +121,101 @@ impl GoalKind {
             GoalKind::Flow,
             GoalKind::Ignition,
         ]
+    }
+
+    pub fn semantics(self) -> GoalSemantics {
+        match self {
+            GoalKind::Focus => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Active attention profile for cognitively demanding tasks.",
+                product_objective: "Prioritize a focused, task-engaged neural profile for work sessions.",
+                primary_neural_proxies: &["beta prominence", "moderate frontal-theta support", "stable mid-high firing rate"],
+                primary_acoustic_proxies: &["none (legacy neural score primary)", "optional masking/privacy metrics only when acoustic scoring is enabled"],
+                best_use_cases: &["single-user concentration sessions", "structured task blocks"],
+                unsupported_claims: &["Does not prove human attention improvement.", "Does not prove clinical efficacy for ADHD or any disorder."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+            GoalKind::DeepWork => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Sustained calm productivity profile.",
+                product_objective: "Favor alpha-dominant sustained-work conditions over high-arousal vigilance.",
+                primary_neural_proxies: &["alpha dominance", "supportive theta", "moderate firing regularity"],
+                primary_acoustic_proxies: &["none (legacy neural score primary)"],
+                best_use_cases: &["long writing/coding blocks", "low-interruption desk work"],
+                unsupported_claims: &["Does not prove improved output quality or productivity.", "Does not prove reduced cognitive fatigue in humans."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+            GoalKind::Sleep => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Sleep-onset-friendly low-arousal profile.",
+                product_objective: "Bias presets toward transition-into-sleep proxy patterns, not active cognition.",
+                primary_neural_proxies: &["theta-dominant with emerging delta", "suppressed beta/gamma", "low firing-rate regime"],
+                primary_acoustic_proxies: &["low high-frequency fraction preference", "comfort-oriented spectral tilt priors"],
+                best_use_cases: &["pre-sleep wind-down", "bedtime ambient masking"],
+                unsupported_claims: &["Does not prove slow-wave enhancement.", "Does not prove sleep memory consolidation benefit.", "Does not prove treatment of insomnia or sleep disorders."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+            GoalKind::DeepRelaxation => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Low-stress relaxation profile.",
+                product_objective: "Encourage calm-state neural proxies and reduced high-frequency activation.",
+                primary_neural_proxies: &["theta+alpha co-dominance", "suppressed beta/gamma", "low firing-rate regime"],
+                primary_acoustic_proxies: &["comfort-oriented spectral tilt", "low HF energy preference"],
+                best_use_cases: &["recovery breaks", "evening decompression"],
+                unsupported_claims: &["Does not prove clinical anxiety reduction.", "Does not prove long-term stress biomarker improvement."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+            GoalKind::Meditation => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Focused-meditative proxy profile.",
+                product_objective: "Align with concentrative meditation-like oscillatory proxies.",
+                primary_neural_proxies: &["theta/alpha co-dominance", "low beta/gamma", "balanced hemispheric tendency"],
+                primary_acoustic_proxies: &["comfort-oriented acoustic profile"],
+                best_use_cases: &["guided breath sessions", "quiet contemplative practice"],
+                unsupported_claims: &["Does not prove meditative depth.", "Does not prove psychiatric or cognitive therapeutic benefit."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+            GoalKind::Isolation => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Neutral masking/isolation profile.",
+                product_objective: "Support acoustic privacy and speech masking without targeting a specific cognitive state.",
+                primary_neural_proxies: &["flat band-distribution preference", "neutral cortical-state proxy"],
+                primary_acoustic_proxies: &["speech privacy", "speech-band masking ratio", "comfort proxy"],
+                best_use_cases: &["open office masking", "privacy-focused ambient bed"],
+                unsupported_claims: &["Does not prove cognitive enhancement.", "Does not prove better learning, memory, or focus outcomes."],
+                evidence_level: GoalEvidenceLevel::PracticalModelHeuristic,
+            },
+            GoalKind::Shield => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Masking-friendly sustained focus support profile.",
+                product_objective: "Blend masking/privacy utility with a stable attention-support neural proxy.",
+                primary_neural_proxies: &["alpha+beta stable balance", "low theta mind-wandering proxy", "regular mid-rate firing"],
+                primary_acoustic_proxies: &["speech privacy", "speech-band masking ratio", "comfort proxy"],
+                best_use_cases: &["distraction-heavy work environments", "focus sessions requiring masking"],
+                unsupported_claims: &["Does not prove human focus improvement.", "Does not prove universal distraction resistance.", "Does not prove clinical efficacy."],
+                evidence_level: GoalEvidenceLevel::ComponentSupportedButNotGoalValidated,
+            },
+            GoalKind::Flow => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Rhythmic relaxed-engagement profile.",
+                product_objective: "Target a calm-but-engaged proxy state between deep relaxation and high-vigilance focus.",
+                primary_neural_proxies: &["alpha-dominant with moderate beta", "rhythmic moderate firing", "low delta drowsiness"],
+                primary_acoustic_proxies: &["none (legacy neural score primary)"],
+                best_use_cases: &["creative sessions", "sustained medium-intensity cognitive work"],
+                unsupported_claims: &["Does not prove psychological flow-state attainment.", "Does not prove performance gains on creative tasks."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+            GoalKind::Ignition => GoalSemantics {
+                goal: self,
+                plain_language_purpose: "Exploratory activation profile.",
+                product_objective: "Explore higher-activation ASSR/gamma-leaning proxy conditions.",
+                primary_neural_proxies: &["elevated beta/gamma targets", "high firing-rate regime", "entrainment-weighted path"],
+                primary_acoustic_proxies: &["none (legacy neural score primary)"],
+                best_use_cases: &["controlled exploratory prototyping", "research-oriented activation comparisons"],
+                unsupported_claims: &["Does not prove ADHD treatment efficacy.", "Does not prove therapeutic activation benefit.", "Does not prove safety or suitability for all users."],
+                evidence_level: GoalEvidenceLevel::RequiresHumanValidationForEfficacyClaim,
+            },
+        }
     }
 }
 
@@ -1840,6 +1970,53 @@ mod tests {
     #[test]
     fn goal_kind_all_returns_nine() {
         assert_eq!(GoalKind::all().len(), 9);
+    }
+
+    #[test]
+    fn every_goal_has_semantics() {
+        for &kind in GoalKind::all() {
+            let semantics = kind.semantics();
+            assert_eq!(semantics.goal, kind);
+        }
+    }
+
+    #[test]
+    fn semantics_required_fields_are_non_empty() {
+        for &kind in GoalKind::all() {
+            let s = kind.semantics();
+            assert!(!s.plain_language_purpose.trim().is_empty());
+            assert!(!s.product_objective.trim().is_empty());
+            assert!(!s.primary_neural_proxies.is_empty());
+            assert!(!s.primary_acoustic_proxies.is_empty());
+            assert!(!s.best_use_cases.is_empty());
+            assert!(!s.unsupported_claims.is_empty());
+        }
+    }
+
+    #[test]
+    fn sleep_semantics_disclaims_slow_wave_and_memory() {
+        let s = GoalKind::Sleep.semantics();
+        let all_claims = s.unsupported_claims.join(" | ").to_lowercase();
+        assert!(all_claims.contains("slow-wave"));
+        assert!(all_claims.contains("memory"));
+    }
+
+    #[test]
+    fn shield_and_isolation_separate_masking_from_cognitive_claims() {
+        let shield = GoalKind::Shield.semantics();
+        let isolation = GoalKind::Isolation.semantics();
+        assert!(shield.product_objective.to_lowercase().contains("mask"));
+        assert!(isolation.product_objective.to_lowercase().contains("privacy"));
+        assert!(shield
+            .unsupported_claims
+            .join(" | ")
+            .to_lowercase()
+            .contains("focus improvement"));
+        assert!(isolation
+            .unsupported_claims
+            .join(" | ")
+            .to_lowercase()
+            .contains("cognitive enhancement"));
     }
 
     #[test]

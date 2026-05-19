@@ -3456,6 +3456,10 @@ fn run_evaluate(
 
         println!("  Brain type: {} ({})", bt, bt.description());
         println!("  Goal:       {}", goal_kind);
+        for line in goal_meaning_lines(goal_kind) {
+            println!("{line}");
+        }
+        println!();
         print_model_signature(&result.model_signature);
         if fusion_applied {
             println!("  Score:      {:.4} (fused)", result.score);
@@ -3932,6 +3936,37 @@ fn print_acoustic_score_summary(acoustic: &crate::acoustic_score::AcousticScoreR
         println!("    {:<24} {:>8.3}", "Fused score", fused_score);
     }
     println!();
+}
+
+fn goal_meaning_lines(goal_kind: GoalKind) -> Vec<String> {
+    let semantics = goal_kind.semantics();
+    let what_score_means = format!(
+        "high score means stronger alignment with {} proxy targets",
+        goal_kind
+    );
+    let unsupported = semantics
+        .unsupported_claims
+        .iter()
+        .map(|claim| {
+            claim
+                .trim()
+                .trim_end_matches('.')
+                .strip_prefix("Does not prove ")
+                .or_else(|| claim.trim().strip_prefix("Does not prove"))
+                .unwrap_or(claim.trim())
+                .trim()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    vec![
+        "  Goal meaning:".to_string(),
+        format!("    Purpose: {}", semantics.plain_language_purpose),
+        format!("    Objective: {}", semantics.product_objective),
+        format!("    Score meaning: {}", what_score_means),
+        format!("    Does not prove: {}", unsupported),
+        format!("    Evidence level: {}", semantics.evidence_level.as_str()),
+    ]
 }
 
 fn print_preset_summary(preset: &Preset) {
@@ -5382,6 +5417,12 @@ mod tests {
         let exported_score = exported["meta"]["score"]
             .as_f64()
             .expect("meta.score should be f64");
+        let exported_goal_purpose = exported["meta"]["goal_semantics"]["plain_language_purpose"]
+            .as_str()
+            .expect("meta.goal_semantics.plain_language_purpose should be string");
+        let exported_goal_id = exported["meta"]["goal_semantics"]["goal"]
+            .as_str()
+            .expect("meta.goal_semantics.goal should be string");
         let exported_beta = exported["analysis"]["band_powers"]["beta"]
             .as_f64()
             .expect("analysis.band_powers.beta should be f64");
@@ -5401,6 +5442,8 @@ mod tests {
 
         assert!((exported_result.score - direct.score).abs() < 1e-12);
         assert!((exported_score - direct.score).abs() < 1e-12);
+        assert!(!exported_goal_purpose.is_empty());
+        assert_eq!(exported_goal_id, "focus");
         assert!((exported_beta - direct.beta_power).abs() < 1e-12);
         assert_eq!(exported_version, "legacy_v1");
         assert_eq!(exported_audio_sr, crate::pipeline::SAMPLE_RATE as u64);
@@ -5549,6 +5592,17 @@ mod tests {
             matrix[0][0],
             direct.score
         );
+    }
+
+    #[test]
+    fn single_goal_meaning_block_contains_purpose_and_disclaimer() {
+        let lines = goal_meaning_lines(GoalKind::Sleep);
+        let text = lines.join("\n").to_lowercase();
+        assert!(text.contains("goal meaning"));
+        assert!(text.contains("purpose:"));
+        assert!(text.contains("does not prove:"));
+        assert!(!text.contains("does not prove: does not prove"));
+        assert!(text.contains("slow-wave"));
     }
 
     // ── Calibrate-comfort helpers ──────────────────────────────────────

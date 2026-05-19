@@ -634,6 +634,15 @@ cargo test -- --test-threads=1
 
 Available values for the `--goal` option. All 9 goals are iterated when `--goal all` is used.
 
+Single-goal `evaluate` output now prints a `Goal meaning` block with:
+- purpose,
+- product objective,
+- what a high score means (proxy alignment),
+- what the goal does not prove,
+- evidence level.
+
+These semantics are also machine-readable in export metadata as `meta.goal_semantics`.
+
 | Goal | Aliases | Target Brain State | Band/FHN Weights | Carrier PLV | Envelope PLV (CET) | Asymmetry Penalty |
 |------|---------|-------------------|:-:|:-:|:-:|:-:|
 | `focus` | `concentration` | Beta dominant, frontal theta. Active task engagement | 0.70 / 0.30 | 100% | 0% | 5% (thr 0.5) |
@@ -747,6 +756,16 @@ Optimized presets are exported with metadata:
 {
   "meta": {
     "goal": "focus",
+    "goal_semantics": {
+      "goal": "focus",
+      "plain_language_purpose": "...",
+      "product_objective": "...",
+      "primary_neural_proxies": ["..."],
+      "primary_acoustic_proxies": ["..."],
+      "best_use_cases": ["..."],
+      "unsupported_claims": ["..."],
+      "evidence_level": "requires_human_validation_for_efficacy_claim"
+    },
     "score": 0.847,
     "generated_at": "2026-04-04T14:30:22+00:00",
     "optimizer_generations": 87,

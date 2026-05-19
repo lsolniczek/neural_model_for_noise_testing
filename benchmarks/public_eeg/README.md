@@ -2,7 +2,7 @@
 
 This benchmark layer is offline-only and does not change runtime NMM scoring behavior.
 
-It exists to test NMM subcomponents against public EEG datasets before any future promotion decision.
+It exists to test selected NMM subcomponents against public EEG datasets when stronger external validation is desired. It is **optional validation infrastructure**, not a prerequisite for using the NMM as a practical preset-design tool.
 
 ## Evidence categories
 
@@ -42,7 +42,7 @@ Evidence promotion also requires:
 ## Scope boundaries
 
 Public benchmarks can strengthen component-level validity (entrainment, modulation features, aperiodic extraction).
-They do **not** by themselves prove final preset efficacy or clinical claims.
+They do **not** by themselves prove final preset efficacy or clinical claims, and ordinary preset evaluation does not require them.
 
 Sleep claims require separate protocol evidence and are not validated by daytime attention public datasets.
 

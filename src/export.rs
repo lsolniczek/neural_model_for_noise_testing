@@ -5,7 +5,7 @@ use crate::model_signature::ModelSignature;
 /// making it trivial to load in iOS/WASM apps.
 use crate::pipeline::SimulationResult;
 use crate::preset::Preset;
-use crate::scoring::GoalKind;
+use crate::scoring::{GoalKind, GoalSemantics};
 use chrono::Utc;
 use serde::Serialize;
 use std::path::Path;
@@ -20,6 +20,7 @@ pub struct PresetExport {
 #[derive(Serialize)]
 pub struct ExportMeta {
     pub goal: String,
+    pub goal_semantics: GoalSemantics,
     pub score: f64,
     /// Stage 0 compact serialized config object for exact model provenance.
     pub model_signature: ModelSignature,
@@ -56,6 +57,7 @@ pub fn export_preset(
     let export = PresetExport {
         meta: ExportMeta {
             goal: goal.to_string(),
+            goal_semantics: goal.semantics(),
             score: result.score,
             model_signature: result.model_signature.clone(),
             generated_at: Utc::now().to_rfc3339(),
