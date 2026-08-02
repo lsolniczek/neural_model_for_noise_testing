@@ -1,0 +1,209 @@
+{
+  "providers": [
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/the_flow_v4.json",
+          "sha256": "sha256:f530c2748069ddc78d8e2e075512000351dd51186cfd342e0f86f06cada55b6b",
+          "snapshot_path": "inputs/presets/the_flow_v4.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Flow v4 is likely, but carriers, levels, and positions differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/NormalFlow1PresetProvider.swift",
+      "provider_sha256": "sha256:b3974cea3a6f89c1fba0a4d1b37d1fcae14b17242903bab2a1ab2468c60dd035",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/NormalFlow1PresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/normal_set_ignition_v3.json",
+          "sha256": "sha256:7697a12767d981bd89ff9fdb48cf276efe6f612ea63e8556faec61c20c97a44e",
+          "snapshot_path": "inputs/presets/normal_set_ignition_v3.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Both identify as Ignition v3; the JSON has seven objects.",
+      "provider_path": "noise_generator_app/model/PresetProviders/NormalIgnition1PresetProvider.swift",
+      "provider_sha256": "sha256:f47b238701a1349066ba725f56417ac3e0de5301e687ea8ca12ded7cfa9e3071",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/NormalIgnition1PresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/unwind/relax_v1.json",
+          "sha256": "sha256:0ca6dedfe9852978b78643c44488501ac22c71c86b2623ec8a60feb38e2a1a9f",
+          "snapshot_path": "inputs/presets/unwind/relax_v1.json"
+        },
+        {
+          "preset_path": "presets/normal_set_deep_relax.json",
+          "sha256": "sha256:40d04acef09f549133a2f59b9f276187ed68b6f76e9f952e7a91a90cc3cc237c",
+          "snapshot_path": "inputs/presets/normal_set_deep_relax.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Relaxation intent only; no canonical identity is asserted.",
+      "provider_path": "noise_generator_app/model/PresetProviders/NormalRelax1PresetProvider.swift",
+      "provider_sha256": "sha256:2a8dd90162b3958ff803b91c6cf1a9c5bbcf649e3ae8a0080d26c52533946f39",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/NormalRelax1PresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/normal_set_reset.json",
+          "sha256": "sha256:e4c3e9ffe9b24a1d8280c80ed7868611452f266c19544988384060fc3b590c3f",
+          "snapshot_path": "inputs/presets/normal_set_reset.json"
+        },
+        {
+          "preset_path": "presets/unwind/reset_v1.json",
+          "sha256": "sha256:6e6a0d00f428586c68ca8a4e2fbc86a7ac5f20bb319bcf92e8b4bf199ba79493",
+          "snapshot_path": "inputs/presets/unwind/reset_v1.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Reset intent only; no canonical identity is asserted.",
+      "provider_path": "noise_generator_app/model/PresetProviders/NormalReset1PresetProvider.swift",
+      "provider_sha256": "sha256:0b76043dff335e085404b82b29c48e174bf1c0713ed4d16127c1b99cae3da20d",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/NormalReset1PresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/normal_set_shield_v6.json",
+          "sha256": "sha256:76d432abcbee31a058f419cee9853b725bc7b43856a4811efbac766773726964",
+          "snapshot_path": "inputs/presets/normal_set_shield_v6.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Known room-coordinate and renderer mismatch.",
+      "provider_path": "noise_generator_app/model/PresetProviders/NormalShield1PresetProvider.swift",
+      "provider_sha256": "sha256:c3bd812f76ff6019dc5286c8e311b3f0a61e42a78b10462bda2e85920850987a",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/NormalShield1PresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_black.json",
+          "sha256": "sha256:e223a33a64e372c68780f8bc17fcde27f63bc7df2a6ca54362bcfc7375b902a5",
+          "snapshot_path": "inputs/presets/showcase_black.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/BlackPresetProvider.swift",
+      "provider_sha256": "sha256:947187d9cea1b720abdb72320f44b96b78fb1ab5f9653cab941faf4a18a78c90",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/BlackPresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_blue.json",
+          "sha256": "sha256:a0abdba24b1dcc6133a628429f0d32e5cb4d583755f226690f24a0f1af7c9784",
+          "snapshot_path": "inputs/presets/showcase_blue.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/BluePresetProvider.swift",
+      "provider_sha256": "sha256:8dcfce1e447fb22c6a0a4a538751a5100e5923e7d756711790590fc8d794735b",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/BluePresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_brown.json",
+          "sha256": "sha256:7831d66dff5d61767ca385bd45bac99f5d46601cffe78e11e92ff7e9087fe1f5",
+          "snapshot_path": "inputs/presets/showcase_brown.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/BrownPresetProvider.swift",
+      "provider_sha256": "sha256:a587259addb2e7a1e8181c70e3f65d6a2ddaf85b30958a51e8fe95add00f25ee",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/BrownPresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_green.json",
+          "sha256": "sha256:0f68e14d7fd9d83e88279c9344e07d6e5764be327126ac468f6c6d0db3bc7d15",
+          "snapshot_path": "inputs/presets/showcase_green.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/GreenPresetProvider.swift",
+      "provider_sha256": "sha256:e2321717535657b996ff909722563aae40f6ac1372b7a7f1b0152be379b95f0f",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/GreenPresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_grey.json",
+          "sha256": "sha256:860418e6c137b5e992f929f9d4d8c9dafec7ae90a8d69956665837b85e7bfdf7",
+          "snapshot_path": "inputs/presets/showcase_grey.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/GreyPresetProvider.swift",
+      "provider_sha256": "sha256:68467b2dd6c9160929e79ec345fcf561e84bb2c7b224fc8eb1e2e25cda3ce116",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/GreyPresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_pink.json",
+          "sha256": "sha256:76f8106febddc9ac9a3ffddf880f516a1bf084eea0d1846babfdda2c8a9e6653",
+          "snapshot_path": "inputs/presets/showcase_pink.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/PinkPresetProvider.swift",
+      "provider_sha256": "sha256:9eb129d0f1e84f15ff225b5ecc554a9ddf879cdd8bb90395fd490b35f3af8445",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/PinkPresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_ssn.json",
+          "sha256": "sha256:39c5428dcb80f8d241a70859afdf5bec17514b12c9b9e0057655e35262586cf9",
+          "snapshot_path": "inputs/presets/showcase_ssn.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/SSNPresetProvider.swift",
+      "provider_sha256": "sha256:19a59677f599d24bb0bb742299ed4108a4ba37b420c261d358b81ba46b3b2902",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/SSNPresetProvider.swift",
+      "relationship_status": "candidate_only"
+    },
+    {
+      "candidate_presets": [
+        {
+          "preset_path": "presets/showcase_white.json",
+          "sha256": "sha256:44a82d5122093752f4b0f344254497b8db2eb5c548861ee4cfaab935ba421bdf",
+          "snapshot_path": "inputs/presets/showcase_white.json"
+        }
+      ],
+      "evidence": "provider and preset naming/version review",
+      "known_mismatches": "Colour/name counterpart only; renderer settings differ.",
+      "provider_path": "noise_generator_app/model/PresetProviders/PureColors/WhitePresetProvider.swift",
+      "provider_sha256": "sha256:7a2c831f62a0767875541893508a13eea318c47777157772406daa50daeefbbb",
+      "provider_snapshot_path": "inputs/source-evidence/ios/noise_generator_app/model/PresetProviders/PureColors/WhitePresetProvider.swift",
+      "relationship_status": "candidate_only"
+    }
+  ]
+}

@@ -1,0 +1,493 @@
+warning: unnecessary parentheses around method argument
+   --> src/auditory/room_impulse.rs:274:21
+    |
+274 |         result.push((dry_mix as f32 * dry + wet_mix as f32 * wet));
+    |                     ^                                           ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+274 -         result.push((dry_mix as f32 * dry + wet_mix as f32 * wet));
+274 +         result.push(dry_mix as f32 * dry + wet_mix as f32 * wet);
+    |
+
+warning: unnecessary parentheses around block return value
+  --> src/validate.rs:47:13
+   |
+47 |             (state as f64 / u64::MAX as f64)
+   |             ^                              ^
+   |
+help: remove these parentheses
+   |
+47 -             (state as f64 / u64::MAX as f64)
+47 +             state as f64 / u64::MAX as f64
+   |
+
+warning: unused variable: `v0`
+    --> src/neural/jansen_rit.rs:1039:5
+     |
+1039 |     v0: f64,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_v0`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/neural/jansen_rit.rs:1330:9
+     |
+1330 |     let mut analysis = JansenRitModel::new(sample_rate);
+     |         ----^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `v0`
+    --> src/neural/jansen_rit.rs:1381:5
+     |
+1381 |     v0: f64,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_v0`
+
+warning: unused variable: `brightness`
+    --> src/scoring.rs:1293:9
+     |
+1293 |         brightness: f64,
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_brightness`
+
+warning: unused variable: `peak_f`
+   --> src/validate.rs:161:14
+    |
+161 |         let (peak_f, peak_p) = peak_in_range(&freqs, &powers, freq - tolerance, freq + tolerance);
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_peak_f`
+
+warning: unused variable: `n`
+   --> src/validate.rs:550:9
+    |
+550 |     let n = (SAMPLE_RATE * duration) as usize;
+    |         ^ help: if this is intentional, prefix it with an underscore: `_n`
+
+warning: unused variable: `n`
+    --> src/validate.rs:1181:9
+     |
+1181 |     let n = (SAMPLE_RATE * duration) as usize;
+     |         ^ help: if this is intentional, prefix it with an underscore: `_n`
+
+warning: unused variable: `n`
+    --> src/validate.rs:1746:9
+     |
+1746 |     let n = (SAMPLE_RATE * duration) as usize;
+     |         ^ help: if this is intentional, prefix it with an underscore: `_n`
+
+warning: unused variable: `bt_i`
+    --> src/validate.rs:1813:18
+     |
+1813 |             let (bt_i, di, ti, ai, bi_v, gi) = spectral_profiles[i];
+     |                  ^^^^ help: if this is intentional, prefix it with an underscore: `_bt_i`
+
+warning: unused variable: `bt_j`
+    --> src/validate.rs:1814:18
+     |
+1814 |             let (bt_j, dj, tj, aj, bj, gj) = spectral_profiles[j];
+     |                  ^^^^ help: if this is intentional, prefix it with an underscore: `_bt_j`
+
+warning: fields `mean_rate_hz` and `isi_cv` are never read
+   --> src/auditory/physiological_thalamic_gate.rs:340:5
+    |
+339 | struct TcFiringStats {
+    |        ------------- fields in this struct
+340 |     mean_rate_hz: f64,
+    |     ^^^^^^^^^^^^
+341 |     isi_cv: f64,
+    |     ^^^^^^
+    |
+    = note: `TcFiringStats` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `cached_stats` is never read
+   --> src/auditory/physiological_thalamic_gate.rs:422:5
+    |
+416 | pub struct PhysiologicalThalamicGate {
+    |            ------------------------- field in this struct
+...
+422 |     cached_stats: Option<TcFiringStats>,
+    |     ^^^^^^^^^^^^
+
+warning: field `c7` is never read
+   --> src/neural/jansen_rit.rs:175:5
+    |
+154 | pub struct JansenRitModel {
+    |            -------------- field in this struct
+...
+175 |     c7: f64,
+    |     ^^
+
+warning: method `brightness_modifier` is never used
+    --> src/scoring.rs:1189:8
+     |
+1109 | impl Goal {
+     | --------- method in this implementation
+...
+1189 |     fn brightness_modifier(&self, brightness: f64) -> f64 {
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: `neural_preset_optimizer` (lib) generated 16 warnings (run `cargo fix --lib -p neural_preset_optimizer` to apply 12 suggestions)
+warning: unused import: `DEFAULT_CET_CUTOFF_HZ`
+  --> src/auditory/mod.rs:10:43
+   |
+10 | pub use crossover::{ButterworthCrossover, DEFAULT_CET_CUTOFF_HZ};
+   |                                           ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CochlearFeatures`, `ModulationBandPowers`, and `ModulationPsdPoint`
+  --> src/auditory/mod.rs:12:69
+   |
+12 |     extract_candidate_auditory_features, CandidateAuditoryFeatures, CochlearFeatures,
+   |                                                                     ^^^^^^^^^^^^^^^^
+13 |     LatentStateEstimate, ModulationBandPowers, ModulationPsdPoint, TemporalModulationFeatures,
+   |                          ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BandGroupOutput`
+  --> src/auditory/mod.rs:15:21
+   |
+15 | pub use gammatone::{BandGroupOutput, GammatoneFilterbank, BAND_LABELS};
+   |                     ^^^^^^^^^^^^^^^
+
+warning: unused import: `ArousalEstimate`
+  --> src/auditory/mod.rs:18:43
+   |
+18 | pub use thalamic_gate::{estimate_arousal, ArousalEstimate, ArousalModel, ArousalSource, ThalamicGate};
+   |                                           ^^^^^^^^^^^^^^^
+
+warning: unused imports: `CandidateRhythmModuleResponse` and `CandidateRhythmModule`
+  --> src/neural/mod.rs:11:55
+   |
+11 |     simulate_candidate_v2, CandidateCorticalResponse, CandidateRhythmModule,
+   |                                                       ^^^^^^^^^^^^^^^^^^^^^
+12 |     CandidateRhythmModuleResponse,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `JansenRitModel`
+  --> src/neural/mod.rs:17:5
+   |
+17 |     JansenRitModel, JansenRitResult,
+   |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `WilsonCowanModel` and `WilsonCowanResult`
+  --> src/neural/mod.rs:20:24
+   |
+20 | pub use wilson_cowan::{WilsonCowanModel, WilsonCowanResult};
+   |                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Individual`
+ --> src/optimizer/mod.rs:3:57
+  |
+3 | pub use differential_evolution::{DifferentialEvolution, Individual};
+  |                                                         ^^^^^^^^^^
+
+warning: method `prints_single_goal_sections` is never used
+    --> src/main.rs:3297:8
+     |
+3296 | impl EvaluateOutputMode {
+     | ----------------------- method in this implementation
+3297 |     fn prints_single_goal_sections(self) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `AcousticScoreConfig` is never constructed
+ --> src/acoustic_score.rs:8:12
+  |
+8 | pub struct AcousticScoreConfig {
+  |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `is_finite` is never used
+   --> src/acoustic_score.rs:148:12
+    |
+130 | impl RenderedStereoAudio {
+    | ------------------------ method in this implementation
+...
+148 |     pub fn is_finite(&self) -> bool {
+    |            ^^^^^^^^^
+
+warning: associated items `disabled`, `apply`, and `compute_input_scale_modifier` are never used
+   --> src/auditory/assr.rs:150:12
+    |
+135 | impl AssrTransfer {
+    | ----------------- associated items in this implementation
+...
+150 |     pub fn disabled() -> Self {
+    |            ^^^^^^^^
+...
+188 |     pub fn apply(&self, bands: &mut [Vec<f64>; 4], sample_rate: f64) {
+    |            ^^^^^
+...
+310 |     pub fn compute_input_scale_modifier(&self, preset: &Preset) -> f64 {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RECONSTRUCTION_TOL` is never used
+  --> src/auditory/crossover.rs:59:11
+   |
+59 | pub const RECONSTRUCTION_TOL: f64 = 1e-12;
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: method `reset` is never used
+   --> src/auditory/gammatone.rs:128:8
+    |
+ 77 | impl GammatoneChannel {
+    | --------------------- method in this implementation
+...
+128 |     fn reset(&mut self) {
+    |        ^^^^^
+
+warning: methods `num_channels`, `center_frequencies`, `process`, `process_to_neural_input`, and `reset` are never used
+   --> src/auditory/gammatone.rs:187:12
+    |
+146 | impl GammatoneFilterbank {
+    | ------------------------ methods in this implementation
+...
+187 |     pub fn num_channels(&self) -> usize {
+    |            ^^^^^^^^^^^^
+...
+191 |     pub fn center_frequencies(&self) -> Vec<f64> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+199 |     pub fn process(&mut self, audio: &[f32]) -> Vec<Vec<f64>> {
+    |            ^^^^^^^
+...
+220 |     pub fn process_to_neural_input(&mut self, audio: &[f32]) -> Vec<f64> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+362 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: fields `mean_rate_hz` and `isi_cv` are never read
+   --> src/auditory/physiological_thalamic_gate.rs:340:5
+    |
+339 | struct TcFiringStats {
+    |        ------------- fields in this struct
+340 |     mean_rate_hz: f64,
+    |     ^^^^^^^^^^^^
+341 |     isi_cv: f64,
+    |     ^^^^^^
+    |
+    = note: `TcFiringStats` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `arousal` and `cached_stats` are never read
+   --> src/auditory/physiological_thalamic_gate.rs:418:5
+    |
+416 | pub struct PhysiologicalThalamicGate {
+    |            ------------------------- fields in this struct
+417 |     enabled: bool,
+418 |     arousal: f64,
+    |     ^^^^^^^
+...
+422 |     cached_stats: Option<TcFiringStats>,
+    |     ^^^^^^^^^^^^
+
+warning: associated items `disabled`, `is_enabled`, and `arousal` are never used
+   --> src/auditory/physiological_thalamic_gate.rs:459:12
+    |
+425 | impl PhysiologicalThalamicGate {
+    | ------------------------------ associated items in this implementation
+...
+459 |     pub fn disabled() -> Self {
+    |            ^^^^^^^^
+...
+468 |     pub fn is_enabled(&self) -> bool {
+    |            ^^^^^^^^^^
+...
+472 |     pub fn arousal(&self) -> f64 {
+    |            ^^^^^^^
+
+warning: associated items `disabled`, `is_enabled`, `arousal`, and `offset_shift` are never used
+  --> src/auditory/thalamic_gate.rs:71:12
+   |
+61 | impl ThalamicGate {
+   | ----------------- associated items in this implementation
+...
+71 |     pub fn disabled() -> Self {
+   |            ^^^^^^^^
+...
+79 |     pub fn is_enabled(&self) -> bool {
+   |            ^^^^^^^^^^
+...
+84 |     pub fn arousal(&self) -> f64 {
+   |            ^^^^^^^
+...
+97 |     pub fn offset_shift(&self) -> f64 {
+   |            ^^^^^^^^^^^^
+
+warning: fields `baseline_band_powers` and `bilateral` are never read
+  --> src/disturb.rs:53:9
+   |
+42 | pub struct DisturbResult {
+   |            ------------- fields in this struct
+...
+53 |     pub baseline_band_powers: [f64; 5],
+   |         ^^^^^^^^^^^^^^^^^^^^
+...
+89 |     pub bilateral: BilateralResult,
+   |         ^^^^^^^^^
+
+warning: method `to_u8` is never used
+  --> src/movement.rs:45:12
+   |
+32 | impl MovementPattern {
+   | -------------------- method in this implementation
+...
+45 |     pub fn to_u8(self) -> u8 {
+   |            ^^^^^
+
+warning: method `movement_summary` is never used
+   --> src/movement.rs:304:12
+    |
+173 | impl MovementController {
+    | ----------------------- method in this implementation
+...
+304 |     pub fn movement_summary(&self) -> Vec<(u32, MovementPattern, f32, f32)> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: constant `DEFAULT_A` is never used
+  --> src/neural/fhn.rs:19:7
+   |
+19 | const DEFAULT_A: f64 = 0.7;
+   |       ^^^^^^^^^
+
+warning: constant `DEFAULT_B` is never used
+  --> src/neural/fhn.rs:20:7
+   |
+20 | const DEFAULT_B: f64 = 0.8;
+   |       ^^^^^^^^^
+
+warning: constant `DEFAULT_EPSILON` is never used
+  --> src/neural/fhn.rs:21:7
+   |
+21 | const DEFAULT_EPSILON: f64 = 0.08;
+   |       ^^^^^^^^^^^^^^^
+
+warning: fields `voltage`, `recovery`, `spike_times`, `mean_voltage`, and `voltage_variance` are never read
+  --> src/neural/fhn.rs:76:9
+   |
+74 | pub struct FhnResult {
+   |            --------- fields in this struct
+75 |     /// Membrane potential trace.
+76 |     pub voltage: Vec<f64>,
+   |         ^^^^^^^
+77 |     /// Recovery variable trace.
+78 |     pub recovery: Vec<f64>,
+   |         ^^^^^^^^
+79 |     /// Times of detected spikes (in sample indices).
+80 |     pub spike_times: Vec<usize>,
+   |         ^^^^^^^^^^^
+...
+87 |     pub mean_voltage: f64,
+   |         ^^^^^^^^^^^^
+88 |     /// Variance of membrane potential.
+89 |     pub voltage_variance: f64,
+   |         ^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/neural/fhn.rs:93:12
+   |
+92 | impl FhnModel {
+   | ------------- associated function in this implementation
+93 |     pub fn new(sample_rate: f64) -> Self {
+   |            ^^^
+
+warning: associated function `compute` is never used
+  --> src/neural/performance.rs:70:12
+   |
+59 | impl PerformanceVector {
+   | ---------------------- associated function in this implementation
+...
+70 |     pub fn compute(
+   |            ^^^^^^^
+
+warning: associated items `new`, `is_constrained`, `is_crowding_enabled`, and `stagnation_count` are never used
+   --> src/optimizer/differential_evolution.rs:133:12
+    |
+116 | impl DifferentialEvolution {
+    | -------------------------- associated items in this implementation
+...
+133 |     pub fn new(bounds: Vec<(f64, f64)>, pop_size: usize, f: f64, cr: f64, seed: u64) -> Self {
+    |            ^^^
+...
+321 |     pub fn is_constrained(&self) -> bool {
+    |            ^^^^^^^^^^^^^^
+...
+495 |     pub fn is_crowding_enabled(&self) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+525 |     pub fn stagnation_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: field `acoustic_render` is never read
+   --> src/pipeline.rs:375:9
+    |
+367 | pub struct DetailedSimulationResult {
+    |            ------------------------ field in this struct
+...
+375 |     pub acoustic_render: Option<RenderedStereoAudio>,
+    |         ^^^^^^^^^^^^^^^
+
+warning: method `active_object_count` is never used
+   --> src/preset.rs:376:12
+    |
+360 | impl Preset {
+    | ----------- method in this implementation
+...
+376 |     pub fn active_object_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `evaluate` is never used
+   --> src/scoring.rs:714:12
+    |
+303 | impl Goal {
+    | --------- method in this implementation
+...
+714 |     pub fn evaluate(&self, fhn: &FhnResult, jansen_rit: &JansenRitResult) -> f64 {
+    |            ^^^^^^^^
+
+warning: variants `High`, `Low`, and `Neutral` are never constructed
+    --> src/scoring.rs:1500:5
+     |
+1494 | pub enum BandExpectation {
+     |          --------------- variants in this enum
+...
+1500 |     High,
+     |     ^^^^
+1501 |     Low,
+     |     ^^^
+1502 |     Neutral,
+     |     ^^^^^^^
+     |
+     = note: `BandExpectation` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `score` and `performance` are never read
+    --> src/scoring.rs:1543:9
+     |
+1542 | pub struct Diagnosis {
+     |            --------- fields in this struct
+1543 |     pub score: f64,
+     |         ^^^^^
+...
+1553 |     pub performance: Option<PerformanceVector>,
+     |         ^^^^^^^^^^^
+
+warning: constant `CSV_METADATA_COLUMNS` is never used
+  --> src/surrogate.rs:58:11
+   |
+58 | pub const CSV_METADATA_COLUMNS: [&str; 7] = [
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `predict_batch` is never used
+   --> src/surrogate.rs:303:12
+    |
+ 98 | impl SurrogateModel {
+    | ------------------- method in this implementation
+...
+303 |     pub fn predict_batch(&self, inputs: &[Vec<f32>]) -> Vec<f32> {
+    |            ^^^^^^^^^^^^^
+
+warning: `neural_preset_optimizer` (bin "neural_preset_optimizer") generated 50 warnings (14 duplicates) (run `cargo fix --bin "neural_preset_optimizer" -p neural_preset_optimizer` to apply 8 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s

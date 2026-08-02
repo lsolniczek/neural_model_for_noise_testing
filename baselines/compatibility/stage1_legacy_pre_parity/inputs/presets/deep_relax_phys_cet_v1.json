@@ -1,0 +1,840 @@
+{
+  "meta": {
+    "goal": "deep_relaxation",
+    "goal_semantics": {
+      "goal": "deep_relaxation",
+      "plain_language_purpose": "Low-stress relaxation profile.",
+      "product_objective": "Encourage calm-state neural proxies and reduced high-frequency activation.",
+      "primary_neural_proxies": [
+        "theta+alpha co-dominance",
+        "suppressed beta/gamma",
+        "low firing-rate regime"
+      ],
+      "primary_acoustic_proxies": [
+        "comfort-oriented spectral tilt",
+        "low HF energy preference"
+      ],
+      "best_use_cases": [
+        "recovery breaks",
+        "evening decompression"
+      ],
+      "unsupported_claims": [
+        "Does not prove clinical anxiety reduction.",
+        "Does not prove long-term stress biomarker improvement."
+      ],
+      "evidence_level": "requires_human_validation_for_efficacy_claim"
+    },
+    "score": 0.5424163779292861,
+    "model_signature": {
+      "version": "legacy_v1",
+      "pipeline_variant": "evaluate_canonical",
+      "scoring_profile": "legacy_v1",
+      "normalization_mode": "global_per_ear",
+      "brain_type": "Normal",
+      "audio_sample_rate_hz": 48000,
+      "neural_decimation_factor": 48,
+      "neural_sample_rate_hz": 1000.0,
+      "auditory_flags": {
+        "assr_enabled": true,
+        "thalamic_gate_enabled": true,
+        "physiological_thalamic_gate_enabled": false,
+        "cet_enabled": true,
+        "habituation_enabled": true,
+        "acoustic_scoring_enabled": false,
+        "acoustic_score_fusion_enabled": false,
+        "acoustic_constraints_enabled": false,
+        "arousal_model": "legacy_heuristic"
+      },
+      "neural_flags": {
+        "stochastic_jr_enabled": true
+      },
+      "numeric_params": {
+        "jr_stochastic_sigma": 15.0,
+        "cet_b_slow_rate": 5.0,
+        "cet_b_slow_gain": 10.0,
+        "fixed_arousal": null,
+        "fhn_a": 0.7,
+        "fhn_b": 0.8,
+        "fhn_epsilon": 0.08,
+        "fhn_input_scale": 1.5,
+        "fhn_time_scale": 300.0,
+        "fhn_spike_threshold": 1.0,
+        "fhn_initial_voltage": -1.2,
+        "fhn_initial_recovery": -0.6,
+        "fhn_rk4_sub_steps": 4,
+        "fhn_isi_cv_min_spikes": 3,
+        "fhn_isi_cv_min_mean_isi": 1E-12,
+        "jr_a_gain": 3.25,
+        "jr_b_gain": 22.0,
+        "jr_a_rate": 100.0,
+        "jr_b_rate": 50.0,
+        "jr_c": 135.0,
+        "jr_input_offset": 175.0,
+        "jr_input_scale": 60.0,
+        "jr_g_fast_gain": 10.0,
+        "jr_g_fast_rate": 500.0,
+        "jr_c5": 40.5,
+        "jr_c6": 13.5,
+        "jr_c7": 115.0,
+        "jr_slow_inhib_ratio": 0.2,
+        "jr_v0": 6.0,
+        "callosal_coupling": 0.15,
+        "callosal_delay_s": 0.01,
+        "contralateral_ratio": 0.65,
+        "left_weight": 0.5,
+        "habituation_rate": 0.0003,
+        "habituation_recovery": 0.0001,
+        "cet_c_slow_connectivity": 30.0,
+        "jr_stochastic_rng_seed": 42,
+        "jr_v_max": 5.0,
+        "jr_default_c": 135.0,
+        "jr_default_c1": 135.0,
+        "jr_default_c2": 108.0,
+        "jr_default_c3": 27.0,
+        "jr_default_c4": 27.0,
+        "jr_default_v0": 6.0,
+        "jr_default_sigmoid_r": 0.62,
+        "jr_warmup_seconds": 1.0,
+        "jr_sub_steps_base": 2,
+        "jr_sub_steps_fast": 4,
+        "jr_sub_steps_fast_rate_threshold": 200.0,
+        "wc_adaptive_entrainment_range_hz": 5.0,
+        "tonotopic_params": {
+          "band_rates": [
+            [
+              70.0,
+              35.0
+            ],
+            [
+              85.0,
+              42.0
+            ],
+            [
+              100.0,
+              50.0
+            ],
+            [
+              100.0,
+              50.0
+            ]
+          ],
+          "band_gains": [
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ]
+          ],
+          "band_offsets": [
+            150.0,
+            170.0,
+            150.0,
+            150.0
+          ],
+          "band_input_gains": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_output_weights": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_slow_inhib_ratios": [
+            0.2,
+            0.2,
+            0.2,
+            0.2
+          ],
+          "band_c7": [
+            115.0,
+            115.0,
+            115.0,
+            115.0
+          ],
+          "band_sigmoid_r": [
+            0.62,
+            0.62,
+            0.62,
+            0.62
+          ],
+          "band_c1c2_scale": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_g_fast_rate": [
+            500.0,
+            500.0,
+            500.0,
+            500.0
+          ],
+          "band_v0": [
+            6.0,
+            6.0,
+            6.0,
+            6.0
+          ],
+          "band_model_types": [
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "wilson_cowan",
+              "target_hz": 14.0,
+              "tau_e": 0.013119533527696792,
+              "tau_i": 0.016034985422740525,
+              "w_ee": 16.0,
+              "w_ie": 15.0,
+              "w_ei": 15.0,
+              "w_ii": 3.0,
+              "h_e": 1.5,
+              "h_i": 0.0,
+              "sigmoid_a": 1.3,
+              "sigmoid_theta": 4.0,
+              "input_scale": 0.6,
+              "input_offset": 1.0,
+              "adaptive_entrainment_range_hz": 5.0
+            },
+            {
+              "kind": "wilson_cowan",
+              "target_hz": 25.0,
+              "tau_e": 0.007346938775510204,
+              "tau_i": 0.008979591836734694,
+              "w_ee": 16.0,
+              "w_ie": 15.0,
+              "w_ei": 15.0,
+              "w_ii": 3.0,
+              "h_e": 1.5,
+              "h_i": 0.0,
+              "sigmoid_a": 1.3,
+              "sigmoid_theta": 4.0,
+              "input_scale": 0.6,
+              "input_offset": 1.0,
+              "adaptive_entrainment_range_hz": 5.0
+            }
+          ]
+        },
+        "bilateral_params": {
+          "left": {
+            "band_rates": [
+              [
+                80.0,
+                40.0
+              ],
+              [
+                100.0,
+                50.0
+              ],
+              [
+                100.0,
+                50.0
+              ],
+              [
+                100.0,
+                50.0
+              ]
+            ],
+            "band_gains": [
+              [
+                3.25,
+                22.0
+              ],
+              [
+                3.25,
+                22.0
+              ],
+              [
+                3.25,
+                22.0
+              ],
+              [
+                3.25,
+                22.0
+              ]
+            ],
+            "band_offsets": [
+              150.0,
+              175.0,
+              150.0,
+              150.0
+            ],
+            "band_input_gains": [
+              1.0,
+              1.0,
+              1.2,
+              2.0
+            ],
+            "band_output_weights": [
+              0.5,
+              0.7,
+              1.5,
+              2.0
+            ],
+            "band_slow_inhib_ratios": [
+              0.2,
+              0.2,
+              0.2,
+              0.2
+            ],
+            "band_c7": [
+              115.0,
+              115.0,
+              115.0,
+              115.0
+            ],
+            "band_sigmoid_r": [
+              0.62,
+              0.62,
+              0.62,
+              0.62
+            ],
+            "band_c1c2_scale": [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "band_g_fast_rate": [
+              500.0,
+              500.0,
+              500.0,
+              500.0
+            ],
+            "band_v0": [
+              6.0,
+              6.0,
+              6.0,
+              6.0
+            ],
+            "band_model_types": [
+              {
+                "kind": "jansen_rit"
+              },
+              {
+                "kind": "jansen_rit"
+              },
+              {
+                "kind": "wilson_cowan",
+                "target_hz": 14.0,
+                "tau_e": 0.013119533527696792,
+                "tau_i": 0.016034985422740525,
+                "w_ee": 16.0,
+                "w_ie": 15.0,
+                "w_ei": 15.0,
+                "w_ii": 3.0,
+                "h_e": 1.5,
+                "h_i": 0.0,
+                "sigmoid_a": 1.3,
+                "sigmoid_theta": 4.0,
+                "input_scale": 0.6,
+                "input_offset": 1.0,
+                "adaptive_entrainment_range_hz": 5.0
+              },
+              {
+                "kind": "wilson_cowan",
+                "target_hz": 25.0,
+                "tau_e": 0.007346938775510204,
+                "tau_i": 0.008979591836734694,
+                "w_ee": 16.0,
+                "w_ie": 15.0,
+                "w_ei": 15.0,
+                "w_ii": 3.0,
+                "h_e": 1.5,
+                "h_i": 0.0,
+                "sigmoid_a": 1.3,
+                "sigmoid_theta": 4.0,
+                "input_scale": 0.6,
+                "input_offset": 1.0,
+                "adaptive_entrainment_range_hz": 5.0
+              }
+            ]
+          },
+          "right": {
+            "band_rates": [
+              [
+                75.0,
+                37.0
+              ],
+              [
+                85.0,
+                42.0
+              ],
+              [
+                95.0,
+                47.0
+              ],
+              [
+                100.0,
+                50.0
+              ]
+            ],
+            "band_gains": [
+              [
+                3.25,
+                22.0
+              ],
+              [
+                3.25,
+                22.0
+              ],
+              [
+                3.25,
+                22.0
+              ],
+              [
+                3.25,
+                22.0
+              ]
+            ],
+            "band_offsets": [
+              160.0,
+              180.0,
+              195.0,
+              200.0
+            ],
+            "band_input_gains": [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "band_output_weights": [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "band_slow_inhib_ratios": [
+              0.22,
+              0.22,
+              0.22,
+              0.22
+            ],
+            "band_c7": [
+              115.0,
+              115.0,
+              115.0,
+              115.0
+            ],
+            "band_sigmoid_r": [
+              0.62,
+              0.62,
+              0.62,
+              0.62
+            ],
+            "band_c1c2_scale": [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "band_g_fast_rate": [
+              500.0,
+              500.0,
+              500.0,
+              500.0
+            ],
+            "band_v0": [
+              6.0,
+              6.0,
+              6.0,
+              6.0
+            ],
+            "band_model_types": [
+              {
+                "kind": "jansen_rit"
+              },
+              {
+                "kind": "jansen_rit"
+              },
+              {
+                "kind": "jansen_rit"
+              },
+              {
+                "kind": "jansen_rit"
+              }
+            ]
+          },
+          "callosal_coupling": 0.15,
+          "callosal_delay_s": 0.01,
+          "contralateral_ratio": 0.65,
+          "left_weight": 0.5
+        }
+      },
+      "warmup_discard_secs": 2.0,
+      "duration_secs": 10.0,
+      "seeds": {
+        "primary_seed": 701,
+        "disturbance_left_spike_seed": null,
+        "disturbance_right_spike_seed": null
+      },
+      "candidate_brain_profile_v2": null
+    },
+    "generated_at": "2026-07-01T18:07:41.117412+00:00",
+    "optimizer_generations": 12,
+    "audio_duration_secs": 10.0
+  },
+  "preset": {
+    "master_gain": 0.7681237,
+    "spatial_mode": 1,
+    "source_count": 4,
+    "anchor_color": 0,
+    "anchor_volume": 0.0,
+    "environment": 3,
+    "room": {
+      "mode": 1,
+      "preset": 0,
+      "dimensions": {
+        "width_m": 4.2,
+        "depth_m": 5.6,
+        "height_m": 2.7
+      },
+      "reflectivity": 0.42,
+      "materials": {
+        "left": 3,
+        "right": 3,
+        "floor": 5,
+        "ceiling": 4,
+        "back": 3,
+        "front": 3
+      }
+    },
+    "objects": [
+      {
+        "active": true,
+        "color": 2,
+        "position_space": 0,
+        "x": -0.735361,
+        "y": 1.0481452,
+        "z": 3.383992,
+        "volume": 0.73772246,
+        "reverb_send": 0.5421344,
+        "spread": 0.45,
+        "bass_mod": {
+          "kind": 3,
+          "param_a": 5.1310353,
+          "param_b": 266.50052,
+          "param_c": 0.05
+        },
+        "satellite_mod": {
+          "kind": 2,
+          "param_a": 2.8314667,
+          "param_b": 0.21692,
+          "param_c": 0.08805626
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.58229786,
+          "phase": 0.52625877,
+          "depth_min": 2.8,
+          "depth_max": 4.118993,
+          "reverb_min": 0.32970154,
+          "reverb_max": 0.6485425
+        },
+        "tint_freq": 324.6572,
+        "tint_db": -1.6801282,
+        "source_kind": 0,
+        "tone_freq": 97.05871,
+        "tone_amplitude": 0.10303359
+      },
+      {
+        "active": true,
+        "color": 2,
+        "position_space": 0,
+        "x": 0.78481627,
+        "y": 0.38376105,
+        "z": 4.0088463,
+        "volume": 0.3716531,
+        "reverb_send": 0.4884824,
+        "spread": 0.5,
+        "bass_mod": {
+          "kind": 4,
+          "param_a": 14.895177,
+          "param_b": 0.25747955,
+          "param_c": 0.15648416
+        },
+        "satellite_mod": {
+          "kind": 1,
+          "param_a": 2.0,
+          "param_b": 0.022013195,
+          "param_c": 0.10066186
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 2.8127635,
+          "speed": 0.0,
+          "phase": 4.336362,
+          "depth_min": 3.0675092,
+          "depth_max": 6.0,
+          "reverb_min": 0.39185894,
+          "reverb_max": 0.6997065
+        },
+        "tint_freq": 3168.3447,
+        "tint_db": 0.12290801,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.12006801
+      },
+      {
+        "active": true,
+        "color": 3,
+        "position_space": 0,
+        "x": -2.408542,
+        "y": -1.5540893,
+        "z": 3.394678,
+        "volume": 0.22058915,
+        "reverb_send": 0.82734555,
+        "spread": 0.72,
+        "bass_mod": {
+          "kind": 5,
+          "param_a": 1.0,
+          "param_b": 0.11425188,
+          "param_c": 0.2
+        },
+        "satellite_mod": {
+          "kind": 2,
+          "param_a": 0.5811452,
+          "param_b": 0.82,
+          "param_c": 0.07471831
+        },
+        "movement": {
+          "kind": 2,
+          "radius": 0.19223146,
+          "speed": 0.0,
+          "phase": 1.8972142,
+          "depth_min": 3.7573493,
+          "depth_max": 5.4,
+          "reverb_min": 0.56797236,
+          "reverb_max": 0.92933506
+        },
+        "tint_freq": 1353.3306,
+        "tint_db": -2.5672379,
+        "source_kind": 0,
+        "tone_freq": 290.86578,
+        "tone_amplitude": 0.008131784
+      },
+      {
+        "active": true,
+        "color": 3,
+        "position_space": 0,
+        "x": -1.0410502,
+        "y": -1.4410208,
+        "z": 2.1,
+        "volume": 0.37055567,
+        "reverb_send": 0.7479711,
+        "spread": 0.82,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 1.7059537,
+          "param_b": 0.1,
+          "param_c": 0.08406045
+        },
+        "satellite_mod": {
+          "kind": 4,
+          "param_a": 2.790225,
+          "param_b": 0.86,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 4,
+          "radius": 0.52575684,
+          "speed": 0.06667469,
+          "phase": 4.1201377,
+          "depth_min": 4.6378922,
+          "depth_max": 5.2621703,
+          "reverb_min": 0.7369184,
+          "reverb_max": 0.6236887
+        },
+        "tint_freq": 3755.9504,
+        "tint_db": -3.395125,
+        "source_kind": 0,
+        "tone_freq": 1267.9344,
+        "tone_amplitude": 0.031115294
+      },
+      {
+        "active": false,
+        "color": 0,
+        "position_space": 0,
+        "x": -0.5540146,
+        "y": -0.29539052,
+        "z": 2.644446,
+        "volume": 0.013916818,
+        "reverb_send": 0.094418064,
+        "spread": 0.0,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 0.86568904,
+          "param_b": 0.039506532,
+          "param_c": 0.02957361
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.7365392,
+          "param_b": 0.23233649,
+          "param_c": 0.089882255
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.21150176,
+          "speed": 0.56363785,
+          "phase": 0.0,
+          "depth_min": 0.6863997,
+          "depth_max": 1.3571174,
+          "reverb_min": 0.13637622,
+          "reverb_max": 0.023620404
+        },
+        "tint_freq": 0.0,
+        "tint_db": 0.0,
+        "source_kind": 0,
+        "tone_freq": 2349.367,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": false,
+        "color": 1,
+        "position_space": 0,
+        "x": 2.914488,
+        "y": -0.98549354,
+        "z": 1.6941874,
+        "volume": 0.0,
+        "reverb_send": 0.0020122891,
+        "spread": 0.0,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.08372584,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.028909268,
+          "param_b": 0.023746802,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 2,
+          "radius": 0.29584867,
+          "speed": 0.0,
+          "phase": 0.5668435,
+          "depth_min": 0.6853674,
+          "depth_max": 1.624291,
+          "reverb_min": 0.015372349,
+          "reverb_max": 0.22006102
+        },
+        "tint_freq": 872.30566,
+        "tint_db": -1.5321054,
+        "source_kind": 0,
+        "tone_freq": 20.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": false,
+        "color": 0,
+        "position_space": 0,
+        "x": 1.8460568,
+        "y": 2.84144,
+        "z": -0.69985765,
+        "volume": 0.049979873,
+        "reverb_send": 0.11520991,
+        "spread": 0.0,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 0.8206874,
+          "param_b": 0.14121574,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 2,
+          "param_a": 0.89622855,
+          "param_b": 0.18879284,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 0.0,
+          "depth_min": 0.812124,
+          "depth_max": 1.4378712,
+          "reverb_min": 0.0,
+          "reverb_max": 0.00841819
+        },
+        "tint_freq": 0.0,
+        "tint_db": 0.0,
+        "source_kind": 0,
+        "tone_freq": 496.55167,
+        "tone_amplitude": 0.036098875
+      },
+      {
+        "active": false,
+        "color": 2,
+        "position_space": 0,
+        "x": 0.17284584,
+        "y": -0.8968,
+        "z": 1.1066834,
+        "volume": 0.0,
+        "reverb_send": 0.0,
+        "spread": 0.0,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.06050389,
+          "param_c": 0.07647592
+        },
+        "satellite_mod": {
+          "kind": 3,
+          "param_a": 2.3256311,
+          "param_b": 45.627323,
+          "param_c": 0.10942281
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.57688254,
+          "phase": 0.59731746,
+          "depth_min": 0.5984889,
+          "depth_max": 1.5282005,
+          "reverb_min": 0.12847696,
+          "reverb_max": 0.15775757
+        },
+        "tint_freq": 461.22098,
+        "tint_db": -0.57864034,
+        "source_kind": 0,
+        "tone_freq": 1620.4349,
+        "tone_amplitude": 0.1878652
+      }
+    ]
+  },
+  "analysis": {
+    "fhn_firing_rate": 2.125,
+    "fhn_isi_cv": 0.4092589728589303,
+    "dominant_freq_hz": 0.9765625,
+    "band_powers": {
+      "delta": 0.9299377008301811,
+      "theta": 0.010579034986237452,
+      "alpha": 0.003602255043482909,
+      "beta": 0.05369695312262115,
+      "gamma": 0.002184056017477556
+    }
+  }
+}

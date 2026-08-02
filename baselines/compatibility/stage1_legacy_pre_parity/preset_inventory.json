@@ -1,0 +1,545 @@
+{
+  "count": 60,
+  "presets": [
+    {
+      "capture_git_state": "modified",
+      "object_count": 0,
+      "preset_path": "presets/deep_relax_phys_cet_v1.json",
+      "report_path": "evaluations/deep_relax_phys_cet_v1.json",
+      "sha256": "sha256:82aebb64cfc96a9b090cdd8fd9cff2d4abf29d3b9848c05aa587ce05c0ba98c0",
+      "snapshot_path": "inputs/presets/deep_relax_phys_cet_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 0,
+      "preset_path": "presets/deep_relax_recipe1_wind_down.json",
+      "report_path": "evaluations/deep_relax_recipe1_wind_down.json",
+      "sha256": "sha256:40410f892adea3751fc90823f734cca862707dd211909e2651d1b980660d2390",
+      "snapshot_path": "inputs/presets/deep_relax_recipe1_wind_down.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/deepwork_adhd.json",
+      "report_path": "evaluations/deepwork_adhd.json",
+      "sha256": "sha256:b205bdd37ebd1ccf377d51037a76c3b99d6b76d6bc4039d950388d562007fca8",
+      "snapshot_path": "inputs/presets/deepwork_adhd.json",
+      "source_count": 5
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/deepwork_adhd_v2.json",
+      "report_path": "evaluations/deepwork_adhd_v2.json",
+      "sha256": "sha256:ad8f7622e3be33480b616c4c35cfceda4960aed8739aff83f9c436d5748e0d35",
+      "snapshot_path": "inputs/presets/deepwork_adhd_v2.json",
+      "source_count": 8
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/deepwork_normal.json",
+      "report_path": "evaluations/deepwork_normal.json",
+      "sha256": "sha256:ca6f4ee6e25aaf522d441bde27dc470107c8fdc3370ff48ffff049b8d19df43a",
+      "snapshot_path": "inputs/presets/deepwork_normal.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/deepwork_normal_v2.json",
+      "report_path": "evaluations/deepwork_normal_v2.json",
+      "sha256": "sha256:10bb0edefe070684c60bd3d5476ca0dcf21bf2b2893b7925266e2390c13152a6",
+      "snapshot_path": "inputs/presets/deepwork_normal_v2.json",
+      "source_count": 8
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/isolation_adhd_clean.json",
+      "report_path": "evaluations/isolation_adhd_clean.json",
+      "sha256": "sha256:8130a87dc4f816019846f88d24f5077d61ff12fbb1e0e493b9387326626b2d9a",
+      "snapshot_path": "inputs/presets/isolation_adhd_clean.json",
+      "source_count": 6
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/isolation_adhd_smooth.json",
+      "report_path": "evaluations/isolation_adhd_smooth.json",
+      "sha256": "sha256:914e43991408dfe413d099b49610c3a467f0efffbc994a17d30c7462391a8f68",
+      "snapshot_path": "inputs/presets/isolation_adhd_smooth.json",
+      "source_count": 6
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/isolation_normal_clean.json",
+      "report_path": "evaluations/isolation_normal_clean.json",
+      "sha256": "sha256:ba3770458955c0c378f4af7dbfaade0c96e14c28492361f7a080a48f0ebf1c4a",
+      "snapshot_path": "inputs/presets/isolation_normal_clean.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/isolation_normal_smooth.json",
+      "report_path": "evaluations/isolation_normal_smooth.json",
+      "sha256": "sha256:17f6d4e0158b8fcce6180e761601553d719f6894e9800f66d861e44c0e56ded5",
+      "snapshot_path": "inputs/presets/isolation_normal_smooth.json",
+      "source_count": 5
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_deep_relax.json",
+      "report_path": "evaluations/normal_set_deep_relax.json",
+      "sha256": "sha256:40d04acef09f549133a2f59b9f276187ed68b6f76e9f952e7a91a90cc3cc237c",
+      "snapshot_path": "inputs/presets/normal_set_deep_relax.json",
+      "source_count": 2
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow.json",
+      "report_path": "evaluations/normal_set_flow.json",
+      "sha256": "sha256:6a8332e33d5754564eea324bc5c8a177fc39928bfc9d286352cb3fe3e95cf787",
+      "snapshot_path": "inputs/presets/normal_set_flow.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v2.json",
+      "report_path": "evaluations/normal_set_flow_v2.json",
+      "sha256": "sha256:c5573d142b4352c895617fe28f8c0a17547108ce89bab8778644924b8a88c33f",
+      "snapshot_path": "inputs/presets/normal_set_flow_v2.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3.json",
+      "report_path": "evaluations/normal_set_flow_v3.json",
+      "sha256": "sha256:0ee78d6cc0f0e402be456c9b0d099b1ab05d36344a4d85798637fae0a514a818",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v1.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v1.json",
+      "sha256": "sha256:bf244990a673cd4cfe05ed9a332a23fd89fad7698149180b9af9d0f2859fa634",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v1.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v2.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v2.json",
+      "sha256": "sha256:73ef1d73fea4e86139b4bbf18131100c4a8bb70a39b18abf1490e312c5b7ea9a",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v2.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v3.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v3.json",
+      "sha256": "sha256:c5b8f0557cf242dbb8e798cfc5a5bbb410da14c39aa377eb98787cdcb6896873",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v3.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v4a_bluecut.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v4a_bluecut.json",
+      "sha256": "sha256:f530c2748069ddc78d8e2e075512000351dd51186cfd342e0f86f06cada55b6b",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v4a_bluecut.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v4b_rebuild.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v4b_rebuild.json",
+      "sha256": "sha256:d3db66a065889fe9046f367988fba48544054a13be7547e7141ddca339af249d",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v4b_rebuild.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v5_randompulse.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v5_randompulse.json",
+      "sha256": "sha256:ac70ca5928bb9089cb2f5578371579e62536f0c5da94bc156ac5cb5c03066055",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v5_randompulse.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_flow_v3_adhd_tuned_v6_high_binaural.json",
+      "report_path": "evaluations/normal_set_flow_v3_adhd_tuned_v6_high_binaural.json",
+      "sha256": "sha256:97834fdb0e61f02a7cf5520c6e3c11f14aecad839f262a62fbed7d825d64bdd1",
+      "snapshot_path": "inputs/presets/normal_set_flow_v3_adhd_tuned_v6_high_binaural.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_ignition.json",
+      "report_path": "evaluations/normal_set_ignition.json",
+      "sha256": "sha256:c30546ccd3af7372e0d7f070dae7e7f4a40e2e9c5a1d603a241c4b64bd0f43f1",
+      "snapshot_path": "inputs/presets/normal_set_ignition.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_ignition_v2.json",
+      "report_path": "evaluations/normal_set_ignition_v2.json",
+      "sha256": "sha256:c38277c3ec2f8264489e5538932a475bd1b008c1b46d632bd131666ea97cdcad",
+      "snapshot_path": "inputs/presets/normal_set_ignition_v2.json",
+      "source_count": 2
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 7,
+      "preset_path": "presets/normal_set_ignition_v3.json",
+      "report_path": "evaluations/normal_set_ignition_v3.json",
+      "sha256": "sha256:7697a12767d981bd89ff9fdb48cf276efe6f612ea63e8556faec61c20c97a44e",
+      "snapshot_path": "inputs/presets/normal_set_ignition_v3.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_reset.json",
+      "report_path": "evaluations/normal_set_reset.json",
+      "sha256": "sha256:e4c3e9ffe9b24a1d8280c80ed7868611452f266c19544988384060fc3b590c3f",
+      "snapshot_path": "inputs/presets/normal_set_reset.json",
+      "source_count": 5
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield.json",
+      "report_path": "evaluations/normal_set_shield.json",
+      "sha256": "sha256:c62ebedd867e350cd75601b1d8b49b2d89b4cbf49190df7e9b9a27881806d89b",
+      "snapshot_path": "inputs/presets/normal_set_shield.json",
+      "source_count": 6
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield_scrambler.json",
+      "report_path": "evaluations/normal_set_shield_scrambler.json",
+      "sha256": "sha256:e135771b63330db32e26773cd172743cc18bc27c8e786243f4e1ebba94f8d996",
+      "snapshot_path": "inputs/presets/normal_set_shield_scrambler.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield_v2.json",
+      "report_path": "evaluations/normal_set_shield_v2.json",
+      "sha256": "sha256:1aea02750f03602c826d24aa9ca206d504d674c4fa2938ad69440b6c0fd94e47",
+      "snapshot_path": "inputs/presets/normal_set_shield_v2.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield_v3.json",
+      "report_path": "evaluations/normal_set_shield_v3.json",
+      "sha256": "sha256:d731e6209cda3c3900a6a0b2c5ef389bc4a46d10b9c6460c14366386aca3c24c",
+      "snapshot_path": "inputs/presets/normal_set_shield_v3.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield_v4.json",
+      "report_path": "evaluations/normal_set_shield_v4.json",
+      "sha256": "sha256:5f53caed4c91621fa88d2f643edea6d97ae68e491caecf1764ab78bdb4f377e5",
+      "snapshot_path": "inputs/presets/normal_set_shield_v4.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield_v5.json",
+      "report_path": "evaluations/normal_set_shield_v5.json",
+      "sha256": "sha256:139aa38c14f426fe5e80114d8f97b082d54fc3bff3684bbab39b179d7ff6acc6",
+      "snapshot_path": "inputs/presets/normal_set_shield_v5.json",
+      "source_count": 5
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/normal_set_shield_v6.json",
+      "report_path": "evaluations/normal_set_shield_v6.json",
+      "sha256": "sha256:76d432abcbee31a058f419cee9853b725bc7b43856a4811efbac766773726964",
+      "snapshot_path": "inputs/presets/normal_set_shield_v6.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/shield_v5.json",
+      "report_path": "evaluations/shield_v5.json",
+      "sha256": "sha256:953dc7c90a7e8817b9fe3399899f2bd429a0f4ed8eabe49ca78a089fcc18d82d",
+      "snapshot_path": "inputs/presets/shield_v5.json",
+      "source_count": 5
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_black.json",
+      "report_path": "evaluations/showcase_black.json",
+      "sha256": "sha256:e223a33a64e372c68780f8bc17fcde27f63bc7df2a6ca54362bcfc7375b902a5",
+      "snapshot_path": "inputs/presets/showcase_black.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_blue.json",
+      "report_path": "evaluations/showcase_blue.json",
+      "sha256": "sha256:a0abdba24b1dcc6133a628429f0d32e5cb4d583755f226690f24a0f1af7c9784",
+      "snapshot_path": "inputs/presets/showcase_blue.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_brown.json",
+      "report_path": "evaluations/showcase_brown.json",
+      "sha256": "sha256:7831d66dff5d61767ca385bd45bac99f5d46601cffe78e11e92ff7e9087fe1f5",
+      "snapshot_path": "inputs/presets/showcase_brown.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_green.json",
+      "report_path": "evaluations/showcase_green.json",
+      "sha256": "sha256:0f68e14d7fd9d83e88279c9344e07d6e5764be327126ac468f6c6d0db3bc7d15",
+      "snapshot_path": "inputs/presets/showcase_green.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_grey.json",
+      "report_path": "evaluations/showcase_grey.json",
+      "sha256": "sha256:860418e6c137b5e992f929f9d4d8c9dafec7ae90a8d69956665837b85e7bfdf7",
+      "snapshot_path": "inputs/presets/showcase_grey.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_pink.json",
+      "report_path": "evaluations/showcase_pink.json",
+      "sha256": "sha256:76f8106febddc9ac9a3ffddf880f516a1bf084eea0d1846babfdda2c8a9e6653",
+      "snapshot_path": "inputs/presets/showcase_pink.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_ssn.json",
+      "report_path": "evaluations/showcase_ssn.json",
+      "sha256": "sha256:39c5428dcb80f8d241a70859afdf5bec17514b12c9b9e0057655e35262586cf9",
+      "snapshot_path": "inputs/presets/showcase_ssn.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/showcase_white.json",
+      "report_path": "evaluations/showcase_white.json",
+      "sha256": "sha256:44a82d5122093752f4b0f344254497b8db2eb5c548861ee4cfaab935ba421bdf",
+      "snapshot_path": "inputs/presets/showcase_white.json",
+      "source_count": 4
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/sleep_phys_cet_v1.json",
+      "report_path": "evaluations/sleep_phys_cet_v1.json",
+      "sha256": "sha256:9c37caa7b645e672c2f85786a9624197fd6466f9a70e6bc073c91034ae3f6671",
+      "snapshot_path": "inputs/presets/sleep_phys_cet_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_flow_grey_v1.json",
+      "report_path": "evaluations/the_flow_grey_v1.json",
+      "sha256": "sha256:7440d016b5ffdf426a6d1003af4223aeb38af0601ed525dd17bf9ef3a38202c3",
+      "snapshot_path": "inputs/presets/the_flow_grey_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/the_flow_handcrafted_v1.json",
+      "report_path": "evaluations/the_flow_handcrafted_v1.json",
+      "sha256": "sha256:2ab9e7f6643646eb8a85b9c37db21f19d3be861cb1937a0fb027ea1aa83cc417",
+      "snapshot_path": "inputs/presets/the_flow_handcrafted_v1.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/the_flow_static_ssn_v1.json",
+      "report_path": "evaluations/the_flow_static_ssn_v1.json",
+      "sha256": "sha256:1301e63042bd7bb0b98bb55dca7ee342bbd0e800855f9ec4b0fa8598fc7a0916",
+      "snapshot_path": "inputs/presets/the_flow_static_ssn_v1.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/the_flow_tint_v1.json",
+      "report_path": "evaluations/the_flow_tint_v1.json",
+      "sha256": "sha256:2efee2ca389d790b345dc58f8aa46031655031f8957b3a5c9aa83a42458a0f95",
+      "snapshot_path": "inputs/presets/the_flow_tint_v1.json",
+      "source_count": 3
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_flow_v1.json",
+      "report_path": "evaluations/the_flow_v1.json",
+      "sha256": "sha256:1d338efecd7f87b1ea0f2f96cd3ddc8efac393cfdc6ac934fcb63554a75e70ca",
+      "snapshot_path": "inputs/presets/the_flow_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 8,
+      "preset_path": "presets/the_flow_v4.json",
+      "report_path": "evaluations/the_flow_v4.json",
+      "sha256": "sha256:f530c2748069ddc78d8e2e075512000351dd51186cfd342e0f86f06cada55b6b",
+      "snapshot_path": "inputs/presets/the_flow_v4.json",
+      "source_count": 7
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_shield_isolation_v1.json",
+      "report_path": "evaluations/the_shield_isolation_v1.json",
+      "sha256": "sha256:564a33b075e1982ed3f6601450c223cb29f615ad9d3f56f689a520d98ac7b49a",
+      "snapshot_path": "inputs/presets/the_shield_isolation_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_shield_ssn_v1.json",
+      "report_path": "evaluations/the_shield_ssn_v1.json",
+      "sha256": "sha256:87516cf567f085bfe3d5e26dc43627d9148df605bc16ab8c41e44b06563bf8e9",
+      "snapshot_path": "inputs/presets/the_shield_ssn_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_shield_v1.json",
+      "report_path": "evaluations/the_shield_v1.json",
+      "sha256": "sha256:c925eee472416d7b72b93be62f8cc0856fb510a097d7188ec144ca974f299c67",
+      "snapshot_path": "inputs/presets/the_shield_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_shield_v2.json",
+      "report_path": "evaluations/the_shield_v2.json",
+      "sha256": "sha256:fa15e524fef2b46afe3bc400772090a4e8d3960f0bc1a02c5215d51491cfdf32",
+      "snapshot_path": "inputs/presets/the_shield_v2.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_shield_v3.json",
+      "report_path": "evaluations/the_shield_v3.json",
+      "sha256": "sha256:ce75cbe52adbbe6b9f803b0109be913851aad7e3ba303222b3d1a2f36157bb1e",
+      "snapshot_path": "inputs/presets/the_shield_v3.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 0,
+      "preset_path": "presets/the_shield_v5.json",
+      "report_path": "evaluations/the_shield_v5.json",
+      "sha256": "sha256:f6623cf4ee2b5f61b2f808b3a4fe31addda17b76350086ae3d9e0d83e6734f4c",
+      "snapshot_path": "inputs/presets/the_shield_v5.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "tracked_clean",
+      "object_count": 8,
+      "preset_path": "presets/the_shield_v6.json",
+      "report_path": "evaluations/the_shield_v6.json",
+      "sha256": "sha256:4df6209bed292a0de851ac582ca144c16e5db6209226acf77e0ffc626a0790fc",
+      "snapshot_path": "inputs/presets/the_shield_v6.json",
+      "source_count": 6
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 0,
+      "preset_path": "presets/unwind/calm_v1.json",
+      "report_path": "evaluations/unwind/calm_v1.json",
+      "sha256": "sha256:65d782f9b2deef131749aa7599c1a71253e82898b813bb2916447a3416bd8c9b",
+      "snapshot_path": "inputs/presets/unwind/calm_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 0,
+      "preset_path": "presets/unwind/relax_v1.json",
+      "report_path": "evaluations/unwind/relax_v1.json",
+      "sha256": "sha256:0ca6dedfe9852978b78643c44488501ac22c71c86b2623ec8a60feb38e2a1a9f",
+      "snapshot_path": "inputs/presets/unwind/relax_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 0,
+      "preset_path": "presets/unwind/relief_v1.json",
+      "report_path": "evaluations/unwind/relief_v1.json",
+      "sha256": "sha256:f5d63eadbc72e79210a1e4f3ef5382458339e3a3ec527d0a8e53a3ca1eda04da",
+      "snapshot_path": "inputs/presets/unwind/relief_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 0,
+      "preset_path": "presets/unwind/reset_v1.json",
+      "report_path": "evaluations/unwind/reset_v1.json",
+      "sha256": "sha256:6e6a0d00f428586c68ca8a4e2fbc86a7ac5f20bb319bcf92e8b4bf199ba79493",
+      "snapshot_path": "inputs/presets/unwind/reset_v1.json",
+      "source_count": null
+    },
+    {
+      "capture_git_state": "untracked",
+      "object_count": 0,
+      "preset_path": "presets/unwind/sleep_v1.json",
+      "report_path": "evaluations/unwind/sleep_v1.json",
+      "sha256": "sha256:da63eda5153c6d76a3fb16146935d50f3d7800d4031023d446d1d8c6fc039f3a",
+      "snapshot_path": "inputs/presets/unwind/sleep_v1.json",
+      "source_count": null
+    }
+  ]
+}

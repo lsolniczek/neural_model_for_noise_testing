@@ -1,0 +1,526 @@
+{
+  "preset_path": "presets/isolation_adhd_smooth.json",
+  "goal": "focus",
+  "brain_type": "Normal",
+  "score": 0.4740020028893289,
+  "practical_status": "weak",
+  "goal_semantics": {
+    "goal": "focus",
+    "plain_language_purpose": "Active attention profile for cognitively demanding tasks.",
+    "product_objective": "Prioritize a focused, task-engaged neural profile for work sessions.",
+    "primary_neural_proxies": [
+      "beta prominence",
+      "moderate frontal-theta support",
+      "stable mid-high firing rate"
+    ],
+    "primary_acoustic_proxies": [
+      "none (legacy neural score primary)",
+      "optional masking/privacy metrics only when acoustic scoring is enabled"
+    ],
+    "best_use_cases": [
+      "single-user concentration sessions",
+      "structured task blocks"
+    ],
+    "unsupported_claims": [
+      "Does not prove human attention improvement.",
+      "Does not prove clinical efficacy for ADHD or any disorder."
+    ],
+    "evidence_level": "requires_human_validation_for_efficacy_claim"
+  },
+  "practical_report": {
+    "status": "weak",
+    "intended_use": "Prioritize a focused, task-engaged neural profile for work sessions.",
+    "top_reasons": [
+      "bands out of target (alpha, theta)",
+      "spike regularity off target",
+      "dominant frequency is theta while primary proxy emphasizes beta prominence"
+    ],
+    "interpretation": "Intended objective: Prioritize a focused, task-engaged neural profile for work sessions. Current proxy alignment is weak.",
+    "acoustic_summary": {
+      "status": "not_scored",
+      "note": "Acoustic masking/comfort: not scored in this run."
+    },
+    "limitation": "This is a model-based proxy report, not proof of human efficacy."
+  },
+  "band_powers": {
+    "delta": 0.0,
+    "theta": 0.48567476390534997,
+    "alpha": 0.0,
+    "beta": 0.4921767431259124,
+    "gamma": 0.022148492968737638
+  },
+  "dominant_frequency_hz": 7.8125,
+  "fhn_firing_rate": 10.1010101010101,
+  "fhn_isi_cv": null,
+  "acoustic_summary": {
+    "status": "not_scored",
+    "note": "Acoustic masking/comfort: not scored in this run."
+  },
+  "model_signature": {
+    "version": "legacy_v1",
+    "pipeline_variant": "evaluate_canonical",
+    "scoring_profile": "legacy_v1",
+    "normalization_mode": "global_per_ear",
+    "brain_type": "Normal",
+    "audio_sample_rate_hz": 48000,
+    "neural_decimation_factor": 48,
+    "neural_sample_rate_hz": 1000.0,
+    "auditory_flags": {
+      "assr_enabled": false,
+      "thalamic_gate_enabled": false,
+      "physiological_thalamic_gate_enabled": false,
+      "cet_enabled": false,
+      "habituation_enabled": true,
+      "acoustic_scoring_enabled": false,
+      "acoustic_score_fusion_enabled": false,
+      "acoustic_constraints_enabled": false,
+      "arousal_model": "legacy_heuristic"
+    },
+    "neural_flags": {
+      "stochastic_jr_enabled": true
+    },
+    "numeric_params": {
+      "jr_stochastic_sigma": 15.0,
+      "cet_b_slow_rate": 5.0,
+      "cet_b_slow_gain": 10.0,
+      "fixed_arousal": null,
+      "fhn_a": 0.7,
+      "fhn_b": 0.8,
+      "fhn_epsilon": 0.08,
+      "fhn_input_scale": 1.5,
+      "fhn_time_scale": 300.0,
+      "fhn_spike_threshold": 1.0,
+      "fhn_initial_voltage": -1.2,
+      "fhn_initial_recovery": -0.6,
+      "fhn_rk4_sub_steps": 4,
+      "fhn_isi_cv_min_spikes": 3,
+      "fhn_isi_cv_min_mean_isi": 1e-12,
+      "jr_a_gain": 3.25,
+      "jr_b_gain": 22.0,
+      "jr_a_rate": 100.0,
+      "jr_b_rate": 50.0,
+      "jr_c": 135.0,
+      "jr_input_offset": 175.0,
+      "jr_input_scale": 60.0,
+      "jr_g_fast_gain": 10.0,
+      "jr_g_fast_rate": 500.0,
+      "jr_c5": 40.5,
+      "jr_c6": 13.5,
+      "jr_c7": 115.0,
+      "jr_slow_inhib_ratio": 0.2,
+      "jr_v0": 6.0,
+      "callosal_coupling": 0.15,
+      "callosal_delay_s": 0.01,
+      "contralateral_ratio": 0.65,
+      "left_weight": 0.5,
+      "habituation_rate": 0.0003,
+      "habituation_recovery": 0.0001,
+      "cet_c_slow_connectivity": 0.0,
+      "jr_stochastic_rng_seed": 42,
+      "jr_v_max": 5.0,
+      "jr_default_c": 135.0,
+      "jr_default_c1": 135.0,
+      "jr_default_c2": 108.0,
+      "jr_default_c3": 27.0,
+      "jr_default_c4": 27.0,
+      "jr_default_v0": 6.0,
+      "jr_default_sigmoid_r": 0.62,
+      "jr_warmup_seconds": 1.0,
+      "jr_sub_steps_base": 2,
+      "jr_sub_steps_fast": 4,
+      "jr_sub_steps_fast_rate_threshold": 200.0,
+      "wc_adaptive_entrainment_range_hz": 5.0,
+      "tonotopic_params": {
+        "band_rates": [
+          [
+            70.0,
+            35.0
+          ],
+          [
+            85.0,
+            42.0
+          ],
+          [
+            100.0,
+            50.0
+          ],
+          [
+            100.0,
+            50.0
+          ]
+        ],
+        "band_gains": [
+          [
+            3.25,
+            22.0
+          ],
+          [
+            3.25,
+            22.0
+          ],
+          [
+            3.25,
+            22.0
+          ],
+          [
+            3.25,
+            22.0
+          ]
+        ],
+        "band_offsets": [
+          150.0,
+          170.0,
+          150.0,
+          150.0
+        ],
+        "band_input_gains": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "band_output_weights": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "band_slow_inhib_ratios": [
+          0.2,
+          0.2,
+          0.2,
+          0.2
+        ],
+        "band_c7": [
+          115.0,
+          115.0,
+          115.0,
+          115.0
+        ],
+        "band_sigmoid_r": [
+          0.62,
+          0.62,
+          0.62,
+          0.62
+        ],
+        "band_c1c2_scale": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "band_g_fast_rate": [
+          500.0,
+          500.0,
+          500.0,
+          500.0
+        ],
+        "band_v0": [
+          6.0,
+          6.0,
+          6.0,
+          6.0
+        ],
+        "band_model_types": [
+          {
+            "kind": "jansen_rit"
+          },
+          {
+            "kind": "jansen_rit"
+          },
+          {
+            "kind": "wilson_cowan",
+            "target_hz": 14.0,
+            "tau_e": 0.013119533527696792,
+            "tau_i": 0.016034985422740525,
+            "w_ee": 16.0,
+            "w_ie": 15.0,
+            "w_ei": 15.0,
+            "w_ii": 3.0,
+            "h_e": 1.5,
+            "h_i": 0.0,
+            "sigmoid_a": 1.3,
+            "sigmoid_theta": 4.0,
+            "input_scale": 0.6,
+            "input_offset": 1.0,
+            "adaptive_entrainment_range_hz": 5.0
+          },
+          {
+            "kind": "wilson_cowan",
+            "target_hz": 25.0,
+            "tau_e": 0.007346938775510204,
+            "tau_i": 0.008979591836734694,
+            "w_ee": 16.0,
+            "w_ie": 15.0,
+            "w_ei": 15.0,
+            "w_ii": 3.0,
+            "h_e": 1.5,
+            "h_i": 0.0,
+            "sigmoid_a": 1.3,
+            "sigmoid_theta": 4.0,
+            "input_scale": 0.6,
+            "input_offset": 1.0,
+            "adaptive_entrainment_range_hz": 5.0
+          }
+        ]
+      },
+      "bilateral_params": {
+        "left": {
+          "band_rates": [
+            [
+              80.0,
+              40.0
+            ],
+            [
+              100.0,
+              50.0
+            ],
+            [
+              100.0,
+              50.0
+            ],
+            [
+              100.0,
+              50.0
+            ]
+          ],
+          "band_gains": [
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ]
+          ],
+          "band_offsets": [
+            150.0,
+            175.0,
+            150.0,
+            150.0
+          ],
+          "band_input_gains": [
+            1.0,
+            1.0,
+            1.2,
+            2.0
+          ],
+          "band_output_weights": [
+            0.5,
+            0.7,
+            1.5,
+            2.0
+          ],
+          "band_slow_inhib_ratios": [
+            0.2,
+            0.2,
+            0.2,
+            0.2
+          ],
+          "band_c7": [
+            115.0,
+            115.0,
+            115.0,
+            115.0
+          ],
+          "band_sigmoid_r": [
+            0.62,
+            0.62,
+            0.62,
+            0.62
+          ],
+          "band_c1c2_scale": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_g_fast_rate": [
+            500.0,
+            500.0,
+            500.0,
+            500.0
+          ],
+          "band_v0": [
+            6.0,
+            6.0,
+            6.0,
+            6.0
+          ],
+          "band_model_types": [
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "wilson_cowan",
+              "target_hz": 14.0,
+              "tau_e": 0.013119533527696792,
+              "tau_i": 0.016034985422740525,
+              "w_ee": 16.0,
+              "w_ie": 15.0,
+              "w_ei": 15.0,
+              "w_ii": 3.0,
+              "h_e": 1.5,
+              "h_i": 0.0,
+              "sigmoid_a": 1.3,
+              "sigmoid_theta": 4.0,
+              "input_scale": 0.6,
+              "input_offset": 1.0,
+              "adaptive_entrainment_range_hz": 5.0
+            },
+            {
+              "kind": "wilson_cowan",
+              "target_hz": 25.0,
+              "tau_e": 0.007346938775510204,
+              "tau_i": 0.008979591836734694,
+              "w_ee": 16.0,
+              "w_ie": 15.0,
+              "w_ei": 15.0,
+              "w_ii": 3.0,
+              "h_e": 1.5,
+              "h_i": 0.0,
+              "sigmoid_a": 1.3,
+              "sigmoid_theta": 4.0,
+              "input_scale": 0.6,
+              "input_offset": 1.0,
+              "adaptive_entrainment_range_hz": 5.0
+            }
+          ]
+        },
+        "right": {
+          "band_rates": [
+            [
+              75.0,
+              37.0
+            ],
+            [
+              85.0,
+              42.0
+            ],
+            [
+              95.0,
+              47.0
+            ],
+            [
+              100.0,
+              50.0
+            ]
+          ],
+          "band_gains": [
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ],
+            [
+              3.25,
+              22.0
+            ]
+          ],
+          "band_offsets": [
+            160.0,
+            180.0,
+            195.0,
+            200.0
+          ],
+          "band_input_gains": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_output_weights": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_slow_inhib_ratios": [
+            0.22,
+            0.22,
+            0.22,
+            0.22
+          ],
+          "band_c7": [
+            115.0,
+            115.0,
+            115.0,
+            115.0
+          ],
+          "band_sigmoid_r": [
+            0.62,
+            0.62,
+            0.62,
+            0.62
+          ],
+          "band_c1c2_scale": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "band_g_fast_rate": [
+            500.0,
+            500.0,
+            500.0,
+            500.0
+          ],
+          "band_v0": [
+            6.0,
+            6.0,
+            6.0,
+            6.0
+          ],
+          "band_model_types": [
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "jansen_rit"
+            },
+            {
+              "kind": "jansen_rit"
+            }
+          ]
+        },
+        "callosal_coupling": 0.15,
+        "callosal_delay_s": 0.01,
+        "contralateral_ratio": 0.65,
+        "left_weight": 0.5
+      }
+    },
+    "warmup_discard_secs": 2.0,
+    "duration_secs": 2.1,
+    "seeds": {
+      "primary_seed": null,
+      "disturbance_left_spike_seed": null,
+      "disturbance_right_spike_seed": null
+    },
+    "candidate_brain_profile_v2": null
+  },
+  "limitations": [
+    "This is a model-based proxy report, not proof of human efficacy."
+  ]
+}
