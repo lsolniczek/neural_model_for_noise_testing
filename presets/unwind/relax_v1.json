@@ -1,0 +1,342 @@
+{
+  "meta": {
+    "goal": "deep_relaxation",
+    "source_recipe": "Recipe 1: Deep Relaxation / Pre-Sleep Wind-Down",
+    "generated_at": "2026-07-01T00:00:00+00:00",
+    "optimizer_generations": 0,
+    "audio_duration_secs": 10.0,
+    "notes": "Manual DSP translation. Anchor is kept off because this engine cannot modulate anchor amplitude; the base layer is object 0. Spectral LP/BP filters are approximated using noise color plus per-object tint EQ."
+  },
+  "preset": {
+    "master_gain": 0.33,
+    "spatial_mode": 1,
+    "source_count": 8,
+    "anchor_color": 2,
+    "anchor_volume": 0.0,
+    "environment": 2,
+    "room": {
+      "mode": 1,
+      "preset": 0,
+      "dimensions": {
+        "width_m": 4.2,
+        "depth_m": 5.6,
+        "height_m": 2.7
+      },
+      "reflectivity": 0.34,
+      "materials": {
+        "left": 3,
+        "right": 3,
+        "floor": 5,
+        "ceiling": 4,
+        "back": 3,
+        "front": 3
+      }
+    },
+    "objects": [
+      {
+        "active": true,
+        "color": 2,
+        "position_space": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 2.0,
+        "volume": 0.50,
+        "reverb_send": 0.08,
+        "spread": 0.35,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.12,
+          "param_b": 0.15,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 0.0,
+          "depth_min": 2.0,
+          "depth_max": 2.0,
+          "reverb_min": 0.08,
+          "reverb_max": 0.08
+        },
+        "tint_freq": 200.0,
+        "tint_db": 1.0,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 1,
+        "position_space": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 2.5,
+        "volume": 0.21,
+        "reverb_send": 0.18,
+        "spread": 0.58,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.07,
+          "param_b": 0.10,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 0.0,
+          "depth_min": 2.5,
+          "depth_max": 2.5,
+          "reverb_min": 0.18,
+          "reverb_max": 0.18
+        },
+        "tint_freq": 800.0,
+        "tint_db": -1.5,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 1,
+        "position_space": 0,
+        "x": 2.5,
+        "y": 0.0,
+        "z": 0.0,
+        "volume": 0.21,
+        "reverb_send": 0.18,
+        "spread": 0.58,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.07,
+          "param_b": 0.10,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 1.5708,
+          "depth_min": 2.5,
+          "depth_max": 2.5,
+          "reverb_min": 0.18,
+          "reverb_max": 0.18
+        },
+        "tint_freq": 800.0,
+        "tint_db": -1.5,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 1,
+        "position_space": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "z": -2.5,
+        "volume": 0.21,
+        "reverb_send": 0.18,
+        "spread": 0.58,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.07,
+          "param_b": 0.10,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 3.14159,
+          "depth_min": 2.5,
+          "depth_max": 2.5,
+          "reverb_min": 0.18,
+          "reverb_max": 0.18
+        },
+        "tint_freq": 800.0,
+        "tint_db": -1.5,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 1,
+        "position_space": 0,
+        "x": -2.5,
+        "y": 0.0,
+        "z": 0.0,
+        "volume": 0.21,
+        "reverb_send": 0.18,
+        "spread": 0.58,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.07,
+          "param_b": 0.10,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 4.71239,
+          "depth_min": 2.5,
+          "depth_max": 2.5,
+          "reverb_min": 0.18,
+          "reverb_max": 0.18
+        },
+        "tint_freq": 800.0,
+        "tint_db": -1.5,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 1,
+        "position_space": 0,
+        "x": 0.0,
+        "y": 2.4,
+        "z": 1.2,
+        "volume": 0.105,
+        "reverb_send": 0.42,
+        "spread": 0.86,
+        "bass_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 1,
+          "radius": 1.4,
+          "speed": 0.1256637,
+          "phase": 0.0,
+          "depth_min": 2.4,
+          "depth_max": 2.4,
+          "reverb_min": 0.42,
+          "reverb_max": 0.42
+        },
+        "tint_freq": 2000.0,
+        "tint_db": -2.5,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 4,
+        "position_space": 0,
+        "x": 2.12,
+        "y": 0.2,
+        "z": -2.12,
+        "volume": 0.0525,
+        "reverb_send": 0.26,
+        "spread": 0.50,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.8,
+          "param_b": 0.08,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 0.0,
+          "depth_min": 3.0,
+          "depth_max": 3.0,
+          "reverb_min": 0.26,
+          "reverb_max": 0.26
+        },
+        "tint_freq": 1200.0,
+        "tint_db": -1.0,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      },
+      {
+        "active": true,
+        "color": 4,
+        "position_space": 0,
+        "x": -2.12,
+        "y": 0.2,
+        "z": -2.12,
+        "volume": 0.0525,
+        "reverb_send": 0.26,
+        "spread": 0.50,
+        "bass_mod": {
+          "kind": 1,
+          "param_a": 0.8,
+          "param_b": 0.08,
+          "param_c": 0.0
+        },
+        "satellite_mod": {
+          "kind": 0,
+          "param_a": 0.0,
+          "param_b": 0.0,
+          "param_c": 0.0
+        },
+        "movement": {
+          "kind": 0,
+          "radius": 0.0,
+          "speed": 0.0,
+          "phase": 3.14159,
+          "depth_min": 3.0,
+          "depth_max": 3.0,
+          "reverb_min": 0.26,
+          "reverb_max": 0.26
+        },
+        "tint_freq": 1200.0,
+        "tint_db": -1.0,
+        "source_kind": 0,
+        "tone_freq": 200.0,
+        "tone_amplitude": 0.0
+      }
+    ]
+  }
+}
