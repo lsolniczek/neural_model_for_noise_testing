@@ -34,7 +34,19 @@ jobs:
         run: python -m unittest discover -s tests/compatibility -p "test_*.py" -v
 
       - name: Run public EEG benchmark tests
-        run: python -m unittest discover -s tests/public_eeg_benchmarks -p "test_*.py" -v
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/public-eeg-tests.log"
+          if python -m unittest discover -s tests/public_eeg_benchmarks -p "test_*.py" -v 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          failure="$(tail -n 50 "$log")"
+          failure="${failure//'%'/'%25'}"
+          failure="${failure//$'\r'/'%0D'}"
+          failure="${failure//$'\n'/'%0A'}"
+          echo "::error title=Public EEG unittest failure::$failure"
+          exit 1
 
       - name: Verify the historical Stage 1 artifact
         run: >-
