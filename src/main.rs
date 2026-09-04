@@ -22,12 +22,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::auditory::ArousalModel;
 use brain_type::BrainType;
 use optimizer::DifferentialEvolution;
-use crate::auditory::ArousalModel;
 use pipeline::{
-    evaluate_preset, evaluate_preset_detailed, validate_analysis_window,
-    DetailedSimulationResult, SimulationConfig, SimulationResult,
+    evaluate_preset, evaluate_preset_detailed, validate_analysis_window, DetailedSimulationResult,
+    SimulationConfig, SimulationResult,
 };
 use preset::Preset;
 use scoring::{Goal, GoalKind, GoalSemantics, MetricStatus};
@@ -536,6 +536,12 @@ enum Commands {
     /// Run neural model validation tests (frequency tracking, bifurcation, etc.)
     Validate,
 
+    /// Re-evaluate an exported preset with its recorded model signature.
+    ReplayExport {
+        /// Path to an optimizer export JSON file.
+        export: PathBuf,
+    },
+
     /// Generate training data for the surrogate model (Priority 14a).
     /// Samples random presets, evaluates with the real pipeline, writes CSV.
     GenerateData {
@@ -630,6 +636,14 @@ fn print_model_signature(signature: &model_signature::ModelSignature) {
             model_signature::PipelineVariant::DisturbCanonical => "disturb_canonical",
             model_signature::PipelineVariant::DisturbLegacyAblated => "disturb_legacy_ablated",
         }
+    );
+    println!(
+        "  Renderer:       {} @ {}",
+        signature.renderer_revision.as_str(),
+        signature
+            .renderer_source_revision
+            .as_deref()
+            .unwrap_or("unversioned")
     );
     let json = serde_json::to_string(signature)
         .unwrap_or_else(|_| "{\"error\":\"signature_serialization_failed\"}".to_string());
@@ -1230,7 +1244,7 @@ fn pairs_csv_row(
         bool01(config.acoustic_constraints_enabled),
         "1".to_string(),
         "1".to_string(),
-        "1".to_string(),
+        crate::model_signature::MODEL_SIGNATURE_SCHEMA_VERSION.to_string(),
         csv_escape_field(&signature_json),
     ]
     .join(",")
@@ -1337,7 +1351,7 @@ fn runs_csv_row(
         pairs_path.display().to_string(),
         total_examples.to_string(),
         total_pairs.to_string(),
-        "1".to_string(),
+        crate::model_signature::MODEL_SIGNATURE_SCHEMA_VERSION.to_string(),
         csv_escape_field(&signature_json),
     ]
     .join(",")
@@ -1637,7 +1651,7 @@ fn surrogate_csv_row(
         format!("{score:.6}"),
         String::new(), // score_std
         "1".to_string(),
-        "1".to_string(),
+        crate::model_signature::MODEL_SIGNATURE_SCHEMA_VERSION.to_string(),
         csv_escape_field(&signature_json),
     ]);
     cols.join(",")
@@ -2201,6 +2215,18 @@ fn main() {
         Commands::Validate => {
             validate::run_all();
         }
+        Commands::ReplayExport { export: path } => match export::replay_export(&path) {
+            Ok(report) => {
+                println!(
+                    "Replay matched: goal={}, score={:.12}, checked_fields={}",
+                    report.goal, report.score, report.checked_numeric_fields
+                );
+            }
+            Err(error) => {
+                eprintln!("Replay failed: {error}");
+                std::process::exit(error.exit_code());
+            }
+        },
         Commands::GenerateData {
             output,
             count,
@@ -5414,7 +5440,7 @@ mod tests {
             format!("{:.6}", result.score)
         );
         assert!(
-            row.contains(",1,\"{"),
+            row.contains(",2,\"{"),
             "row should contain signature schema marker"
         );
         assert!(

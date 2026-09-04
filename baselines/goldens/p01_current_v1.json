@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "baseline_id": "p01_current_v1",
+  "model_version": "legacy_v1",
+  "renderer_revision": "dsp_brown_hf_v2",
+  "provenance": {
+    "nmm_source_revision": "4082bb5",
+    "original_passing_dsp_revision": "32123a99a6c2b114d5d682c8638a0286b152b2ab",
+    "first_intentional_renderer_change": "c7182ad2c69c6227d384950238e1ee6761a6e1b3",
+    "captured_dsp_revision": "9aded28958b78f8becbf8ebe42eb2b0e81de207e",
+    "pinned_dsp_revision": "20611c7e2b93e170657cda432f4faca41028f2fe",
+    "rust_toolchain": "1.94.1",
+    "platform": "aarch64-apple-darwin",
+    "reason": "Controlled promotion of the intentional brown-noise HF damping renderer change. LegacyV1 continues to name neural and scoring semantics; renderer_revision identifies the audio renderer behavior."
+  },
+  "disturb": {
+    "canonical": {
+      "baseline_dominant_freq": 16.852678571428573,
+      "peak_freq_deviation": 0.0,
+      "bppr": 1.0,
+      "spectral_resilience": 1.0,
+      "baseline_centroid": 20.550173658425141,
+      "brightness": 0.472996487809821
+    },
+    "legacy_ablated": {
+      "baseline_dominant_freq": 7.8125,
+      "peak_freq_deviation": 0.0,
+      "bppr": 1.0,
+      "spectral_resilience": 1.0,
+      "baseline_centroid": 12.625377903086255,
+      "brightness": 0.472996487809821
+    }
+  },
+  "legacy_v1_stage0": [
+    {
+      "name": "dark_sleep_normal_canonical_4s",
+      "score": 0.677997641967139,
+      "dominant_freq": 6.8359375,
+      "delta_power": 0.283566733440574,
+      "theta_power": 0.443636793611766,
+      "alpha_power": 0.211502713064867,
+      "beta_power": 0.055915909663450,
+      "gamma_power": 0.005377850219343,
+      "brightness": 0.030208881090289,
+      "alpha_asymmetry": -0.019133783201141
+    },
+    {
+      "name": "dark_deep_relax_aging_ablation_12s",
+      "score": 0.318817924108820,
+      "dominant_freq": 6.8359375,
+      "delta_power": 0.002667006256643,
+      "theta_power": 0.955560452735065,
+      "alpha_power": 0.032453911529975,
+      "beta_power": 0.008829227280269,
+      "gamma_power": 0.000489402198049,
+      "brightness": 0.0,
+      "alpha_asymmetry": 0.998409556635587
+    },
+    {
+      "name": "mid_focus_adhd_canonical_4s",
+      "score": 0.334738086849502,
+      "dominant_freq": 5.859375,
+      "delta_power": 0.255168311618526,
+      "theta_power": 0.550173524729978,
+      "alpha_power": 0.085564464498437,
+      "beta_power": 0.101323860329155,
+      "gamma_power": 0.007769838823905,
+      "brightness": 0.325224436122527,
+      "alpha_asymmetry": 0.081789223181948
+    },
+    {
+      "name": "mid_shield_adhd_ablation_12s",
+      "score": 0.341502463573143,
+      "dominant_freq": 6.89697265625,
+      "delta_power": 0.003504896326945,
+      "theta_power": 0.923150317183464,
+      "alpha_power": 0.044790014912155,
+      "beta_power": 0.026042026789557,
+      "gamma_power": 0.002512744787880,
+      "brightness": 0.317479948341570,
+      "alpha_asymmetry": 0.929018533420237
+    },
+    {
+      "name": "mid_meditation_high_alpha_canonical_4s",
+      "score": 0.510769605947867,
+      "dominant_freq": 0.9765625,
+      "delta_power": 0.481143795629993,
+      "theta_power": 0.489930784034469,
+      "alpha_power": 0.022950590348520,
+      "beta_power": 0.005812061723820,
+      "gamma_power": 0.000162768263198,
+      "brightness": 0.325224436122527,
+      "alpha_asymmetry": -0.497281058536251
+    },
+    {
+      "name": "bright_ignition_anxious_canonical_4s",
+      "score": 0.216077172096382,
+      "dominant_freq": 0.9765625,
+      "delta_power": 0.990839614872210,
+      "theta_power": 0.007148707534671,
+      "alpha_power": 0.001237826637320,
+      "beta_power": 0.000686510150874,
+      "gamma_power": 0.000087340804925,
+      "brightness": 0.960022127940275,
+      "alpha_asymmetry": -0.817632399628552
+    },
+    {
+      "name": "bright_flow_normal_ablation_12s",
+      "score": 0.238052585930439,
+      "dominant_freq": 24.23095703125,
+      "delta_power": 0.000422105414719,
+      "theta_power": 0.001532795314489,
+      "alpha_power": 0.018127457361253,
+      "beta_power": 0.807669810840614,
+      "gamma_power": 0.172247831068925,
+      "brightness": 0.962277113499317,
+      "alpha_asymmetry": -0.993466058254526
+    },
+    {
+      "name": "bright_deep_work_high_alpha_ablation_12s",
+      "score": 0.400027331597159,
+      "dominant_freq": 7.75146484375,
+      "delta_power": 0.033792227195554,
+      "theta_power": 0.753879345392662,
+      "alpha_power": 0.154169743825606,
+      "beta_power": 0.054961361292831,
+      "gamma_power": 0.003197322293347,
+      "brightness": 0.962277113499317,
+      "alpha_asymmetry": 0.862206520752636
+    },
+    {
+      "name": "bright_isolation_normal_canonical_12s",
+      "score": 0.484498072976395,
+      "dominant_freq": 24.23095703125,
+      "delta_power": 0.034256679819131,
+      "theta_power": 0.000121218029019,
+      "alpha_power": 0.000037928274931,
+      "beta_power": 0.795697651609615,
+      "gamma_power": 0.169886522267304,
+      "brightness": 0.962277113499317,
+      "alpha_asymmetry": -0.987781083619729
+    }
+  ]
+}

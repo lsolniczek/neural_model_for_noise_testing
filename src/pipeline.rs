@@ -14,7 +14,8 @@ use crate::auditory::{
 use crate::brain_type::BrainType;
 use crate::model_signature::{
     AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
-    NumericParamsSnapshot, PipelineVariant, ReproducibilitySeeds, ScoringProfile,
+    NumericParamsSnapshot, PipelineVariant, RendererRevision, ReproducibilitySeeds, ScoringProfile,
+    DSP_SOURCE_REVISION, MODEL_SIGNATURE_SCHEMA_VERSION,
 };
 use crate::movement::MovementController;
 use crate::neural::{
@@ -277,6 +278,9 @@ impl Default for SimulationConfig {
 impl SimulationConfig {
     pub fn model_signature(&self) -> ModelSignature {
         ModelSignature {
+            schema_version: MODEL_SIGNATURE_SCHEMA_VERSION,
+            renderer_revision: RendererRevision::DspBrownHfV2,
+            renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
             version: self.model_version,
             pipeline_variant: match self.model_version {
                 ModelVersion::LegacyV1 => PipelineVariant::EvaluateCanonical,
@@ -323,6 +327,114 @@ impl SimulationConfig {
                 ModelVersion::CandidateV2 => Some(self.brain_type.candidate_profile_v2()),
             },
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureReplayError {
+    reason: String,
+}
+
+impl SignatureReplayError {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SignatureReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for SignatureReplayError {}
+
+impl TryFrom<&ModelSignature> for SimulationConfig {
+    type Error = SignatureReplayError;
+
+    fn try_from(signature: &ModelSignature) -> Result<Self, Self::Error> {
+        if signature.schema_version != MODEL_SIGNATURE_SCHEMA_VERSION {
+            return Err(SignatureReplayError::new(format!(
+                "unsupported model signature schema {}; expected {}",
+                signature.schema_version, MODEL_SIGNATURE_SCHEMA_VERSION
+            )));
+        }
+        if signature.renderer_revision != RendererRevision::DspBrownHfV2 {
+            return Err(SignatureReplayError::new(format!(
+                "unsupported renderer revision {}",
+                signature.renderer_revision.as_str()
+            )));
+        }
+        if signature.renderer_source_revision.as_deref() != Some(DSP_SOURCE_REVISION) {
+            return Err(SignatureReplayError::new(format!(
+                "renderer source revision mismatch: export={:?}, binary={DSP_SOURCE_REVISION}",
+                signature.renderer_source_revision
+            )));
+        }
+        if noise_generator_core::RENDERER_REVISION != signature.renderer_revision.as_str() {
+            return Err(SignatureReplayError::new(format!(
+                "renderer semantic revision mismatch: dsp={}, signature={}",
+                noise_generator_core::RENDERER_REVISION,
+                signature.renderer_revision.as_str()
+            )));
+        }
+        let expected_pipeline = match signature.version {
+            ModelVersion::LegacyV1 => PipelineVariant::EvaluateCanonical,
+            ModelVersion::CandidateV2 => PipelineVariant::EvaluateCandidateV2,
+        };
+        if signature.pipeline_variant != expected_pipeline {
+            return Err(SignatureReplayError::new(format!(
+                "signature pipeline {:?} cannot be replayed as {:?}",
+                signature.pipeline_variant, expected_pipeline
+            )));
+        }
+        if signature.normalization_mode != NormalizationMode::GlobalPerEar {
+            return Err(SignatureReplayError::new(
+                "only global_per_ear evaluation signatures can be replayed",
+            ));
+        }
+        if signature.seeds.disturbance_left_spike_seed.is_some()
+            || signature.seeds.disturbance_right_spike_seed.is_some()
+        {
+            return Err(SignatureReplayError::new(
+                "disturbance seeds are not valid for preset evaluation replay",
+            ));
+        }
+
+        let config = Self {
+            duration_secs: signature.duration_secs,
+            warmup_discard_secs: signature.warmup_discard_secs,
+            brain_type: signature.brain_type,
+            assr_enabled: signature.auditory_flags.assr_enabled,
+            thalamic_gate_enabled: signature.auditory_flags.thalamic_gate_enabled,
+            habituation_enabled: signature.auditory_flags.habituation_enabled,
+            stochastic_jr_enabled: signature.neural_flags.stochastic_jr_enabled,
+            cet_enabled: signature.auditory_flags.cet_enabled,
+            physiological_thalamic_gate_enabled: signature
+                .auditory_flags
+                .physiological_thalamic_gate_enabled,
+            acoustic_scoring_enabled: signature.auditory_flags.acoustic_scoring_enabled,
+            acoustic_score_fusion_enabled: signature.auditory_flags.acoustic_score_fusion_enabled,
+            acoustic_constraints_enabled: signature.auditory_flags.acoustic_constraints_enabled,
+            model_version: signature.version,
+            scoring_profile: signature.scoring_profile,
+            reproducibility_seed: signature.seeds.primary_seed,
+            arousal_model: signature.auditory_flags.arousal_model,
+            fixed_arousal: signature.numeric_params.fixed_arousal,
+            jr_stochastic_sigma: signature.numeric_params.jr_stochastic_sigma,
+            cet_b_slow_rate: signature.numeric_params.cet_b_slow_rate,
+            cet_b_slow_gain: signature.numeric_params.cet_b_slow_gain,
+        };
+
+        let rebuilt = config.model_signature();
+        if rebuilt != *signature {
+            return Err(SignatureReplayError::new(
+                "signature contains derived rates, flags, or numeric parameters that do not match this binary",
+            ));
+        }
+        Ok(config)
     }
 }
 

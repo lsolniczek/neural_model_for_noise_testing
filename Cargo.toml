@@ -5,7 +5,7 @@ edition = "2021"
 description = "Neural model-based optimizer for noise generator presets"
 
 [dependencies]
-noise_generator_core = { path = "../noise_generator_dsp/crates/core", default-features = false }
+noise_generator_core = { git = "ssh://git@github.com/lsolniczek/noise_generator_dsp.git", rev = "20611c7e2b93e170657cda432f4faca41028f2fe", default-features = false }
 
 rand = "0.8"
 rand_distr = "0.4"

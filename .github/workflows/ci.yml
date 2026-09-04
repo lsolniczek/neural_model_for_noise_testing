@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-and-baseline:
+    name: Python tests and historical baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out NMM
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Python test discovery
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Verify the historical Stage 1 artifact
+        run: >-
+          python tools/compatibility/stage1_baseline.py verify
+          --baseline baselines/compatibility/stage1_legacy_pre_parity
+
+  rust-canonical:
+    name: Rust canonical (macOS ARM64)
+    # Secrets are deliberately unavailable to fork pull requests. Public Python
+    # and artifact-integrity checks above still run for those contributions.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - name: Check out NMM
+        uses: actions/checkout@v4
+
+      - name: Verify the canonical architecture
+        shell: bash
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Require the read-only DSP deploy key
+        env:
+          DSP_DEPLOY_KEY: ${{ secrets.DSP_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${DSP_DEPLOY_KEY:-}" ]]; then
+            echo "::error::DSP_DEPLOY_KEY is required to fetch the pinned private DSP dependency. See .github/CI.md."
+            exit 1
+          fi
+          install -m 600 /dev/null "$RUNNER_TEMP/dsp_deploy_key"
+          printf '%s\n' "$DSP_DEPLOY_KEY" > "$RUNNER_TEMP/dsp_deploy_key"
+          ssh-keyscan -t ed25519 github.com > "$RUNNER_TEMP/github_known_hosts"
+          chmod 600 "$RUNNER_TEMP/github_known_hosts"
+          printf '%s\n' \
+            "GIT_SSH_COMMAND=ssh -i $RUNNER_TEMP/dsp_deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/github_known_hosts" \
+            >> "$GITHUB_ENV"
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
+          if [[ -z "$toolchain" ]]; then
+            echo "::error::rust-toolchain.toml does not declare a channel."
+            exit 1
+          fi
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update
+          rustup show active-toolchain
+
+      - name: Resolve the locked dependency graph
+        run: cargo metadata --locked --format-version 1 --no-deps
+
+      - name: Run all Rust targets
+        run: cargo test --locked --all-targets
+
+      - name: Smoke-test export replay
+        run: cargo test --locked replay_export_round_trip_matches_current_renderer

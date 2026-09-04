@@ -1,7 +1,7 @@
 # NMM — kanoniczny rejestr rozwoju
 
-**Stan na:** 2026-09-03
-**Przejrzana rewizja:** `f42d579`
+**Stan na:** 2026-09-04
+**Przejrzana rewizja bazowa NMM:** `4082bb5`
 **Rola dokumentu:** jedno miejsce, które mówi, co naprawdę jest w kodzie i co nadal trzeba zrobić.
 
 Ten rejestr łączy:
@@ -46,7 +46,7 @@ Prosty słownik:
 
 | Obszar | Co już mamy | Najważniejszy brak |
 |---|---|---|
-| Pipeline | Jedna główna ścieżka oceny, eksport sygnatury modelu | Testy regresyjne nie są obecnie zielone, seed nie steruje symulacją |
+| Pipeline | Zielone testy, jedna ścieżka oceny, wersjonowana sygnatura i replay eksportu | Seed nie steruje jeszcze całą symulacją |
 | Dźwięk | Renderer binauralny, pomieszczenie, gammatone, modulatory | Brak stałej kalibracji poziomu dźwięku do wejścia neuronalnego |
 | Legacy NMM | JR, WC, FHN, półkule, habituacja, szum | Nośna dźwięku nadal wybiera rodzinę rytmu korowego |
 | Candidate V2 | Oddzielne cechy nośnej i modulacji, diagnostyka | To jeszcze algebraiczny szkic, nie pełny model dynamiczny |
@@ -69,7 +69,7 @@ Prosty słownik:
 | I-09 | `implemented` | — | DE i filtr surrogate |
 | I-10 | `implemented` | — | Infrastruktura kalibracji EEG |
 | I-11 | `implemented` | — | Kontrakt interpretacji wyniku |
-| P-01 | `planned` | P0 | Zielony baseline i CI |
+| P-01 | `implemented` | P0 | Zielony baseline i CI |
 | P-02 | `planned` | P0 | Kalibracja amplitudy i SPL |
 | P-03 | `planned` | P0 | Rozdzielenie nośnej od modulacji |
 | P-04 | `planned` | P0 | Dynamiczny CandidateV2 |
@@ -130,7 +130,7 @@ Prosty słownik:
 
 **Prace naukowe i metodyczne:** [Sandve et al. 2013 — zasady odtwarzalnych analiz obliczeniowych](https://doi.org/10.1371/journal.pcbi.1003285), [Wilson et al. 2014 — dobre praktyki oprogramowania naukowego](https://doi.org/10.1371/journal.pbio.1001745).
 
-**Znane ograniczenie:** Metadane `reproducibility_seed` nie sterują jeszcze całym losowym przebiegiem. Aktualne goldeny również nie przechodzą; obsługuje to P-01 i P-06.
+**Znane ograniczenie:** Metadane `reproducibility_seed` nie sterują jeszcze całym losowym przebiegiem; obsługuje to P-06.
 
 ## I-02. Słuchowe przygotowanie dźwięku
 
@@ -302,32 +302,25 @@ Prosty słownik:
 
 **Znane ograniczenie:** Starsze pliki nadal zawierają mocniejsze lub nieaktualne opisy. Porządki dokumentacyjne opisuje P-16.
 
----
-
-# Zadania `planned`
-
 ## P-01. Zielony i odtwarzalny baseline
 
-**Status:** `planned`
+**Status:** `implemented`
 **Priorytet:** P0
-**Dotyczy:** Audit Stage 0–1, Refactor Stage 0–1, `fix_plan.md` Stage 11–12
+**Kod i artefakty:** [`src/model_signature.rs`](src/model_signature.rs), [`src/export.rs`](src/export.rs), [`baselines/goldens/p01_current_v1.json`](baselines/goldens/p01_current_v1.json), [`.github/CI.md`](.github/CI.md)
 
-**Problem:** Testy regresyjne nie opisują dziś jednego stabilnego baseline’u. Dwa testy Rust nie przechodzą, snapshot LegacyV1 ma dużą różnicę wyniku, a jeden test przepełnia domyślny stos. Pythonowe `unittest discover -s tests` znajduje zero testów.
+**Problem:** Testy regresyjne opisywały stary renderer brown noise, jeden test przepełniał standardowy stos, test discovery Pythona znajdował zero testów, a NMM zależał od przypadkowej lokalnej wersji DSP.
 
-**Pomysł na rozwiązanie:**
+**Co zrobiono:** Zmiana renderera została jawnie nazwana `dsp_brown_hf_v2`, a DSP przypięto do commita `20611c7e2b93e170657cda432f4faca41028f2fe`. Duża pula obiektów DSP jest budowana na stercie i przechodzi test na stosie 2 MiB bez alokacji w ścieżce renderowania. ModelSignature schema 2 zapisuje wersję oraz commit renderera. Komenda `replay-export` odbudowuje konfigurację, ponownie ocenia preset i pokazuje różnice pól. Goldeny są w wersjonowanym manifeście. Historyczny baseline schema 2 pozostaje niezmieniony i może być sprawdzany przez aktualne narzędzie. CI oraz zwykłe `unittest discover` uruchamiają rzeczywiste testy.
 
-1. Ustalić, czy zmiana goldenów była zamierzona.
-2. Jeśli tak, zapisać przyczynę i promować nowe goldeny jednym kontrolowanym commitem.
-3. Jeśli nie, naprawić regresję przed zmianą snapshotów.
-4. Zmniejszyć użycie stosu w ścieżce eksportu albo jawnie uruchamiać ciężkie testy na osobnym wątku z kontrolowanym stosem.
-5. W CI uruchamiać `cargo test --all-targets` i trzy jawne zestawy testów Python.
-6. Dodać test odtworzenia eksportu wyłącznie z zapisanej sygnatury.
-
-**Dlaczego warto:** Dopóki baseline nie jest zielony, nie wiemy, czy kolejna różnica score jest poprawką, zmianą naukową czy przypadkowym błędem.
+**Dlaczego warto:** Kolejne zmiany modelu mają teraz jednoznaczny punkt odniesienia. Różnica wyniku nie jest mylona ze zmianą zależności, platformy ani ukrytym obejściem stosu.
 
 **Prace naukowe i metodyczne:** [Sandve et al. 2013](https://doi.org/10.1371/journal.pcbi.1003285), [Wilson et al. 2014](https://doi.org/10.1371/journal.pbio.1001745).
 
-**Kryteria odbioru:** Wszystkie zadeklarowane testy przechodzą na czystym checkout; każdy golden ma opis źródła; standardowa komenda Python naprawdę znajduje testy; eksport da się odtworzyć z sygnatury.
+**Dowód odbioru:** `cargo test --locked --all-targets` — lib 517/517 i bin 679/679, bez `RUST_MIN_STACK`; DSP core 759/759 oraz jawny test stosu 2 MiB; `python3 -m unittest discover -s tests` — 64/64; integralność historycznego baseline — poprawna. Testy pominięte są wyłącznie jawnie oznaczonymi testami eksploracyjnymi/drukującymi.
+
+---
+
+# Zadania `planned`
 
 ## P-02. Stała kalibracja amplitudy i SPL
 
@@ -676,7 +669,7 @@ Prosty słownik:
 
 ## Faza A — wynik musi być technicznie wiarygodny
 
-1. P-01 — zielony baseline.
+1. P-01 — zielony baseline (`implemented`).
 2. P-10 — martwe geny, walidacja DE i czas oceny.
 3. P-06 — prawdziwe seedy.
 4. P-16 — porządek statusu i komentarzy.
@@ -707,7 +700,7 @@ Prosty słownik:
 
 # Zasada wyboru „najlepszego presetu” do czasu wykonania planu
 
-Do czasu ukończenia P-01, P-02, P-03, P-06, P-08, P-10 i P-12 wynik należy opisywać tak:
+Do czasu ukończenia P-02, P-03, P-06, P-08, P-10 i P-12 wynik należy opisywać tak:
 
 > Najlepszy preset znaleziony dla jawnie podanej wersji symulatora, celu, profilu, konfiguracji i seedów.
 

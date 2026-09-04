@@ -4,10 +4,12 @@
 /// into the decimated tonotopic signals at a specified time, then tracks
 /// entrainment ratio and dominant frequency through sliding-window analysis
 /// to measure perturbation impact and recovery dynamics.
+use crate::auditory::ArousalModel;
 use crate::brain_type::BrainType;
 use crate::model_signature::{
     AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
-    NumericParamsSnapshot, PipelineVariant, ReproducibilitySeeds, ScoringProfile,
+    NumericParamsSnapshot, PipelineVariant, RendererRevision, ReproducibilitySeeds, ScoringProfile,
+    DSP_SOURCE_REVISION, MODEL_SIGNATURE_SCHEMA_VERSION,
 };
 use crate::neural::BilateralResult;
 use crate::pipeline::{
@@ -15,7 +17,6 @@ use crate::pipeline::{
     run_canonical_cortical_stage, spectral_brightness, validate_analysis_window, SimulationConfig,
     DECIMATION_FACTOR, DEFAULT_WARMUP_DISCARD_SECS, NEURAL_SR, SAMPLE_RATE,
 };
-use crate::auditory::ArousalModel;
 use crate::preset::Preset;
 use rustfft::{num_complex::Complex, FftPlanner};
 
@@ -654,6 +655,9 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
     );
 
     let model_signature = ModelSignature {
+        schema_version: MODEL_SIGNATURE_SCHEMA_VERSION,
+        renderer_revision: RendererRevision::DspBrownHfV2,
+        renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
         version: config.model_version,
         pipeline_variant: PipelineVariant::DisturbLegacyAblated,
         scoring_profile: ScoringProfile::LegacyV1,
@@ -1044,6 +1048,72 @@ fn compute_spectral_resilience(
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, serde::Deserialize)]
+    struct DisturbGoldenSnapshot {
+        baseline_dominant_freq: f64,
+        peak_freq_deviation: f64,
+        bppr: f64,
+        spectral_resilience: f64,
+        baseline_centroid: f64,
+        brightness: f64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DisturbGoldenPair {
+        canonical: DisturbGoldenSnapshot,
+        legacy_ablated: DisturbGoldenSnapshot,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct P01GoldenManifest {
+        renderer_revision: String,
+        disturb: DisturbGoldenPair,
+    }
+
+    fn p01_disturb_goldens() -> DisturbGoldenPair {
+        let manifest: P01GoldenManifest =
+            serde_json::from_str(include_str!("../baselines/goldens/p01_current_v1.json"))
+                .expect("P01 golden manifest must be valid JSON");
+        assert_eq!(
+            manifest.renderer_revision,
+            RendererRevision::DspBrownHfV2.as_str()
+        );
+        manifest.disturb
+    }
+
+    fn assert_disturb_snapshot(result: &DisturbResult, expected: DisturbGoldenSnapshot) {
+        const EPS: f64 = 1e-12;
+        for (field, actual, expected) in [
+            (
+                "baseline_dominant_freq",
+                result.baseline_dominant_freq,
+                expected.baseline_dominant_freq,
+            ),
+            (
+                "peak_freq_deviation",
+                result.peak_freq_deviation,
+                expected.peak_freq_deviation,
+            ),
+            ("bppr", result.bppr, expected.bppr),
+            (
+                "spectral_resilience",
+                result.spectral_resilience,
+                expected.spectral_resilience,
+            ),
+            (
+                "baseline_centroid",
+                result.baseline_centroid,
+                expected.baseline_centroid,
+            ),
+            ("brightness", result.brightness, expected.brightness),
+        ] {
+            assert!(
+                (actual - expected).abs() < EPS,
+                "{field} mismatch: actual={actual:.15} expected={expected:.15}"
+            );
+        }
+    }
+
     fn make_window(time: f64, bp: [f64; 5], centroid: f64) -> WindowMetrics {
         WindowMetrics {
             time_s: time,
@@ -1308,9 +1378,7 @@ mod tests {
             result.model_signature.normalization_mode,
             NormalizationMode::GlobalPerEar
         );
-        assert!((result.baseline_dominant_freq - 16.294_642_857_142_858_f64).abs() < 1e-12);
-        assert!((result.baseline_centroid - 20.294_805_734_269_236_f64).abs() < 1e-12);
-        assert!((result.brightness - 0.488_127_418_119_048_f64).abs() < 1e-12);
+        assert_disturb_snapshot(&result, p01_disturb_goldens().canonical);
     }
 
     #[test]
@@ -1331,9 +1399,7 @@ mod tests {
             result.model_signature.normalization_mode,
             NormalizationMode::PerBandPerEar
         );
-        assert!((result.baseline_dominant_freq - 7.840_401_785_714_286_f64).abs() < 1e-12);
-        assert!((result.baseline_centroid - 13.241_578_763_755_339_f64).abs() < 1e-12);
-        assert!((result.brightness - 0.488_127_418_119_048_f64).abs() < 1e-12);
+        assert_disturb_snapshot(&result, p01_disturb_goldens().legacy_ablated);
     }
 
     #[test]

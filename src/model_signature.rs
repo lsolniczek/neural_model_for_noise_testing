@@ -1,5 +1,5 @@
-use crate::brain_type::{BandModelType, BrainType, CandidateBrainProfile, TonotopicParams};
 use crate::auditory::ArousalModel;
+use crate::brain_type::{BandModelType, BrainType, CandidateBrainProfile, TonotopicParams};
 use crate::neural::fhn::legacy_constants_snapshot as fhn_legacy_constants_snapshot;
 use crate::neural::jansen_rit::legacy_constants_snapshot;
 use crate::neural::wilson_cowan::{
@@ -7,6 +7,39 @@ use crate::neural::wilson_cowan::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// Current JSON schema written into every model signature.
+pub const MODEL_SIGNATURE_SCHEMA_VERSION: u32 = 2;
+
+/// Exact DSP source revision used by this NMM build.
+///
+/// This value is updated together with the pinned Cargo dependency. Keeping it
+/// in the exported signature makes a result self-describing even after the
+/// lockfile is no longer available.
+pub const DSP_SOURCE_REVISION: &str = "20611c7e2b93e170657cda432f4faca41028f2fe";
+
+fn legacy_schema_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RendererRevision {
+    /// Signature created before renderer provenance was part of the contract.
+    #[default]
+    LegacyUnversioned,
+    /// Brown-noise high-frequency damping introduced by the DSP renderer.
+    DspBrownHfV2,
+}
+
+impl RendererRevision {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyUnversioned => "legacy_unversioned",
+            Self::DspBrownHfV2 => "dsp_brown_hf_v2",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -342,6 +375,12 @@ pub struct ReproducibilitySeeds {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSignature {
+    #[serde(default = "legacy_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub renderer_revision: RendererRevision,
+    #[serde(default)]
+    pub renderer_source_revision: Option<String>,
     pub version: ModelVersion,
     pub pipeline_variant: PipelineVariant,
     pub scoring_profile: ScoringProfile,

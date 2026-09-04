@@ -56,6 +56,55 @@ pub struct GoalSemantics {
     pub evidence_level: GoalEvidenceLevel,
 }
 
+impl<'de> Deserialize<'de> for GoalSemantics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct OwnedGoalSemantics {
+            goal: GoalKind,
+            plain_language_purpose: String,
+            product_objective: String,
+            primary_neural_proxies: Vec<String>,
+            primary_acoustic_proxies: Vec<String>,
+            best_use_cases: Vec<String>,
+            unsupported_claims: Vec<String>,
+            evidence_level: GoalEvidenceLevel,
+        }
+
+        fn strings_match(actual: &[String], expected: &[&str]) -> bool {
+            actual
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        }
+
+        let value = OwnedGoalSemantics::deserialize(deserializer)?;
+        let expected = value.goal.semantics();
+        let matches = value.plain_language_purpose == expected.plain_language_purpose
+            && value.product_objective == expected.product_objective
+            && strings_match(
+                &value.primary_neural_proxies,
+                expected.primary_neural_proxies,
+            )
+            && strings_match(
+                &value.primary_acoustic_proxies,
+                expected.primary_acoustic_proxies,
+            )
+            && strings_match(&value.best_use_cases, expected.best_use_cases)
+            && strings_match(&value.unsupported_claims, expected.unsupported_claims)
+            && value.evidence_level == expected.evidence_level;
+        if !matches {
+            return Err(serde::de::Error::custom(format!(
+                "goal semantics do not match the canonical {} contract",
+                value.goal
+            )));
+        }
+        Ok(expected)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalKind {

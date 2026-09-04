@@ -1,6 +1,8 @@
 import contextlib
+import copy
 import importlib.util
 import io
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +10,8 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[2] / "tools" / "compatibility" / "stage1_baseline.py"
+REPO_ROOT = MODULE_PATH.parents[2]
+HISTORICAL_BASELINE = REPO_ROOT / "baselines" / "compatibility" / "stage1_legacy_pre_parity"
 SPEC = importlib.util.spec_from_file_location("stage1_baseline", MODULE_PATH)
 stage1 = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -37,6 +41,29 @@ def valid_report(profile: dict) -> dict:
                 "acoustic_score_fusion_enabled": profile["acoustic_score_fusion"], "arousal_model": profile["arousal_model"],
             },
         },
+    }
+
+
+def valid_v3_manifest() -> dict:
+    green = {"summary": {"passed": 1, "failed": 0, "ignored": 0}, "failures": [], "exit_code": 0}
+    digest = "sha256:" + "a" * 64
+    return {
+        "schema_version": stage1.SCHEMA_VERSION,
+        "baseline_id": "stage1_green_example",
+        "captured_at_utc": "now",
+        "warning": "regression reference",
+        "repositories": {name: {"head": "a" * 40} for name in ("nmm", "dsp", "ios")},
+        "source_fingerprints": {},
+        "toolchain": {},
+        "capture_tool_sha256": digest,
+        "binary_sha256": digest,
+        "renderer_observation": stage1.RENDERER_OBSERVATION,
+        "evaluation_profiles": stage1.PROFILES,
+        "preset_corpus": {"root": "inputs/presets", "count": 60},
+        "tests": {"nmm": copy.deepcopy(green), "dsp": copy.deepcopy(green)},
+        "evaluation_result": {"attempted": 120, "succeeded": 120, "report_root": "evaluations"},
+        "capture_state": {"pre_sha256": digest, "post_sha256": digest, "capture_state_stable": True},
+        "artifact_hashes": {},
     }
 
 
@@ -71,14 +98,16 @@ class Stage1BaselineTests(unittest.TestCase):
 
     def test_parse_summary_selects_largest_suite(self):
         output = "test result: ok. 0 passed; 0 failed; 0 ignored;\n" "test result: FAILED. 511 passed; 2 failed; 5 ignored;\n"
-        self.assertEqual(stage1.parse_summary(output), stage1.EXPECTED_NMM_SUMMARY)
+        self.assertEqual(stage1.parse_summary(output), {"passed": 511, "failed": 2, "ignored": 5})
 
-    def test_nmm_test_contract_rejects_new_failure(self):
-        expected = "\n".join(f"---- {name} stdout ----" for name in sorted(stage1.EXPECTED_NMM_FAILURES))
-        output = expected + "\ntest result: FAILED. 511 passed; 2 failed; 5 ignored;\n"
-        self.assertEqual(stage1.assert_nmm_test_baseline(output, 101), stage1.EXPECTED_NMM_SUMMARY)
+    def test_current_test_contract_requires_green_without_fixed_pass_count(self):
+        first = "test result: ok. 511 passed; 0 failed; 5 ignored;\n"
+        second = "test result: ok. 900 passed; 0 failed; 6 ignored;\n"
+        self.assertEqual(stage1.assert_green_test_run(first, 0, "NMM")["passed"], 511)
+        self.assertEqual(stage1.assert_green_test_run(second, 0, "NMM")["passed"], 900)
+        failed = "---- new::failure stdout ----\ntest result: FAILED. 511 passed; 1 failed; 5 ignored;\n"
         with self.assertRaises(stage1.BaselineError):
-            stage1.assert_nmm_test_baseline(output + "---- new::failure stdout ----\n", 101)
+            stage1.assert_green_test_run(failed, 101, "NMM")
 
     def test_validate_report_rejects_profile_and_nonfinite_mismatch(self):
         profile = stage1.PROFILES["compat_regression_v1"]
@@ -94,20 +123,60 @@ class Stage1BaselineTests(unittest.TestCase):
                 stage1.write_json(Path(directory) / "bad.json", {"value": float("nan")})
 
     def test_manifest_rejects_unstable_capture(self):
-        manifest = {
-            "schema_version": stage1.SCHEMA_VERSION, "baseline_id": stage1.BASELINE_ID,
-            "captured_at_utc": "now", "warning": "legacy",
-            "repositories": {name: {"head": "a" * 40} for name in ("nmm", "dsp", "ios")},
-            "source_fingerprints": {}, "toolchain": {}, "capture_tool_sha256": "sha256:" + "a" * 64,
-            "binary_sha256": "sha256:" + "b" * 64, "renderer_observation": stage1.RENDERER_OBSERVATION,
-            "evaluation_profiles": stage1.PROFILES, "preset_corpus": {"root": "inputs/presets", "count": 60},
-            "tests": {"nmm": {"summary": stage1.EXPECTED_NMM_SUMMARY, "failures": sorted(stage1.EXPECTED_NMM_FAILURES), "exit_code": 101}, "dsp": {"summary": stage1.EXPECTED_DSP_SUMMARY, "exit_code": 0}},
-            "evaluation_result": {"attempted": 120, "succeeded": 120, "report_root": "evaluations"},
-            "capture_state": {"pre_sha256": "sha256:" + "c" * 64, "post_sha256": "sha256:" + "d" * 64, "capture_state_stable": False},
-            "artifact_hashes": {},
-        }
+        manifest = valid_v3_manifest()
+        manifest["capture_state"]["post_sha256"] = "sha256:" + "d" * 64
+        manifest["capture_state"]["capture_state_stable"] = False
         with self.assertRaises(stage1.BaselineError):
             stage1.validate_manifest(manifest)
+
+    def test_schema_v3_rejects_historical_red_tests(self):
+        manifest = valid_v3_manifest()
+        manifest["tests"]["nmm"] = {
+            "summary": {"passed": 511, "failed": 2, "ignored": 5},
+            "failures": ["old::failure_one", "old::failure_two"],
+            "exit_code": 101,
+        }
+        with self.assertRaisesRegex(stage1.BaselineError, "non-green NMM"):
+            stage1.validate_manifest(manifest)
+
+    def test_schema_v2_manifest_and_inventory_are_adapted_in_memory(self):
+        raw_manifest = stage1.load_json(HISTORICAL_BASELINE / "manifest.json")
+        raw_inventory = stage1.load_json(HISTORICAL_BASELINE / "preset_inventory.json")
+        manifest = stage1.validate_manifest(raw_manifest)
+        inventory = stage1.normalize_inventory(
+            raw_inventory, manifest["evaluation_profiles"], manifest["_source_schema_version"]
+        )
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["_source_schema_version"], 2)
+        self.assertEqual(list(manifest["evaluation_profiles"]), ["compat_smoke_v1"])
+        self.assertEqual(inventory["profiles"], ["compat_smoke_v1"])
+        self.assertEqual(
+            inventory["presets"][0]["reports"],
+            {"compat_smoke_v1": "evaluations/deep_relax_phys_cet_v1.json"},
+        )
+
+    def test_historical_schema_v2_baseline_integrity_is_valid(self):
+        manifest = stage1.verify_baseline(HISTORICAL_BASELINE)
+        self.assertEqual(manifest["_source_schema_version"], 2)
+        self.assertEqual(manifest["tests"]["nmm"]["exit_code"], 101)
+
+    def test_historical_baseline_tampering_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / "baseline"
+            shutil.copytree(HISTORICAL_BASELINE, copied)
+            path = copied / "inputs" / "presets" / "showcase_white.json"
+            path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            with self.assertRaises(stage1.BaselineError):
+                stage1.verify_baseline(copied)
+
+    def test_capture_cli_requires_explicit_baseline_id(self):
+        parser = stage1.build_parser()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["capture", "--output", "/tmp/baseline"])
+        args = parser.parse_args(
+            ["capture", "--output", "/tmp/baseline", "--baseline-id", "p01_current_v1"]
+        )
+        self.assertEqual(args.baseline_id, "p01_current_v1")
 
     def test_capture_state_difference_names_the_changed_runtime_group(self):
         before = {"repositories": {name: {"head": "a"} for name in ("nmm", "dsp", "ios")}, "source_inventory": {"dsp_runtime": {"files": {"crates/core/src/lib.rs": "sha256:old"}}}, "preset_hashes": {}, "ios_evidence_hashes": {}}
@@ -152,15 +221,24 @@ class Stage1BaselineTests(unittest.TestCase):
 
     def test_replay_uses_frozen_inputs_and_validates_all_profiles(self):
         args = mock.Mock(baseline=Path("/baseline"), nmm_repo=Path("/nmm"), dsp_repo=Path("/noise_generator_dsp"), ios_repo=Path("/ios"), profile="all", with_tests=False)
-        inventory = {"presets": [{"preset_path": "presets/showcase_white.json", "reports": {profile: f"evaluations/{profile}/showcase_white.json" for profile in stage1.PROFILE_IDS}}]}
+        inventory = {"profiles": list(stage1.PROFILE_IDS), "presets": [{"preset_path": "presets/showcase_white.json", "reports": {profile: f"evaluations/{profile}/showcase_white.json" for profile in stage1.PROFILE_IDS}}]}
         completed = mock.Mock(returncode=0, stdout="")
         reports = [valid_report(stage1.PROFILES[profile]) for profile in stage1.PROFILE_IDS]
-        with mock.patch.object(stage1, "verify_baseline"), mock.patch.object(stage1, "drift_summary", return_value=[]), mock.patch.object(stage1, "load_json", side_effect=[{}, inventory, *reports]), mock.patch.object(stage1, "run", return_value=completed) as run_mock, mock.patch.object(stage1, "validate_report"), mock.patch.object(stage1, "sha256_file", return_value="sha256:same"), mock.patch.object(stage1, "path_under", side_effect=lambda root, value, label: Path(root) / value):
+        manifest = {"evaluation_profiles": stage1.PROFILES, "_source_schema_version": 3}
+        with mock.patch.object(stage1, "verify_baseline", return_value=manifest), mock.patch.object(stage1, "drift_summary", return_value=[]), mock.patch.object(stage1, "load_json", side_effect=[inventory, *reports]), mock.patch.object(stage1, "run", return_value=completed) as run_mock, mock.patch.object(stage1, "validate_report"), mock.patch.object(stage1, "sha256_file", return_value="sha256:same"), mock.patch.object(stage1, "path_under", side_effect=lambda root, value, label: Path(root) / value):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(stage1.replay(args), 0)
         evaluation_calls = run_mock.call_args_list[1:]
         self.assertEqual(len(evaluation_calls), 2)
         self.assertTrue(all(call.args[1] == Path("/baseline") / "inputs" for call in evaluation_calls))
+
+    def test_replay_with_tests_uses_green_current_contract(self):
+        green = mock.Mock(returncode=0, stdout="test result: ok. 12 passed; 0 failed; 1 ignored;\n")
+        failed = mock.Mock(returncode=101, stdout="test result: FAILED. 11 passed; 1 failed; 1 ignored;\n")
+        with mock.patch.object(stage1, "run", side_effect=[green, green]):
+            stage1.replay_tests(Path("/nmm"), Path("/dsp"))
+        with mock.patch.object(stage1, "run", return_value=failed), self.assertRaises(stage1.BaselineError):
+            stage1.replay_tests(Path("/nmm"), Path("/dsp"))
 
 
 if __name__ == "__main__":

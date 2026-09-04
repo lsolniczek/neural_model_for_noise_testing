@@ -270,6 +270,7 @@ dependencies = [
 [[package]]
 name = "noise_generator_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/lsolniczek/noise_generator_dsp.git?rev=20611c7e2b93e170657cda432f4faca41028f2fe#20611c7e2b93e170657cda432f4faca41028f2fe"
 dependencies = [
  "fastrand",
  "noise_generator_engine_shared",
@@ -280,6 +281,7 @@ dependencies = [
 [[package]]
 name = "noise_generator_engine_shared"
 version = "0.1.0"
+source = "git+ssh://git@github.com/lsolniczek/noise_generator_dsp.git?rev=20611c7e2b93e170657cda432f4faca41028f2fe#20611c7e2b93e170657cda432f4faca41028f2fe"
 dependencies = [
  "fastrand",
 ]
@@ -287,6 +289,7 @@ dependencies = [
 [[package]]
 name = "noise_generator_signal_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/lsolniczek/noise_generator_dsp.git?rev=20611c7e2b93e170657cda432f4faca41028f2fe#20611c7e2b93e170657cda432f4faca41028f2fe"
 dependencies = [
  "fastrand",
  "noise_generator_engine_shared",
@@ -295,6 +298,7 @@ dependencies = [
 [[package]]
 name = "noise_generator_spatial_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/lsolniczek/noise_generator_dsp.git?rev=20611c7e2b93e170657cda432f4faca41028f2fe#20611c7e2b93e170657cda432f4faca41028f2fe"
 dependencies = [
  "noise_generator_engine_shared",
 ]

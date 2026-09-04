@@ -7,9 +7,9 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::auditory::{ArousalModel, ArousalSource, ThalamicGate};
     use crate::brain_type::BrainType;
     use crate::model_signature::ModelVersion;
-    use crate::auditory::{ArousalModel, ArousalSource, ThalamicGate};
     use crate::neural::fhn::*;
     use crate::neural::jansen_rit::*;
     use crate::optimizer::DifferentialEvolution;
@@ -809,7 +809,7 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, serde::Deserialize)]
     struct LegacyGoldenSnapshot {
         score: f64,
         dominant_freq: f64,
@@ -820,6 +820,45 @@ mod tests {
         gamma_power: f64,
         brightness: f64,
         alpha_asymmetry: f64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LegacyGoldenSnapshotEntry {
+        name: String,
+        #[serde(flatten)]
+        snapshot: LegacyGoldenSnapshot,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct P01GoldenManifest {
+        schema_version: u32,
+        baseline_id: String,
+        model_version: String,
+        renderer_revision: String,
+        legacy_v1_stage0: Vec<LegacyGoldenSnapshotEntry>,
+    }
+
+    fn p01_golden_manifest() -> P01GoldenManifest {
+        let manifest: P01GoldenManifest =
+            serde_json::from_str(include_str!("../baselines/goldens/p01_current_v1.json"))
+                .expect("P01 golden manifest must be valid JSON");
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.baseline_id, "p01_current_v1");
+        assert_eq!(manifest.model_version, "legacy_v1");
+        assert_eq!(
+            manifest.renderer_revision,
+            crate::model_signature::RendererRevision::DspBrownHfV2.as_str()
+        );
+        manifest
+    }
+
+    fn p01_stage0_snapshot(name: &str) -> LegacyGoldenSnapshot {
+        p01_golden_manifest()
+            .legacy_v1_stage0
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("missing Stage 0 snapshot '{name}' in P01 manifest"))
+            .snapshot
     }
 
     struct LegacyGoldenCase {
@@ -898,153 +937,63 @@ mod tests {
                 preset: fixture_dark_unmodulated_symmetric(),
                 goal_kind: GoalKind::Sleep,
                 config: canonical_config(4.0, BrainType::Normal),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.335911959459740,
-                    dominant_freq: 0.976562500000000,
-                    delta_power: 0.424334458638242,
-                    theta_power: 0.129684027561843,
-                    alpha_power: 0.361601526286417,
-                    beta_power: 0.078704473926617,
-                    gamma_power: 0.005675513586882,
-                    brightness: 0.112807522664250,
-                    alpha_asymmetry: -0.585339028141012,
-                },
+                expected: p01_stage0_snapshot("dark_sleep_normal_canonical_4s"),
             },
             LegacyGoldenCase {
                 name: "dark_deep_relax_aging_ablation_12s",
                 preset: fixture_dark_unmodulated_symmetric(),
                 goal_kind: GoalKind::DeepRelaxation,
                 config: ablation_config(12.0, BrainType::Aging),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.321670819867025,
-                    dominant_freq: 6.835937500000000,
-                    delta_power: 0.003527594893125,
-                    theta_power: 0.951742055357745,
-                    alpha_power: 0.034577468291727,
-                    beta_power: 0.009703062040394,
-                    gamma_power: 0.000449819417009,
-                    brightness: 0.054102405387457,
-                    alpha_asymmetry: 0.997744091862655,
-                },
+                expected: p01_stage0_snapshot("dark_deep_relax_aging_ablation_12s"),
             },
             LegacyGoldenCase {
                 name: "mid_focus_adhd_canonical_4s",
                 preset: fixture_mid_modulated_lateralized(),
                 goal_kind: GoalKind::Focus,
                 config: canonical_config(4.0, BrainType::Adhd),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.334738086849502,
-                    dominant_freq: 5.859375000000000,
-                    delta_power: 0.255168311618526,
-                    theta_power: 0.550173524729978,
-                    alpha_power: 0.085564464498437,
-                    beta_power: 0.101323860329155,
-                    gamma_power: 0.007769838823905,
-                    brightness: 0.325224436122527,
-                    alpha_asymmetry: 0.081789223181948,
-                },
+                expected: p01_stage0_snapshot("mid_focus_adhd_canonical_4s"),
             },
             LegacyGoldenCase {
                 name: "mid_shield_adhd_ablation_12s",
                 preset: fixture_mid_modulated_lateralized(),
                 goal_kind: GoalKind::Shield,
                 config: ablation_config(12.0, BrainType::Adhd),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.341502463573143,
-                    dominant_freq: 6.896972656250000,
-                    delta_power: 0.003504896326945,
-                    theta_power: 0.923150317183464,
-                    alpha_power: 0.044790014912155,
-                    beta_power: 0.026042026789557,
-                    gamma_power: 0.002512744787880,
-                    brightness: 0.317479948341570,
-                    alpha_asymmetry: 0.929018533420237,
-                },
+                expected: p01_stage0_snapshot("mid_shield_adhd_ablation_12s"),
             },
             LegacyGoldenCase {
                 name: "mid_meditation_high_alpha_canonical_4s",
                 preset: fixture_mid_modulated_lateralized(),
                 goal_kind: GoalKind::Meditation,
                 config: canonical_config(4.0, BrainType::HighAlpha),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.510769605947867,
-                    dominant_freq: 0.976562500000000,
-                    delta_power: 0.481143795629993,
-                    theta_power: 0.489930784034469,
-                    alpha_power: 0.022950590348520,
-                    beta_power: 0.005812061723820,
-                    gamma_power: 0.000162768263198,
-                    brightness: 0.325224436122527,
-                    alpha_asymmetry: -0.497281058536251,
-                },
+                expected: p01_stage0_snapshot("mid_meditation_high_alpha_canonical_4s"),
             },
             LegacyGoldenCase {
                 name: "bright_ignition_anxious_canonical_4s",
                 preset: fixture_bright_modulated_symmetric(),
                 goal_kind: GoalKind::Ignition,
                 config: canonical_config(4.0, BrainType::Anxious),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.216077172096382,
-                    dominant_freq: 0.976562500000000,
-                    delta_power: 0.990839614872210,
-                    theta_power: 0.007148707534671,
-                    alpha_power: 0.001237826637320,
-                    beta_power: 0.000686510150874,
-                    gamma_power: 0.000087340804925,
-                    brightness: 0.960022127940275,
-                    alpha_asymmetry: -0.817632399628552,
-                },
+                expected: p01_stage0_snapshot("bright_ignition_anxious_canonical_4s"),
             },
             LegacyGoldenCase {
                 name: "bright_flow_normal_ablation_12s",
                 preset: fixture_bright_modulated_symmetric(),
                 goal_kind: GoalKind::Flow,
                 config: ablation_config(12.0, BrainType::Normal),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.238052585930439,
-                    dominant_freq: 24.230957031250000,
-                    delta_power: 0.000422105414719,
-                    theta_power: 0.001532795314489,
-                    alpha_power: 0.018127457361253,
-                    beta_power: 0.807669810840614,
-                    gamma_power: 0.172247831068925,
-                    brightness: 0.962277113499317,
-                    alpha_asymmetry: -0.993466058254526,
-                },
+                expected: p01_stage0_snapshot("bright_flow_normal_ablation_12s"),
             },
             LegacyGoldenCase {
                 name: "bright_deep_work_high_alpha_ablation_12s",
                 preset: fixture_bright_modulated_symmetric(),
                 goal_kind: GoalKind::DeepWork,
                 config: ablation_config(12.0, BrainType::HighAlpha),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.400027331597159,
-                    dominant_freq: 7.751464843750000,
-                    delta_power: 0.033792227195554,
-                    theta_power: 0.753879345392662,
-                    alpha_power: 0.154169743825606,
-                    beta_power: 0.054961361292831,
-                    gamma_power: 0.003197322293347,
-                    brightness: 0.962277113499317,
-                    alpha_asymmetry: 0.862206520752636,
-                },
+                expected: p01_stage0_snapshot("bright_deep_work_high_alpha_ablation_12s"),
             },
             LegacyGoldenCase {
                 name: "bright_isolation_normal_canonical_12s",
                 preset: fixture_bright_modulated_symmetric(),
                 goal_kind: GoalKind::Isolation,
                 config: canonical_config(12.0, BrainType::Normal),
-                expected: LegacyGoldenSnapshot {
-                    score: 0.484498072976395,
-                    dominant_freq: 24.230957031250000,
-                    delta_power: 0.034256679819131,
-                    theta_power: 0.000121218029019,
-                    alpha_power: 0.000037928274931,
-                    beta_power: 0.795697651609615,
-                    gamma_power: 0.169886522267304,
-                    brightness: 0.962277113499317,
-                    alpha_asymmetry: -0.987781083619729,
-                },
+                expected: p01_stage0_snapshot("bright_isolation_normal_canonical_12s"),
             },
         ]
     }

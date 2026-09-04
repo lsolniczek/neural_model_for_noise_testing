@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -20,13 +21,8 @@ from typing import Any, Iterable
 
 
 SCHEMA_VERSION = 3
-BASELINE_ID = "stage1_legacy_pre_parity"
-EXPECTED_NMM_FAILURES = {
-    "disturb::tests::disturb_canonical_golden_snapshot_reference_case",
-    "disturb::tests::disturb_legacy_ablated_golden_snapshot_reference_case",
-}
-EXPECTED_NMM_SUMMARY = {"passed": 511, "failed": 2, "ignored": 5}
-EXPECTED_DSP_SUMMARY = {"passed": 667, "failed": 0, "ignored": 2}
+SUPPORTED_SCHEMA_VERSIONS = (2, SCHEMA_VERSION)
+BASELINE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 PROFILE_IDS = ("compat_smoke_v1", "compat_regression_v1")
 PROFILES = {
     "compat_smoke_v1": {
@@ -290,18 +286,22 @@ def parse_failure_names(output: str) -> set[str]:
     return set(FAIL_HEADER_RE.findall(output))
 
 
-def assert_nmm_test_baseline(output: str, returncode: int) -> dict[str, int]:
+def assert_green_test_run(output: str, returncode: int, label: str) -> dict[str, int]:
     summary, failures = parse_summary(output), parse_failure_names(output)
-    if summary != EXPECTED_NMM_SUMMARY or failures != EXPECTED_NMM_FAILURES or returncode != 101:
-        raise BaselineError(f"NMM test baseline changed: summary={summary}, failures={sorted(failures)}, exit={returncode}")
+    if returncode != 0 or summary["failed"] != 0 or failures:
+        raise BaselineError(
+            f"{label} tests are not green: summary={summary}, "
+            f"failures={sorted(failures)}, exit={returncode}"
+        )
     return summary
 
 
-def assert_dsp_test_baseline(output: str, returncode: int) -> dict[str, int]:
-    summary = parse_summary(output)
-    if summary != EXPECTED_DSP_SUMMARY or returncode != 0:
-        raise BaselineError(f"DSP test baseline changed: summary={summary}, exit={returncode}")
-    return summary
+def validate_baseline_id(value: Any) -> str:
+    if not isinstance(value, str) or not BASELINE_ID_RE.fullmatch(value):
+        raise BaselineError(
+            "baseline id must contain 3-64 lowercase letters, digits, underscores, or hyphens"
+        )
+    return value
 
 
 def command_for_evaluation(binary: Path, relative_preset: Path, report_path: Path, profile: dict[str, Any]) -> list[str]:
@@ -451,12 +451,23 @@ def capture_state_differences(before: dict[str, Any], after: dict[str, Any]) -> 
     return differences
 
 
-def write_readme(root: Path) -> None:
-    (root / "README.md").write_text("# Stage 1 legacy baseline\n\nThis schema-v3 snapshot records pre-renderer-parity NMM behavior. It is a regression reference, not a production-equivalent renderer baseline or evidence of human efficacy. It retains schema-v2-compatible smoke reports and adds 12-second regression reports.\n\nVerify offline: `python3 tools/compatibility/stage1_baseline.py verify --baseline baselines/compatibility/stage1_legacy_pre_parity`\n\nReplay current code: `python3 tools/compatibility/stage1_baseline.py replay --baseline baselines/compatibility/stage1_legacy_pre_parity --nmm-repo . --dsp-repo ../noise_generator_dsp --ios-repo ../noise_generator_ios_app --with-tests`\n", encoding="utf-8")
+def write_readme(root: Path, baseline_id: str) -> None:
+    (root / "README.md").write_text(
+        f"# Stage 1 baseline: {baseline_id}\n\n"
+        "This schema-v3 snapshot is a regression reference, not evidence of human efficacy. "
+        "It may be captured only when the current NMM and DSP test suites are green.\n\n"
+        "Verify offline: `python3 tools/compatibility/stage1_baseline.py verify "
+        "--baseline <baseline-directory>`\n\n"
+        "Replay current code: `python3 tools/compatibility/stage1_baseline.py replay "
+        "--baseline <baseline-directory> --nmm-repo . --dsp-repo ../noise_generator_dsp "
+        "--ios-repo ../noise_generator_ios_app --with-tests`\n",
+        encoding="utf-8",
+    )
 
 
 def capture(args: argparse.Namespace) -> None:
     nmm, dsp, ios, output = args.nmm_repo.resolve(), args.dsp_repo.resolve(), args.ios_repo.resolve(), args.output.resolve()
+    baseline_id = validate_baseline_id(args.baseline_id)
     if output.exists():
         raise BaselineError(f"refusing to overwrite existing baseline: {output}")
     validate_repo_paths(nmm, dsp)
@@ -476,10 +487,10 @@ def capture(args: argparse.Namespace) -> None:
         binary = nmm / "target/debug/neural_preset_optimizer"
         nmm_tests = run(["cargo", "test", "--locked", "--all-targets"], nmm)
         (staging / "test-results/nmm.log").write_text(nmm_tests.stdout, encoding="utf-8")
-        nmm_summary = assert_nmm_test_baseline(nmm_tests.stdout, nmm_tests.returncode)
+        nmm_summary = assert_green_test_run(nmm_tests.stdout, nmm_tests.returncode, "NMM")
         dsp_tests = run(["cargo", "test", "--locked", "-p", "noise_generator_core", "--no-default-features"], dsp)
         (staging / "test-results/dsp.log").write_text(dsp_tests.stdout, encoding="utf-8")
-        dsp_summary = assert_dsp_test_baseline(dsp_tests.stdout, dsp_tests.returncode)
+        dsp_summary = assert_green_test_run(dsp_tests.stdout, dsp_tests.returncode, "DSP")
         entries = []
         for preset in presets:
             relative = preset.relative_to(nmm / "presets")
@@ -504,8 +515,8 @@ def capture(args: argparse.Namespace) -> None:
         write_json(staging / "preset_inventory.json", {"count": len(entries), "profiles": list(PROFILE_IDS), "presets": entries})
         write_json(staging / "source_inventory.json", pre["source_inventory"])
         write_json(staging / "shipping_preset_registry.json", swift_registry(ios, staging))
-        write_readme(staging)
-        manifest = {"schema_version": SCHEMA_VERSION, "baseline_id": BASELINE_ID, "captured_at_utc": datetime.now(timezone.utc).isoformat(), "warning": "Legacy pre-renderer-parity regression reference; not production-equivalent.", "repositories": pre["repositories"], "source_fingerprints": pre["source_fingerprints"], "toolchain": toolchain_metadata(), "capture_tool_sha256": sha256_file(Path(__file__).resolve()), "binary_sha256": sha256_file(binary), "renderer_observation": RENDERER_OBSERVATION, "evaluation_profiles": PROFILES, "preset_corpus": {"root": "inputs/presets", "count": 60, "inventory": "preset_inventory.json"}, "tests": {"nmm": {"command": ["cargo", "test", "--locked", "--all-targets"], "exit_code": nmm_tests.returncode, "summary": nmm_summary, "failures": sorted(EXPECTED_NMM_FAILURES)}, "dsp": {"command": ["cargo", "test", "--locked", "-p", "noise_generator_core", "--no-default-features"], "exit_code": dsp_tests.returncode, "summary": dsp_summary}}, "evaluation_result": {"attempted": 120, "succeeded": 120, "report_root": "evaluations"}, "capture_state": {"pre_sha256": state_digest(pre), "post_sha256": state_digest(post), "capture_state_stable": True}, "artifact_hashes": artifact_hashes(staging)}
+        write_readme(staging, baseline_id)
+        manifest = {"schema_version": SCHEMA_VERSION, "baseline_id": baseline_id, "captured_at_utc": datetime.now(timezone.utc).isoformat(), "warning": "Regression reference; not evidence of human efficacy.", "repositories": pre["repositories"], "source_fingerprints": pre["source_fingerprints"], "toolchain": toolchain_metadata(), "capture_tool_sha256": sha256_file(Path(__file__).resolve()), "binary_sha256": sha256_file(binary), "renderer_observation": RENDERER_OBSERVATION, "evaluation_profiles": PROFILES, "preset_corpus": {"root": "inputs/presets", "count": 60, "inventory": "preset_inventory.json"}, "tests": {"nmm": {"command": ["cargo", "test", "--locked", "--all-targets"], "exit_code": nmm_tests.returncode, "summary": nmm_summary, "failures": []}, "dsp": {"command": ["cargo", "test", "--locked", "-p", "noise_generator_core", "--no-default-features"], "exit_code": dsp_tests.returncode, "summary": dsp_summary, "failures": []}}, "evaluation_result": {"attempted": 120, "succeeded": 120, "report_root": "evaluations"}, "capture_state": {"pre_sha256": state_digest(pre), "post_sha256": state_digest(post), "capture_state_stable": True}, "artifact_hashes": artifact_hashes(staging)}
         write_json(staging / "manifest.json", manifest)
         verify_baseline(staging)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -521,45 +532,125 @@ def tracked_state(repo: Path, relative_path: Path) -> str:
     return "untracked" if status.startswith("??") else "modified" if status else "tracked_clean"
 
 
-def validate_manifest(manifest: dict[str, Any]) -> None:
-    required = {"schema_version", "baseline_id", "captured_at_utc", "warning", "repositories", "source_fingerprints", "toolchain", "capture_tool_sha256", "binary_sha256", "renderer_observation", "evaluation_profiles", "preset_corpus", "tests", "evaluation_result", "capture_state", "artifact_hashes"}
-    if not isinstance(manifest, dict) or not required.issubset(manifest) or manifest["schema_version"] != SCHEMA_VERSION or manifest["baseline_id"] != BASELINE_ID:
+def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Adapt supported manifests to the schema-v3 in-memory shape."""
+    if not isinstance(manifest, dict) or manifest.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS:
         raise BaselineError("unsupported baseline manifest")
+    normalized = copy.deepcopy(manifest)
+    source_schema_version = normalized["schema_version"]
+    if source_schema_version == 2:
+        profile = normalized.pop("evaluation_profile", None)
+        if not isinstance(profile, dict):
+            raise BaselineError("schema-v2 manifest is missing evaluation_profile")
+        profile["warmup_discard_secs"] = 2.0
+        duration = profile.get("duration_secs")
+        if not finite_number(duration):
+            raise BaselineError("schema-v2 evaluation duration is invalid")
+        profile["analysis_duration_secs"] = round(float(duration) - profile["warmup_discard_secs"], 12)
+        normalized["evaluation_profiles"] = {profile.get("id"): profile}
+        normalized.setdefault("binary_sha256", None)
+        normalized.setdefault("capture_state", None)
+        normalized["schema_version"] = SCHEMA_VERSION
+    normalized["_source_schema_version"] = source_schema_version
+    return normalized
+
+
+def normalize_inventory(inventory: dict[str, Any], profiles: dict[str, Any], source_schema_version: int) -> dict[str, Any]:
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("presets"), list):
+        raise BaselineError("baseline inventory is invalid")
+    normalized = copy.deepcopy(inventory)
+    profile_ids = list(profiles)
+    if source_schema_version == 2:
+        if len(profile_ids) != 1:
+            raise BaselineError("schema-v2 inventory requires exactly one evaluation profile")
+        profile_id = profile_ids[0]
+        for item in normalized["presets"]:
+            if not isinstance(item, dict) or not isinstance(item.get("report_path"), str):
+                raise BaselineError("schema-v2 inventory entry is missing report_path")
+            item["reports"] = {profile_id: item.pop("report_path")}
+        normalized["profiles"] = profile_ids
+    return normalized
+
+
+def validate_recorded_test(name: str, record: Any, require_green: bool) -> None:
+    if not isinstance(record, dict) or not isinstance(record.get("exit_code"), int):
+        raise BaselineError(f"recorded {name} test result is invalid")
+    summary = record.get("summary")
+    if not isinstance(summary, dict) or set(summary) != {"passed", "failed", "ignored"}:
+        raise BaselineError(f"recorded {name} test summary is invalid")
+    if any(not isinstance(summary[key], int) or summary[key] < 0 for key in summary):
+        raise BaselineError(f"recorded {name} test counts are invalid")
+    failures = record.get("failures", [])
+    if not isinstance(failures, list) or any(not isinstance(value, str) for value in failures):
+        raise BaselineError(f"recorded {name} failures are invalid")
+    if len(failures) != summary["failed"]:
+        raise BaselineError(f"recorded {name} failure count is inconsistent")
+    is_green = record["exit_code"] == 0 and summary["failed"] == 0 and not failures
+    if (summary["failed"] == 0) != (record["exit_code"] == 0):
+        raise BaselineError(f"recorded {name} exit code is inconsistent")
+    if require_green and not is_green:
+        raise BaselineError(f"schema-v3 baseline records non-green {name} tests")
+
+
+def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_manifest(manifest)
+    source_schema_version = normalized["_source_schema_version"]
+    required = {"schema_version", "baseline_id", "captured_at_utc", "warning", "repositories", "source_fingerprints", "toolchain", "capture_tool_sha256", "binary_sha256", "renderer_observation", "evaluation_profiles", "preset_corpus", "tests", "evaluation_result", "capture_state", "artifact_hashes"}
+    if not required.issubset(normalized):
+        raise BaselineError("baseline manifest fields are incomplete")
+    validate_baseline_id(normalized["baseline_id"])
     for name in ("nmm", "dsp", "ios"):
-        repo = manifest["repositories"].get(name)
+        repo = normalized["repositories"].get(name)
         if not isinstance(repo, dict) or not HEAD_RE.fullmatch(str(repo.get("head", ""))):
             raise BaselineError(f"recorded {name} revision is invalid")
-    if manifest["renderer_observation"] != RENDERER_OBSERVATION or manifest["evaluation_profiles"] != PROFILES:
+    expected_profiles = {"compat_smoke_v1": PROFILES["compat_smoke_v1"]} if source_schema_version == 2 else PROFILES
+    if normalized["renderer_observation"] != RENDERER_OBSERVATION or normalized["evaluation_profiles"] != expected_profiles:
         raise BaselineError("baseline contract is missing or changed")
-    for profile in manifest["evaluation_profiles"].values():
+    for profile in normalized["evaluation_profiles"].values():
         validate_profile(profile)
-    if not SHA256_RE.fullmatch(str(manifest["capture_tool_sha256"])) or not SHA256_RE.fullmatch(str(manifest["binary_sha256"])):
+    if not SHA256_RE.fullmatch(str(normalized["capture_tool_sha256"])):
         raise BaselineError("capture hash is invalid")
-    if manifest["preset_corpus"].get("root") != "inputs/presets" or manifest["preset_corpus"].get("count") != 60 or manifest["evaluation_result"] != {"attempted": 120, "succeeded": 120, "report_root": "evaluations"}:
+    if source_schema_version == SCHEMA_VERSION and not SHA256_RE.fullmatch(str(normalized["binary_sha256"])):
+        raise BaselineError("binary hash is invalid")
+    expected_evaluations = 60 * len(normalized["evaluation_profiles"])
+    if normalized["preset_corpus"].get("root") != "inputs/presets" or normalized["preset_corpus"].get("count") != 60 or normalized["evaluation_result"] != {"attempted": expected_evaluations, "succeeded": expected_evaluations, "report_root": "evaluations"}:
         raise BaselineError("baseline corpus metadata is invalid")
-    if manifest["tests"].get("nmm", {}).get("summary") != EXPECTED_NMM_SUMMARY or set(manifest["tests"].get("nmm", {}).get("failures", [])) != EXPECTED_NMM_FAILURES or manifest["tests"].get("nmm", {}).get("exit_code") != 101 or manifest["tests"].get("dsp", {}).get("summary") != EXPECTED_DSP_SUMMARY or manifest["tests"].get("dsp", {}).get("exit_code") != 0:
-        raise BaselineError("recorded test contract is invalid")
-    state = manifest["capture_state"]
-    if not isinstance(state, dict) or state.get("capture_state_stable") is not True or not SHA256_RE.fullmatch(str(state.get("pre_sha256", ""))) or state.get("pre_sha256") != state.get("post_sha256"):
-        raise BaselineError("capture state is incomplete or unstable")
+    tests = normalized["tests"]
+    if not isinstance(tests, dict):
+        raise BaselineError("recorded tests are invalid")
+    validate_recorded_test("NMM", tests.get("nmm"), require_green=source_schema_version == SCHEMA_VERSION)
+    validate_recorded_test("DSP", tests.get("dsp"), require_green=source_schema_version == SCHEMA_VERSION)
+    state = normalized["capture_state"]
+    if source_schema_version == SCHEMA_VERSION:
+        if not isinstance(state, dict) or state.get("capture_state_stable") is not True or not SHA256_RE.fullmatch(str(state.get("pre_sha256", ""))) or state.get("pre_sha256") != state.get("post_sha256"):
+            raise BaselineError("capture state is incomplete or unstable")
+    elif state is not None:
+        raise BaselineError("schema-v2 capture state must be absent")
+    return normalized
 
 
-def verify_baseline(root: Path) -> None:
-    manifest = load_json(root / "manifest.json")
-    validate_manifest(manifest)
-    source = load_json(root / "source_inventory.json")
-    if source_fingerprints(source) != manifest["source_fingerprints"]:
-        raise BaselineError("source inventory does not match manifest fingerprints")
-    inventory_data = load_json(root / "preset_inventory.json")
+def verify_baseline(root: Path) -> dict[str, Any]:
+    manifest = validate_manifest(load_json(root / "manifest.json"))
+    source_schema_version = manifest["_source_schema_version"]
+    if source_schema_version == SCHEMA_VERSION:
+        source = load_json(root / "source_inventory.json")
+        if source_fingerprints(source) != manifest["source_fingerprints"]:
+            raise BaselineError("source inventory does not match manifest fingerprints")
+    inventory_data = normalize_inventory(
+        load_json(root / "preset_inventory.json"),
+        manifest["evaluation_profiles"],
+        source_schema_version,
+    )
     entries = inventory_data.get("presets")
-    if inventory_data.get("count") != 60 or inventory_data.get("profiles") != list(PROFILE_IDS) or not isinstance(entries, list) or len(entries) != 60:
-        raise BaselineError("baseline inventory must contain 60 presets and both profiles")
+    profile_ids = list(manifest["evaluation_profiles"])
+    if inventory_data.get("count") != 60 or inventory_data.get("profiles") != profile_ids or not isinstance(entries, list) or len(entries) != 60:
+        raise BaselineError("baseline inventory does not match its evaluation profiles")
     seen_presets, seen_reports = set(), set()
     for item in entries:
         preset_path = item.get("preset_path")
         snapshot_path = item.get("snapshot_path")
         reports = item.get("reports")
-        if not isinstance(preset_path, str) or not isinstance(snapshot_path, str) or not isinstance(reports, dict) or set(reports) != set(PROFILE_IDS):
+        if not isinstance(preset_path, str) or not isinstance(snapshot_path, str) or not isinstance(reports, dict) or set(reports) != set(profile_ids):
             raise BaselineError("invalid inventory entry")
         if preset_path in seen_presets:
             raise BaselineError("duplicate preset inventory entry")
@@ -571,22 +662,25 @@ def verify_baseline(root: Path) -> None:
         if not snapshot.is_file() or sha256_file(snapshot) != item.get("sha256"):
             raise BaselineError(f"frozen preset hash mismatch: {preset_path}")
         for profile_id, report_path in reports.items():
-            if not isinstance(report_path, str) or Path(report_path) != normalized_report_path(profile_id, relative) or report_path in seen_reports:
+            expected_report = Path("evaluations") / relative if source_schema_version == 2 else normalized_report_path(profile_id, relative)
+            if not isinstance(report_path, str) or Path(report_path) != expected_report or report_path in seen_reports:
                 raise BaselineError(f"invalid report path for {preset_path}/{profile_id}")
             seen_reports.add(report_path)
             report = path_under(root, report_path, "report path")
             if not report.is_file():
                 raise BaselineError(f"missing report: {report_path}")
-            validate_report(load_json(report), relative, PROFILES[profile_id])
-    if len(seen_reports) != 120:
-        raise BaselineError("baseline does not contain 120 unique reports")
-    registry = load_json(root / "shipping_preset_registry.json")
+            validate_report(load_json(report), relative, manifest["evaluation_profiles"][profile_id])
+    if len(seen_reports) != 60 * len(profile_ids):
+        raise BaselineError("baseline report count is inconsistent")
+    shipping_file = "shipping_preset_candidates.json" if source_schema_version == 2 else "shipping_preset_registry.json"
+    registry = load_json(root / shipping_file)
     providers = registry.get("providers") if isinstance(registry, dict) else None
     if not isinstance(providers, list) or not providers:
         raise BaselineError("shipping preset registry is missing")
-    statuses = {entry.get("provider"): entry.get("shipping_status") for entry in providers}
-    if statuses.get("BluePresetProvider") != "provider_only" or statuses.get("SSNPresetProvider") != "inactive" or any(status not in {"active", "inactive", "provider_only"} for status in statuses.values()):
-        raise BaselineError("shipping preset registry status is invalid")
+    if source_schema_version == SCHEMA_VERSION:
+        statuses = {entry.get("provider"): entry.get("shipping_status") for entry in providers}
+        if statuses.get("BluePresetProvider") != "provider_only" or statuses.get("SSNPresetProvider") != "inactive" or any(status not in {"active", "inactive", "provider_only"} for status in statuses.values()):
+            raise BaselineError("shipping preset registry status is invalid")
     for entry in providers:
         provider = path_under(root, entry.get("provider_snapshot_path", ""), "provider snapshot path")
         if not provider.is_file() or sha256_file(provider) != entry.get("provider_sha256"):
@@ -600,6 +694,7 @@ def verify_baseline(root: Path) -> None:
             raise BaselineError(f"missing required artifact: {name}")
     if manifest["artifact_hashes"] != artifact_hashes(root):
         raise BaselineError("artifact hashes do not match manifest")
+    return manifest
 
 
 def drift_summary(manifest: dict[str, Any], nmm: Path, dsp: Path, ios: Path) -> list[str]:
@@ -617,16 +712,15 @@ def drift_summary(manifest: dict[str, Any], nmm: Path, dsp: Path, ios: Path) -> 
 
 def replay_tests(nmm: Path, dsp: Path) -> None:
     nmm_tests = run(["cargo", "test", "--locked", "--all-targets"], nmm)
-    assert_nmm_test_baseline(nmm_tests.stdout, nmm_tests.returncode)
+    assert_green_test_run(nmm_tests.stdout, nmm_tests.returncode, "NMM")
     dsp_tests = run(["cargo", "test", "--locked", "-p", "noise_generator_core", "--no-default-features"], dsp)
-    assert_dsp_test_baseline(dsp_tests.stdout, dsp_tests.returncode)
+    assert_green_test_run(dsp_tests.stdout, dsp_tests.returncode, "DSP")
 
 
 def replay(args: argparse.Namespace) -> int:
     baseline, nmm, dsp, ios = args.baseline.resolve(), args.nmm_repo.resolve(), args.dsp_repo.resolve(), args.ios_repo.resolve()
     validate_repo_paths(nmm, dsp)
-    verify_baseline(baseline)
-    manifest = load_json(baseline / "manifest.json")
+    manifest = verify_baseline(baseline)
     for line in drift_summary(manifest, nmm, dsp, ios):
         print(line)
     build = run(["cargo", "build", "--locked", "--bin", "neural_preset_optimizer"], nmm)
@@ -634,8 +728,16 @@ def replay(args: argparse.Namespace) -> int:
         raise BaselineError(f"could not rebuild NMM binary; output tail={build.stdout[-1000:]!r}")
     if args.with_tests:
         replay_tests(nmm, dsp)
-    selected = PROFILE_IDS if args.profile == "all" else (args.profile,)
-    inventory = load_json(baseline / "preset_inventory.json")["presets"]
+    profiles = manifest["evaluation_profiles"]
+    selected = tuple(profiles) if args.profile == "all" else (args.profile,)
+    unavailable = set(selected) - set(profiles)
+    if unavailable:
+        raise BaselineError(f"profiles not present in baseline: {sorted(unavailable)}")
+    inventory = normalize_inventory(
+        load_json(baseline / "preset_inventory.json"),
+        profiles,
+        manifest["_source_schema_version"],
+    )["presets"]
     mismatches = []
     with tempfile.TemporaryDirectory(prefix="nmm-stage1-replay-") as directory:
         temp, binary = Path(directory), nmm / "target/debug/neural_preset_optimizer"
@@ -644,18 +746,19 @@ def replay(args: argparse.Namespace) -> int:
             for profile_id in selected:
                 fresh = temp / normalized_report_path(profile_id, relative)
                 fresh.parent.mkdir(parents=True, exist_ok=True)
-                result = run(command_for_evaluation(binary, relative, fresh, PROFILES[profile_id]), baseline / "inputs")
+                result = run(command_for_evaluation(binary, relative, fresh, profiles[profile_id]), baseline / "inputs")
                 if result.returncode != 0:
                     raise BaselineError(f"replay evaluation failed for {relative}/{profile_id}:\n{result.stdout}")
-                validate_report(load_json(fresh), relative, PROFILES[profile_id])
+                validate_report(load_json(fresh), relative, profiles[profile_id])
                 if sha256_file(fresh) != sha256_file(path_under(baseline, item["reports"][profile_id], "report path")):
                     mismatches.append(f"{profile_id}/{relative}")
     if mismatches:
-        print(f"Replay mismatches ({len(mismatches)}/{60 * len(selected)}):", file=sys.stderr)
+        print(f"Replay mismatches ({len(mismatches)}/{len(inventory) * len(selected)}):", file=sys.stderr)
         for mismatch in mismatches:
             print(f"  {mismatch}", file=sys.stderr)
         return 2
-    print(f"Replay matched {60 * len(selected)}/{60 * len(selected)} reports byte-for-byte.")
+    total = len(inventory) * len(selected)
+    print(f"Replay matched {total}/{total} reports byte-for-byte.")
     return 0
 
 
@@ -668,6 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
     repos.add_argument("--ios-repo", type=Path, default=Path("../noise_generator_ios_app"))
     capture_parser = subparsers.add_parser("capture", parents=[repos])
     capture_parser.add_argument("--output", type=Path, required=True)
+    capture_parser.add_argument("--baseline-id", required=True)
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--baseline", type=Path, required=True)
     replay_parser = subparsers.add_parser("replay", parents=[repos])
