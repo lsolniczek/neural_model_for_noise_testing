@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "fixture_id": "assr_condition_bridge_v1",
+  "warning": "Test-only snapshot. It is not evidence of a biological or product effect.",
+  "source": {
+    "bridge_version": "stage8d_b_assr_condition_bridge_v1",
+    "model_version": "candidate_v2",
+    "renderer_revision": "dsp_brown_hf_v2",
+    "dsp_source_revision": "20611c7e2b93e170657cda432f4faca41028f2fe"
+  },
+  "predictions": {
+    "10": {
+      "bridge_version": "stage8d_b_assr_condition_bridge_v1",
+      "model_version": "candidate_v2",
+      "prediction_level": "condition_level",
+      "prediction_status": "model_derived_condition_level",
+      "strength_scale": "surrogate_not_same_scale_eeg_power",
+      "predicted_dominant_modulation_hz": null,
+      "dominant_rate_status": "unavailable_no_independent_model_rate_estimator_stage8d_b",
+      "predicted_gamma_assr_response_strength": 0.0
+    },
+    "40": {
+      "bridge_version": "stage8d_b_assr_condition_bridge_v1",
+      "model_version": "candidate_v2",
+      "prediction_level": "condition_level",
+      "prediction_status": "model_derived_condition_level",
+      "strength_scale": "surrogate_not_same_scale_eeg_power",
+      "predicted_dominant_modulation_hz": null,
+      "dominant_rate_status": "unavailable_no_independent_model_rate_estimator_stage8d_b",
+      "predicted_gamma_assr_response_strength": 1.6
+    }
+  }
+}

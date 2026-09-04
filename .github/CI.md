@@ -4,9 +4,12 @@ The NMM workflow has two independent checks:
 
 - `python-and-baseline` is public and runs for every push and pull request. It
   discovers the complete Python test tree and verifies the integrity of the
-  frozen Stage 1 artifact.
+  frozen Stage 1 artifact. Public EEG plumbing tests use a checked-in snapshot
+  of the deterministic ASSR bridge, so they do not need access to the private
+  DSP repository.
 - `rust-canonical` runs on the canonical macOS ARM64 environment. It resolves
-  the lockfile, tests all Rust targets, and explicitly exercises export replay.
+  the lockfile, tests all Rust targets, checks the snapshot against the live
+  ASSR bridge, and explicitly exercises export replay.
 
 The Rust job fetches `noise_generator_core` from the exact Git revision in
 `Cargo.lock`. It never follows a branch or a mutable tag.

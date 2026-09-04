@@ -16,6 +16,23 @@ ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "benchmarks" / "public_eeg" / "datasets_v1.json"
 REGISTRY_SCHEMA = ROOT / "benchmarks" / "public_eeg" / "schema" / "public_eeg_registry_v1.schema.json"
 DS005048_FIXTURE = ROOT / "tests" / "public_eeg_benchmarks" / "fixtures" / "ds005048_mock"
+ASSR_BRIDGE_FIXTURE = (
+    ROOT
+    / "tests"
+    / "public_eeg_benchmarks"
+    / "fixtures"
+    / "assr_condition_bridge_v1.json"
+)
+
+
+def assr_command(*args: str) -> list[str]:
+    return [
+        "python3",
+        "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+        *args,
+        "--prediction-fixture",
+        str(ASSR_BRIDGE_FIXTURE),
+    ]
 
 
 class Stage8cPublicEegTests(unittest.TestCase):
@@ -124,14 +141,12 @@ class Stage8cPublicEegTests(unittest.TestCase):
     def test_assr_runner_fails_cleanly_when_dataset_not_downloaded(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             result = subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--output-dir",
                     td,
-                ],
+                ),
                 capture_output=True,
                 text=True,
             )
@@ -217,15 +232,13 @@ class Stage8cPublicEegTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
             subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "fixture_public_eeg",
                     "--output-dir",
                     str(out),
                     "--use-fixture",
-                ],
+                ),
                 check=True,
             )
             subprocess.run(
@@ -281,20 +294,22 @@ class Stage8cPublicEegTests(unittest.TestCase):
             assr_meta = json.loads((out / "assr_benchmark_result.json").read_text(encoding="utf-8"))
             self.assertEqual(assr_meta["run_mode"], "fixture_smoke_test")
             self.assertEqual(assr_meta["evidence_category"], "plumbing_verified")
+            self.assertEqual(assr_meta["prediction_bridge"]["execution_mode"], "test_fixture")
+            self.assertTrue(
+                assr_meta["prediction_bridge"]["bridge_version"].endswith(":test_fixture")
+            )
 
     def test_assr_metric_engine_computes_expected_fixture_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
             subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "fixture_public_eeg",
                     "--output-dir",
                     str(out),
                     "--use-fixture",
-                ],
+                ),
                 check=True,
             )
             with (out / "assr_metrics.csv").open("r", encoding="utf-8", newline="") as f:
@@ -310,14 +325,12 @@ class Stage8cPublicEegTests(unittest.TestCase):
     def test_real_assr_mode_requires_dataset_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             result = subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--output-dir",
                     td,
-                ],
+                ),
                 capture_output=True,
                 text=True,
             )
@@ -327,16 +340,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
             subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--dataset-root",
                     str(DS005048_FIXTURE),
                     "--output-dir",
                     str(out),
-                ],
+                ),
                 check=True,
             )
             result = json.loads((out / "assr_benchmark_result.json").read_text(encoding="utf-8"))
@@ -399,16 +410,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--dataset-root",
                     str(td_path),
                     "--output-dir",
                     str(td_path / "out"),
-                ],
+                ),
                 capture_output=True,
                 text=True,
             )
@@ -682,16 +691,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
             self.assertIn("lineage_only_inputs", manifest["source_contract"])
             self.assertIn("*_eeg.set", manifest["source_contract"]["lineage_only_inputs"])
             subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--dataset-root",
                     str(out),
                     "--output-dir",
                     str(out / "bench"),
-                ],
+                ),
                 check=True,
             )
             result = json.loads((out / "bench" / "assr_benchmark_result.json").read_text(encoding="utf-8"))
@@ -855,16 +862,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
             }
             (td_path / "nmm_benchmark_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             result = subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--dataset-root",
                     str(td_path),
                     "--output-dir",
                     str(td_path / "out"),
-                ],
+                ),
                 capture_output=True,
                 text=True,
             )
@@ -875,16 +880,14 @@ class Stage8cPublicEegTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
             subprocess.run(
-                [
-                    "python3",
-                    "tools/public_eeg_benchmarks/run_assr_benchmark.py",
+                assr_command(
                     "--dataset",
                     "ds005048",
                     "--dataset-root",
                     str(DS005048_FIXTURE),
                     "--output-dir",
                     str(out),
-                ],
+                ),
                 check=True,
             )
             result = json.loads((out / "assr_benchmark_result.json").read_text(encoding="utf-8"))

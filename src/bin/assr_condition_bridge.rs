@@ -1,5 +1,6 @@
 use neural_preset_optimizer::auditory::{
-    ArousalSource, AssrTransfer, LatentStateEstimate, ModulationBandPowers, TemporalModulationFeatures,
+    ArousalSource, AssrTransfer, LatentStateEstimate, ModulationBandPowers,
+    TemporalModulationFeatures,
 };
 use neural_preset_optimizer::brain_type::BrainType;
 use neural_preset_optimizer::neural::simulate_candidate_v2;
@@ -39,19 +40,7 @@ fn band_powers_for_rate(rate_hz: f64, total_power: f64) -> ModulationBandPowers 
     p
 }
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let mut modulation_rate_hz = 40.0_f64;
-    while let Some(arg) = args.next() {
-        if arg == "--modulation-rate-hz" {
-            if let Some(v) = args.next() {
-                if let Ok(parsed) = v.parse::<f64>() {
-                    modulation_rate_hz = parsed;
-                }
-            }
-        }
-    }
-
+fn bridge_output(modulation_rate_hz: f64) -> BridgeOutput {
     let assr = AssrTransfer::new();
     let total_power = assr.gain(modulation_rate_hz).max(0.0);
     let temporal = TemporalModulationFeatures {
@@ -65,7 +54,7 @@ fn main() {
         arousal_source: ArousalSource::NeutralDefault,
     };
     let response = simulate_candidate_v2(&temporal, &latent, &BrainType::Normal);
-    let out = BridgeOutput {
+    BridgeOutput {
         bridge_version: "stage8d_b_assr_condition_bridge_v1",
         model_version: "candidate_v2",
         prediction_level: "condition_level",
@@ -74,6 +63,44 @@ fn main() {
         predicted_dominant_modulation_hz: None,
         dominant_rate_status: "unavailable_no_independent_model_rate_estimator_stage8d_b",
         predicted_gamma_assr_response_strength: response.gamma.response_strength,
-    };
+    }
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let mut modulation_rate_hz = 40.0_f64;
+    while let Some(arg) = args.next() {
+        if arg == "--modulation-rate-hz" {
+            if let Some(v) = args.next() {
+                if let Ok(parsed) = v.parse::<f64>() {
+                    modulation_rate_hz = parsed;
+                }
+            }
+        }
+    }
+
+    let out = bridge_output(modulation_rate_hz);
     println!("{}", serde_json::to_string(&out).expect("bridge JSON"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_in_python_fixture_matches_live_bridge() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/public_eeg_benchmarks/fixtures/assr_condition_bridge_v1.json"
+        ))
+        .expect("ASSR bridge fixture must be valid JSON");
+        assert_eq!(fixture["schema_version"], 1);
+        for rate_hz in [10.0_f64, 40.0_f64] {
+            let key = format!("{rate_hz:.0}");
+            let actual = serde_json::to_value(bridge_output(rate_hz)).unwrap();
+            assert_eq!(
+                actual, fixture["predictions"][&key],
+                "fixture drift for {rate_hz} Hz"
+            );
+        }
+    }
 }

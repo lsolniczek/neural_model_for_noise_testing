@@ -310,13 +310,13 @@ Prosty słownik:
 
 **Problem:** Testy regresyjne opisywały stary renderer brown noise, jeden test przepełniał standardowy stos, test discovery Pythona znajdował zero testów, a NMM zależał od przypadkowej lokalnej wersji DSP.
 
-**Co zrobiono:** Zmiana renderera została jawnie nazwana `dsp_brown_hf_v2`, a DSP przypięto do commita `20611c7e2b93e170657cda432f4faca41028f2fe`. Duża pula obiektów DSP jest budowana na stercie i przechodzi test na stosie 2 MiB bez alokacji w ścieżce renderowania. ModelSignature schema 2 zapisuje wersję oraz commit renderera. Komenda `replay-export` odbudowuje konfigurację, ponownie ocenia preset i pokazuje różnice pól. Goldeny są w wersjonowanym manifeście. Historyczny baseline schema 2 pozostaje niezmieniony i może być sprawdzany przez aktualne narzędzie. CI oraz zwykłe `unittest discover` uruchamiają rzeczywiste testy.
+**Co zrobiono:** Zmiana renderera została jawnie nazwana `dsp_brown_hf_v2`, a DSP przypięto do commita `20611c7e2b93e170657cda432f4faca41028f2fe`. Duża pula obiektów DSP jest budowana na stercie i przechodzi test na stosie 2 MiB bez alokacji w ścieżce renderowania. ModelSignature schema 2 zapisuje wersję oraz commit renderera. Komenda `replay-export` odbudowuje konfigurację, ponownie ocenia preset i pokazuje różnice pól. Goldeny są w wersjonowanym manifeście. Historyczny baseline schema 2 pozostaje niezmieniony i może być sprawdzany przez aktualne narzędzie. Publiczne testy Python korzystają z jawnie oznaczonego snapshotu mostu ASSR, a job Rust sprawdza ten snapshot z prawdziwym binarium po pobraniu prywatnego DSP. CI oraz zwykłe `unittest discover` uruchamiają rzeczywiste testy.
 
 **Dlaczego warto:** Kolejne zmiany modelu mają teraz jednoznaczny punkt odniesienia. Różnica wyniku nie jest mylona ze zmianą zależności, platformy ani ukrytym obejściem stosu.
 
 **Prace naukowe i metodyczne:** [Sandve et al. 2013](https://doi.org/10.1371/journal.pcbi.1003285), [Wilson et al. 2014](https://doi.org/10.1371/journal.pbio.1001745).
 
-**Dowód odbioru:** `cargo test --locked --all-targets` — lib 517/517 i bin 679/679, bez `RUST_MIN_STACK`; DSP core 759/759 oraz jawny test stosu 2 MiB; `python3 -m unittest discover -s tests` — 64/64; integralność historycznego baseline — poprawna. Testy pominięte są wyłącznie jawnie oznaczonymi testami eksploracyjnymi/drukującymi.
+**Dowód odbioru:** `cargo test --locked --all-targets` — lib 517/517, bridge ASSR 1/1 i główne binarium 679/679, bez `RUST_MIN_STACK`; DSP core 759/759 oraz jawny test stosu 2 MiB; `python3 -m unittest discover -s tests` — 64/64; integralność historycznego baseline — poprawna. Testy pominięte są wyłącznie jawnie oznaczonymi testami eksploracyjnymi/drukującymi.
 
 ---
 

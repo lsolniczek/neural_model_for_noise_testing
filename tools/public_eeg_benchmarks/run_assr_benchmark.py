@@ -80,28 +80,72 @@ def compute_assr_metrics(rows: list[dict[str, str]]) -> dict:
     }
 
 
-def compute_prediction_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+def load_prediction_fixture(path: Path) -> dict[str, dict[str, object]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DatasetLayoutError(f"invalid ASSR prediction fixture {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DatasetLayoutError(f"unsupported ASSR prediction fixture {path}")
+    predictions = payload.get("predictions")
+    if payload.get("schema_version") != 1 or not isinstance(predictions, dict):
+        raise DatasetLayoutError(f"unsupported ASSR prediction fixture {path}")
+    required = {
+        "bridge_version",
+        "model_version",
+        "prediction_level",
+        "prediction_status",
+        "strength_scale",
+        "predicted_dominant_modulation_hz",
+        "dominant_rate_status",
+        "predicted_gamma_assr_response_strength",
+    }
+    for rate, prediction in predictions.items():
+        if not isinstance(rate, str) or not isinstance(prediction, dict):
+            raise DatasetLayoutError(f"invalid prediction in ASSR fixture {path}")
+        if not required.issubset(prediction):
+            raise DatasetLayoutError(f"incomplete {rate} Hz prediction in ASSR fixture {path}")
+    return predictions
+
+
+def compute_prediction_rows(
+    rows: list[dict[str, str]], prediction_fixture: Path | None = None
+) -> list[dict[str, str]]:
+    fixture = load_prediction_fixture(prediction_fixture) if prediction_fixture else None
     cache: dict[float, dict[str, object]] = {}
     out: list[dict[str, str]] = []
     for r in rows:
         mod_rate = float(r.get("modulation_rate_hz", "0") or 0.0)
         if mod_rate not in cache:
-            proc = subprocess.run(
-                [
-                    "cargo",
-                    "run",
-                    "--quiet",
-                    "--bin",
-                    "assr_condition_bridge",
-                    "--",
-                    "--modulation-rate-hz",
-                    str(mod_rate),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            cache[mod_rate] = json.loads(proc.stdout.strip())
+            if fixture is not None:
+                key = format(mod_rate, ".12g")
+                value = fixture.get(key)
+                if not isinstance(value, dict):
+                    raise DatasetLayoutError(
+                        f"ASSR prediction fixture has no output for {mod_rate} Hz"
+                    )
+                cached = dict(value)
+                cached["prediction_status"] = "test_fixture_snapshot"
+                cached["bridge_version"] = f"{cached.get('bridge_version', 'unknown')}:test_fixture"
+                cache[mod_rate] = cached
+            else:
+                proc = subprocess.run(
+                    [
+                        "cargo",
+                        "run",
+                        "--locked",
+                        "--quiet",
+                        "--bin",
+                        "assr_condition_bridge",
+                        "--",
+                        "--modulation-rate-hz",
+                        str(mod_rate),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                cache[mod_rate] = json.loads(proc.stdout.strip())
         p = cache[mod_rate]
         out.append(
             {
@@ -133,7 +177,13 @@ def compute_prediction_metrics(rows: list[dict[str, str]], pred_rows: list[dict[
     }
 
 
-def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root: Path | None) -> int:
+def run_assr(
+    dataset_id: str,
+    output_dir: Path,
+    use_fixture: bool,
+    dataset_root: Path | None,
+    prediction_fixture: Path | None = None,
+) -> int:
     run_mode = "fixture_smoke_test" if use_fixture else "real_public_data"
     data_status = "fixture" if use_fixture else "downloaded"
     if use_fixture:
@@ -172,7 +222,7 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
             w = csv.DictWriter(f, fieldnames=["metric", "value"])
             w.writeheader()
             w.writerows(metric_rows)
-    pred_rows = compute_prediction_rows(rows)
+    pred_rows = compute_prediction_rows(rows, prediction_fixture)
     pred_metrics = compute_prediction_metrics(rows, pred_rows)
     with (output_dir / "assr_prediction_metrics.csv").open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["metric", "value"])
@@ -245,6 +295,10 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
         max_frequency_resolution_hz = max(freq_res)
     provenance_verified = provenance_status == "source_verified" if not use_fixture else False
     limitations = []
+    if prediction_fixture:
+        limitations.append(
+            "Prediction values came from a test-only bridge snapshot; the live Rust bridge was not executed."
+        )
     if not use_fixture and provenance_status != "source_verified":
         limitations.append("Source lineage is not fully verified; this run is not yet evidence-usable.")
     if not use_fixture:
@@ -254,6 +308,7 @@ def run_assr(dataset_id: str, output_dir: Path, use_fixture: bool, dataset_root:
     bridge_meta = {}
     if pred_rows:
         bridge_meta = {
+            "execution_mode": "test_fixture" if prediction_fixture else "live_rust_bridge",
             "prediction_level": pred_rows[0].get("prediction_level"),
             "bridge_version": pred_rows[0].get("bridge_version"),
             "model_version": pred_rows[0].get("model_version"),
@@ -316,9 +371,20 @@ def main() -> int:
     ap.add_argument("--output-dir", type=Path, required=True)
     ap.add_argument("--use-fixture", action="store_true")
     ap.add_argument("--dataset-root", type=Path)
+    ap.add_argument(
+        "--prediction-fixture",
+        type=Path,
+        help="test-only snapshot of bridge outputs; results are marked as fixture-derived",
+    )
     args = ap.parse_args()
     try:
-        return run_assr(args.dataset, args.output_dir, args.use_fixture, args.dataset_root)
+        return run_assr(
+            args.dataset,
+            args.output_dir,
+            args.use_fixture,
+            args.dataset_root,
+            args.prediction_fixture,
+        )
     except (DatasetNotDownloadedError, DatasetLayoutError) as e:
         print(str(e))
         return 2
