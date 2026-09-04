@@ -1,5 +1,7 @@
 # NMM Scientific Audit and Remediation Plan
 
+> **Status dokumentu:** uzasadnienie naukowe i historia planu. Aktualny status zadań znajduje się w [NMM — kanoniczny rejestr rozwoju](NMM_DEVELOPMENT_REGISTER.md).
+
 ## Purpose
 
 This document separates three different questions that are currently mixed together in the NMM:

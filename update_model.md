@@ -1,5 +1,7 @@
 # Neural Model Improvement Roadmap
 
+> **Status dokumentu:** historyczna roadmapa; część opisów i statusów może być nieaktualna. Bieżącym źródłem prawdy jest [NMM — kanoniczny rejestr rozwoju](NMM_DEVELOPMENT_REGISTER.md).
+
 ## Implemented
 
 ### ASSR Transfer Function

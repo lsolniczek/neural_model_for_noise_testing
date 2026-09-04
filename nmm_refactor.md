@@ -1,5 +1,7 @@
 # NMM Refactor Plan
 
+> **Status dokumentu:** szczegółowy projekt refaktoru. Aktualny status `planned`/`implemented` znajduje się w [NMM — kanoniczny rejestr rozwoju](NMM_DEVELOPMENT_REGISTER.md).
+
 ## Goal
 
 Refactor the current neural mass model into a versioned, interpretable, scientifically cleaner **practical preset-evaluation tool** without destroying reproducibility of the existing simulator.
@@ -43,7 +45,7 @@ The refactor therefore has two practical requirements:
 
 Auditory cortex is tonotopic for acoustic carrier frequency, but it also encodes temporal modulation properties. Multiple experimental papers show that modulation frequency is a distinct response dimension, including:
 
-- Lu et al. 2011, *J Neurophysiol*, "Coding of amplitude modulation in primary auditory cortex" (PMID: 21148093).
+- Yin et al. 2011, *J Neurophysiol*, "Coding of amplitude modulation in primary auditory cortex" (PMID: 21148093).
 - Barton et al. 2012, *J Neurosci*, "The topography of frequency and time representation in primate auditory cortices."
 - Langner-related periodicity-map work showing periodicity represented orthogonally to frequency maps in auditory cortex.
 
@@ -935,7 +937,7 @@ Do not do these before Stage 2 diagnostics exist:
 
 ## Reference list
 
-1. Lu T, Liang L, Wang X. Coding of amplitude modulation in primary auditory cortex. *J Neurophysiol*. 2011. PMID: 21148093.
+1. Yin P, Johnson JS, O'Connor KN, Sutter ML. Coding of amplitude modulation in primary auditory cortex. *J Neurophysiol*. 2011. PMID: 21148093.
 2. Barton B, Venezia JH, Saberi K, Hickok G, Brewer AA. The topography of frequency and time representation in primate auditory cortices. *Cereb Cortex*. 2012.
 3. Donoghue T et al. Parameterizing neural power spectra into periodic and aperiodic components. *Nat Neurosci*. 2020. DOI: 10.1038/s41593-020-00744-x.
 4. Donoghue T, Dominguez J, Voytek B. Electrophysiological Frequency Band Ratio Measures Conflate Periodic and Aperiodic Neural Activity. *eNeuro*. 2020. DOI: 10.1523/ENEURO.0192-20.2020.
