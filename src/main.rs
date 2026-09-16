@@ -10,6 +10,7 @@ mod neural;
 mod optimizer;
 mod pipeline;
 mod preset;
+mod reproducibility;
 mod regression_tests;
 mod scoring;
 mod surrogate;

@@ -10,6 +10,7 @@ pub mod neural;
 pub mod optimizer;
 pub mod pipeline;
 pub mod preset;
+pub mod reproducibility;
 pub mod scoring;
 pub mod surrogate;
 pub mod validate;

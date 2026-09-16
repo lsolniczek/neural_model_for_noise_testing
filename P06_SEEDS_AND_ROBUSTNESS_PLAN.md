@@ -380,7 +380,9 @@ reprodukcji payloadu naukowego.
 
 1. Dodać `src/reproducibility.rs` z `SeedTreeV1`, enumami domen i typami paneli.
 2. Dodać BLAKE3 i bezpośrednią, przypiętą zależność
-   `rand_chacha = "=0.3.1"`; BLAKE3 przypiąć jako `blake3 = "=1.8.7"`.
+   `rand_chacha = "=0.3.1"`; BLAKE3 przypiąć jako `blake3 = "=1.8.2"`,
+   zgodnie z wydanym DSP `v0.4.0` (crate z `links` nie pozwala rozwiązać dwóch
+   różnych dokładnych wersji w jednym grafie Cargo).
 3. Dodać wektory known-answer dla `run_seed` 0, 1, 42 i `u64::MAX`.
 4. Zabronić dowolnych stringów jako domen w kodzie produkcyjnym.
 
