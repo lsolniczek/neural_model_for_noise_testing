@@ -67,7 +67,7 @@ struct EpsSchedule {
 /// Per Sallam et al. 2025 (ARRDE, arXiv:2511.18429): a simple restart
 /// trigger materially mitigates premature convergence in L-SHADE-family
 /// variants on high-dimensional spaces — the failure mode the priority
-/// spec flags for our 230-D genome.
+/// spec flags for our 211-D genome.
 #[derive(Debug, Clone, Copy)]
 struct StagnationConfig {
     window: usize,
@@ -474,7 +474,7 @@ impl DifferentialEvolution {
     // Priority 28 Phase 3 — DE diversification API
     //
     // Two opt-in features that target the documented premature-convergence
-    // failure of vanilla DE/rand/1/bin on the 230-D preset genome:
+    // failure of vanilla DE/rand/1/bin on the 211-D preset genome:
     //   - Crowding selection (Thomsen 2004): redirect each trial's
     //     replacement target to the nearest-genome parent. Maintains
     //     niches across the search space without sacrificing convergence.
@@ -499,7 +499,7 @@ impl DifferentialEvolution {
     /// Activate stagnation-triggered partial restart.
     ///
     /// `window`: minimum number of consecutive no-improvement generations
-    /// before the restart fires. Typical: 10–20 for the 230-D preset
+    /// before the restart fires. Typical: 10–20 for the 211-D preset
     /// genome at 100 generations.
     /// `fraction`: fraction of the population to reseed when the trigger
     /// fires (0.0 to 1.0). Typical: 0.20–0.40. The current best is always

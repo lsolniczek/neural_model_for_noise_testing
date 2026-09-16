@@ -7,11 +7,15 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::auditory::{ArousalModel, ArousalSource, ThalamicGate};
+    use crate::auditory::{
+        ArousalModel, ArousalSource, LatentStateEstimate, ModulationBandPowers,
+        ModulationPsdPoint, TemporalModulationFeatures, ThalamicGate,
+    };
     use crate::brain_type::BrainType;
     use crate::model_signature::ModelVersion;
     use crate::neural::fhn::*;
     use crate::neural::jansen_rit::*;
+    use crate::neural::simulate_candidate_v2;
     use crate::optimizer::DifferentialEvolution;
     use crate::pipeline::{
         evaluate_preset, evaluate_preset_detailed, SimulationConfig, DECIMATION_FACTOR, NEURAL_SR,
@@ -160,16 +164,6 @@ mod tests {
         preset
     }
 
-    fn fixture_single_tone_with_modulation(modulation_hz: f32, modulation_depth: f32) -> Preset {
-        let mut preset =
-            fixture_single_source_with_modulation(0, 4, modulation_hz, modulation_depth);
-        preset.objects[0].source_kind = 1; // tone source for clean rendered modulation probe
-        preset.objects[0].tone_freq = 220.0;
-        preset.objects[0].tone_amplitude = 0.9;
-        preset.objects[0].reverb_send = 0.0;
-        preset
-    }
-
     fn fixture_single_noise_unmodulated_reference() -> Preset {
         let mut preset = Preset::default();
         preset.master_gain = 0.82;
@@ -207,6 +201,35 @@ mod tests {
         preset.objects[0].satellite_mod.param_b = modulation_depth;
         preset.objects[0].satellite_mod.param_c = if modulation_kind == 5 { 0.5 } else { 0.0 };
         preset
+    }
+
+    fn synthetic_modulation(rate_hz: f64, power: f64) -> TemporalModulationFeatures {
+        TemporalModulationFeatures {
+            modulation_psd: vec![ModulationPsdPoint {
+                frequency_hz: rate_hz,
+                power,
+            }],
+            band_power_by_mod_rate: ModulationBandPowers {
+                slow_0p5_4_hz: 0.0,
+                theta_4_8_hz: 0.0,
+                alpha_8_13_hz: 0.0,
+                beta_13_30_hz: 0.0,
+                gamma_30_50_hz: power,
+            },
+            dominant_modulation_hz: Some(rate_hz),
+            total_modulation_power: power,
+        }
+    }
+
+    fn synthetic_candidate_response(power: f64) -> crate::neural::CandidateCorticalResponse {
+        simulate_candidate_v2(
+            &synthetic_modulation(40.0, power),
+            &LatentStateEstimate {
+                estimated_arousal: 0.5,
+                arousal_source: ArousalSource::Fixed,
+            },
+            &BrainType::Normal,
+        )
     }
 
     fn canonical_config(duration_secs: f32, brain_type: BrainType) -> SimulationConfig {
@@ -663,8 +686,8 @@ mod tests {
             genome[i] = (lo + hi) / 2.0;
         }
 
-        // movement.kind for first object is at index 6 + 15 = 21
-        let mov_kind_idx = 6 + 15;
+        // movement.kind for the first object is at index 11 + 15 = 26.
+        let mov_kind_idx = 11 + 15;
 
         // Values 2.1 and 2.4 both round to 2
         genome[mov_kind_idx] = 2.1;
@@ -1494,8 +1517,8 @@ mod tests {
         let goal = Goal::new(GoalKind::Focus);
         let config = canonical_config(4.0, BrainType::Normal);
 
-        let preset_5hz = fixture_single_tone_with_modulation(5.0, 0.95);
-        let preset_40hz = fixture_single_tone_with_modulation(40.0, 0.95);
+        let preset_5hz = fixture_single_noise_with_modulation(0, 5, 5.0, 0.95);
+        let preset_40hz = fixture_single_noise_with_modulation(0, 5, 40.0, 0.95);
         let d5 = evaluate_preset_detailed(&preset_5hz, &goal, &config);
         let d40 = evaluate_preset_detailed(&preset_40hz, &goal, &config);
         let c5 = d5
@@ -1842,25 +1865,8 @@ mod tests {
 
     #[test]
     fn candidate_v2_response_scales_with_modulation_depth() {
-        let goal = Goal::new(GoalKind::Focus);
-        let config = candidate_v2_config(12.0, BrainType::Normal);
-        let weak = fixture_single_tone_with_modulation(40.0, 0.30);
-        let strong = fixture_single_tone_with_modulation(40.0, 0.95);
-
-        let dw = evaluate_preset_detailed(&weak, &goal, &config);
-        let ds = evaluate_preset_detailed(&strong, &goal, &config);
-        let rw = dw
-            .summary
-            .scientific_diagnostics
-            .as_ref()
-            .and_then(|d| d.candidate_cortical_response.as_ref())
-            .expect("missing weak candidate cortical response");
-        let rs = ds
-            .summary
-            .scientific_diagnostics
-            .as_ref()
-            .and_then(|d| d.candidate_cortical_response.as_ref())
-            .expect("missing strong candidate cortical response");
+        let rw = synthetic_candidate_response(0.30);
+        let rs = synthetic_candidate_response(0.95);
 
         assert!(
             rs.drive.total_modulation_power > rw.drive.total_modulation_power,
@@ -1874,33 +1880,25 @@ mod tests {
 
     #[test]
     fn candidate_v2_responsiveness_orders_none_weak_strong() {
-        let goal = Goal::new(GoalKind::Focus);
-        let config = candidate_v2_config(12.0, BrainType::Normal);
-        let none = fixture_single_noise_unmodulated_reference();
-        let weak = fixture_single_tone_with_modulation(40.0, 0.20);
-        let strong = fixture_single_tone_with_modulation(40.0, 0.95);
-
-        let dn = evaluate_preset_detailed(&none, &goal, &config);
-        let dw = evaluate_preset_detailed(&weak, &goal, &config);
-        let ds = evaluate_preset_detailed(&strong, &goal, &config);
-        let rn = dn
-            .summary
-            .scientific_diagnostics
-            .as_ref()
-            .and_then(|d| d.candidate_cortical_response.as_ref())
-            .expect("missing none-response");
-        let rw = dw
-            .summary
-            .scientific_diagnostics
-            .as_ref()
-            .and_then(|d| d.candidate_cortical_response.as_ref())
-            .expect("missing weak-response");
-        let rs = ds
-            .summary
-            .scientific_diagnostics
-            .as_ref()
-            .and_then(|d| d.candidate_cortical_response.as_ref())
-            .expect("missing strong-response");
+        let inactive = TemporalModulationFeatures {
+            modulation_psd: Vec::new(),
+            band_power_by_mod_rate: ModulationBandPowers {
+                slow_0p5_4_hz: 0.0,
+                theta_4_8_hz: 0.0,
+                alpha_8_13_hz: 0.0,
+                beta_13_30_hz: 0.0,
+                gamma_30_50_hz: 0.0,
+            },
+            dominant_modulation_hz: None,
+            total_modulation_power: 0.0,
+        };
+        let state = LatentStateEstimate {
+            estimated_arousal: 0.5,
+            arousal_source: ArousalSource::Fixed,
+        };
+        let rn = simulate_candidate_v2(&inactive, &state, &BrainType::Normal);
+        let rw = synthetic_candidate_response(0.20);
+        let rs = synthetic_candidate_response(0.95);
 
         assert_eq!(
             rn.modulation_responsiveness_index.to_bits(),

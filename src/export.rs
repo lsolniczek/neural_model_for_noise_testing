@@ -319,7 +319,10 @@ mod tests {
     fn signature_schema_and_renderer_match_the_linked_dsp() {
         let signature = SimulationConfig::default().model_signature();
         assert_eq!(signature.schema_version, MODEL_SIGNATURE_SCHEMA_VERSION);
-        assert_eq!(signature.renderer_revision, RendererRevision::DspBrownHfV2);
+        assert_eq!(
+            signature.renderer_revision,
+            RendererRevision::DspBrownHfV2BinauralBeatV1
+        );
         assert_eq!(
             signature.renderer_revision.as_str(),
             noise_generator_core::RENDERER_REVISION

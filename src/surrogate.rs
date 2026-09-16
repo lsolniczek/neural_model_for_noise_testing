@@ -6,8 +6,8 @@
 ///
 /// # Architecture
 ///
-/// Input (248 dims): genome[230] + goal one-hot[9] + brain_type one-hot[5] + config flags[4]
-/// Hidden: Linear(248,256) → ReLU → Linear(256,256) → ReLU → Linear(256,128) → ReLU
+/// Input (229 dims): genome[211] + goal one-hot[9] + brain_type one-hot[5] + config flags[4]
+/// Hidden: Linear(229,256) → ReLU → Linear(256,256) → ReLU → Linear(256,128) → ReLU
 /// Output: Linear(128,1) → Sigmoid → predicted score ∈ [0, 1]
 ///
 /// # Inference
@@ -100,8 +100,8 @@ impl SurrogateModel {
     ///
     /// File format (little-endian):
     ///   Header: n_layers (u32), then (n_layers + 1) dimension values (u32).
-    ///   For a 3-hidden-layer network with dims [248, 256, 256, 128, 1],
-    ///   the header is: [4, 248, 256, 256, 128, 1].
+    ///   For a 3-hidden-layer network with dims [229, 256, 256, 128, 1],
+    ///   the header is: [4, 229, 256, 256, 128, 1].
     ///
     ///   Body: for each layer i:
     ///     weights: dims[i+1] × dims[i] f32 values (row-major)
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_surrogate_artifacts_load() {
+    fn bundled_surrogate_artifacts_are_rejected_after_genome_migration() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for rel in [
             "surrogate_weights.bin",
@@ -444,17 +444,12 @@ mod tests {
             "surrogate_weights_med.bin",
         ] {
             let path = root.join(rel);
-            let model = SurrogateModel::load(&path).unwrap_or_else(|e| {
-                panic!("failed to load bundled artifact {}: {e}", path.display())
-            });
-            let input = vec![0.5_f32; INPUT_DIM];
-            let score = model.predict(&input);
-            assert!(
-                (0.0..=1.0).contains(&score),
-                "bundled artifact {} produced invalid score {}",
-                path.display(),
-                score
-            );
+            let error = match SurrogateModel::load(&path) {
+                Ok(_) => panic!("stale bundled artifact unexpectedly loaded: {}", path.display()),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("stale surrogate weights"));
         }
     }
 
@@ -621,7 +616,7 @@ mod tests {
 
     #[test]
     fn production_architecture_shape() {
-        // Verify the 248→256→256→128→1 architecture works end-to-end.
+        // Verify the 229→256→256→128→1 architecture works end-to-end.
         let model = SurrogateModel::synthetic(&[INPUT_DIM, 256, 256, 128, 1], 42);
         assert_eq!(model.layers.len(), 4);
         assert_eq!(model.layers[0].in_dim, INPUT_DIM);

@@ -5,8 +5,8 @@
 /// of mixed continuous and discrete parameters.
 use crate::movement::MovementConfig;
 use noise_generator_core::{
-    AcousticEnvironment, ModulatorKind, NoiseColor, NoiseEngine, RoomGeometryPreset, RoomMode,
-    WallMaterial,
+    AcousticEnvironment, BinauralBeatConfig, Ear, ModulatorKind, NoiseColor, NoiseEngine,
+    RoomGeometryPreset, RoomMode, WallMaterial,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -15,22 +15,24 @@ pub const MAX_OBJECTS: usize = 8;
 
 // ── Dimension count ─────────────────────────────────────────────────────────
 // Global: master_gain(1) + spatial_mode(1) + source_count(1) + anchor_color(1)
-//       + anchor_volume(1) + environment(1) = 6
+//       + anchor_volume(1) + environment(1) + binaural beat(5) = 11
 // Per object (8): active(1) + color(1) + x(1) + y(1) + z(1) + volume(1)
 //               + reverb_send(1) + bass_kind(1) + bass_a(1) + bass_b(1) + bass_c(1)
 //               + sat_kind(1) + sat_a(1) + sat_b(1) + sat_c(1)
 //               + mov_kind(1) + mov_radius(1) + mov_speed(1) + mov_phase(1)
 //               + mov_depth_min(1) + mov_depth_max(1) + mov_reverb_min(1)
-//               + mov_reverb_max(1) + tint_freq(1) + tint_db(1)
-//               + source_kind(1) + tone_freq(1) + tone_amplitude(1) = 28
-// Total: 6 + 8×28 = 230
+//               + mov_reverb_max(1) + tint_freq(1) + tint_db(1) = 25
+// Total: 11 + 8×25 = 211
 //
 // NOTE: per-object `spread` is serialized in preset JSON and applied at runtime,
 // but intentionally excluded from the optimizer genome for now. That keeps the
 // preset / surrogate contract stable while we validate the DSP control.
-pub const GENOME_LEN: usize = 6 + MAX_OBJECTS * 28;
+pub const GENOME_LEN: usize = 11 + MAX_OBJECTS * 25;
+pub const LEGACY_GENOME_LEN: usize = 6 + MAX_OBJECTS * 28;
 pub const ANCHOR_COLOR_GENE_IDX: usize = 3;
 pub const ANCHOR_VOLUME_GENE_IDX: usize = 4;
+const BINAURAL_ENABLED_GENE_IDX: usize = 6;
+const BINAURAL_LOWER_EAR_GENE_IDX: usize = 10;
 const ROOM_MODE_MAX: u8 = 1;
 const ROOM_PRESET_MAX: u8 = 3;
 const WALL_MATERIAL_MAX: u8 = 6;
@@ -222,6 +224,51 @@ impl ModConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BinauralBeatPresetConfig {
+    pub enabled: bool,
+    pub center_frequency_hz: f32,
+    pub beat_frequency_hz: f32,
+    pub gain_db: f32,
+    /// `0=Left`, `1=Right`.
+    pub lower_frequency_ear: u8,
+}
+
+impl Default for BinauralBeatPresetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            center_frequency_hz: 400.0,
+            beat_frequency_hz: 6.0,
+            gain_db: -40.0,
+            lower_frequency_ear: 0,
+        }
+    }
+}
+
+impl BinauralBeatPresetConfig {
+    fn clamp(&mut self) {
+        self.center_frequency_hz = self.center_frequency_hz.clamp(100.0, 1_000.0);
+        self.beat_frequency_hz = self.beat_frequency_hz.clamp(0.0, 40.0);
+        self.gain_db = self.gain_db.clamp(-80.0, -24.0);
+        self.lower_frequency_ear = self.lower_frequency_ear.min(1);
+    }
+
+    fn as_engine_config(&self) -> BinauralBeatConfig {
+        BinauralBeatConfig {
+            enabled: self.enabled,
+            center_frequency_hz: self.center_frequency_hz,
+            beat_frequency_hz: self.beat_frequency_hz,
+            gain_db: self.gain_db,
+            lower_frequency_ear: if self.lower_frequency_ear == 1 {
+                Ear::Right
+            } else {
+                Ear::Left
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectConfig {
     pub active: bool,
@@ -248,13 +295,13 @@ pub struct ObjectConfig {
     #[serde(default)]
     pub tint_db: f32,
     /// Source kind: 0 = Noise (default), 1 = Tone (pure sine).
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub source_kind: u8,
     /// Tone frequency (Hz). Only used when source_kind = 1.
-    #[serde(default = "default_tone_freq")]
+    #[serde(default = "default_tone_freq", skip_serializing)]
     pub tone_freq: f32,
     /// Tone amplitude (0.0–1.0). Only used when source_kind = 1.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub tone_amplitude: f32,
 }
 
@@ -330,6 +377,7 @@ impl ObjectConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "PresetWire")]
 pub struct Preset {
     pub master_gain: f32,
     pub spatial_mode: u8,  // 0=Stereo, 1=Immersive
@@ -339,7 +387,92 @@ pub struct Preset {
     pub environment: u8, // 0–4 (AcousticEnvironment)
     #[serde(default)]
     pub room: RoomConfig,
+    pub binaural_beat: BinauralBeatPresetConfig,
     pub objects: Vec<ObjectConfig>,
+}
+
+#[derive(Deserialize)]
+struct PresetWire {
+    pub master_gain: f32,
+    pub spatial_mode: u8,
+    pub source_count: u32,
+    pub anchor_color: u8,
+    pub anchor_volume: f32,
+    pub environment: u8,
+    #[serde(default)]
+    pub room: RoomConfig,
+    #[serde(default)]
+    pub binaural_beat: Option<BinauralBeatPresetConfig>,
+    pub objects: Vec<ObjectConfig>,
+}
+
+fn explicit_periodic_frequency(config: &ModConfig) -> Option<f32> {
+    matches!(config.kind, 1 | 4 | 5)
+        .then_some(config.param_a)
+        .filter(|frequency| frequency.is_finite())
+}
+
+fn migrate_legacy_binaural_beat(objects: &[ObjectConfig]) -> BinauralBeatPresetConfig {
+    let mut tones = objects.iter().enumerate().filter(|(_, object)| {
+        object.active
+            && object.volume > 0.0
+            && object.source_kind == 1
+            && object.tone_amplitude > 0.0
+    });
+    let Some((first_index, first)) = tones.next() else {
+        return BinauralBeatPresetConfig::default();
+    };
+
+    let ignored: Vec<usize> = tones.map(|(index, _)| index).collect();
+    if !ignored.is_empty() {
+        eprintln!(
+            "warning: migrated legacy Tone object {first_index} to the global binaural beat; ignored additional Tone object slots {ignored:?}"
+        );
+    }
+
+    let mut migrated = BinauralBeatPresetConfig {
+        enabled: true,
+        center_frequency_hz: first.tone_freq,
+        beat_frequency_hz: explicit_periodic_frequency(&first.satellite_mod)
+            .or_else(|| explicit_periodic_frequency(&first.bass_mod))
+            .unwrap_or(6.0),
+        gain_db: -40.0,
+        lower_frequency_ear: 0,
+    };
+    migrated.clamp();
+    migrated
+}
+
+fn retire_legacy_tone_objects(objects: &mut [ObjectConfig]) {
+    for object in objects {
+        if object.source_kind == 1 {
+            object.active = false;
+            object.source_kind = 0;
+            object.tone_freq = default_tone_freq();
+            object.tone_amplitude = 0.0;
+        }
+    }
+}
+
+impl From<PresetWire> for Preset {
+    fn from(wire: PresetWire) -> Self {
+        let mut objects = wire.objects;
+        let binaural_beat = wire
+            .binaural_beat
+            .unwrap_or_else(|| migrate_legacy_binaural_beat(&objects));
+        retire_legacy_tone_objects(&mut objects);
+        Self {
+            master_gain: wire.master_gain,
+            spatial_mode: wire.spatial_mode,
+            source_count: wire.source_count,
+            anchor_color: wire.anchor_color,
+            anchor_volume: wire.anchor_volume,
+            environment: wire.environment,
+            room: wire.room,
+            binaural_beat,
+            objects,
+        }
+    }
 }
 
 impl Default for Preset {
@@ -352,6 +485,7 @@ impl Default for Preset {
             anchor_volume: 0.0,
             environment: 0,
             room: RoomConfig::default(),
+            binaural_beat: BinauralBeatPresetConfig::default(),
             objects: (0..MAX_OBJECTS).map(|_| ObjectConfig::default()).collect(),
         }
     }
@@ -367,6 +501,7 @@ impl Preset {
         self.anchor_volume = self.anchor_volume.clamp(0.0, 1.0);
         self.environment = self.environment.min(4);
         self.room.clamp();
+        self.binaural_beat.clamp();
         for obj in &mut self.objects {
             obj.clamp();
         }
@@ -390,6 +525,7 @@ impl Preset {
 
         engine.set_anchor_color(NoiseColor::from_u8(self.anchor_color));
         engine.set_anchor_volume(self.anchor_volume);
+        engine.set_binaural_beat_config(self.binaural_beat.as_engine_config());
 
         let env = match self.environment {
             0 => AcousticEnvironment::AnechoicChamber,
@@ -461,10 +597,6 @@ impl Preset {
             if obj.tint_freq >= 100.0 && obj.tint_db.abs() > 0.01 {
                 engine.set_object_color_tint(i as u32, obj.tint_freq, obj.tint_db);
             }
-            // Tone source: switch from noise to pure sine oscillator.
-            if obj.source_kind == 1 && obj.tone_amplitude > 0.0 {
-                engine.set_object_source_tone(i as u32, obj.tone_freq, obj.tone_amplitude);
-            }
         }
     }
 
@@ -481,6 +613,11 @@ impl Preset {
         g.push(self.anchor_color as f64);
         g.push(self.anchor_volume as f64);
         g.push(self.environment as f64);
+        g.push(if self.binaural_beat.enabled { 1.0 } else { 0.0 });
+        g.push(self.binaural_beat.center_frequency_hz as f64);
+        g.push(self.binaural_beat.beat_frequency_hz as f64);
+        g.push(self.binaural_beat.gain_db as f64);
+        g.push(self.binaural_beat.lower_frequency_ear as f64);
 
         // Per-object params
         for obj in &self.objects {
@@ -513,10 +650,6 @@ impl Preset {
             // Color tint (DSP Priority 2b)
             g.push(obj.tint_freq as f64);
             g.push(obj.tint_db as f64);
-            // Tone source
-            g.push(obj.source_kind as f64);
-            g.push(obj.tone_freq as f64);
-            g.push(obj.tone_amplitude as f64);
         }
 
         g
@@ -533,7 +666,12 @@ impl Preset {
     /// that are not part of the genome encoding. Used by the optimizer to
     /// preserve spread from a seed preset across genome roundtrips.
     pub fn from_genome_with_spread(g: &[f64], spread_per_slot: &[f32; MAX_OBJECTS]) -> Self {
-        assert!(g.len() >= GENOME_LEN, "genome too short");
+        assert!(
+            matches!(g.len(), GENOME_LEN | LEGACY_GENOME_LEN),
+            "genome length must be {GENOME_LEN} or legacy {LEGACY_GENOME_LEN}, got {}",
+            g.len()
+        );
+        let legacy = g.len() == LEGACY_GENOME_LEN;
 
         let mut preset = Preset {
             master_gain: g[0] as f32,
@@ -543,11 +681,22 @@ impl Preset {
             anchor_volume: g[4] as f32,
             environment: g[5].round() as u8,
             room: RoomConfig::default(),
+            binaural_beat: if legacy {
+                BinauralBeatPresetConfig::default()
+            } else {
+                BinauralBeatPresetConfig {
+                    enabled: g[BINAURAL_ENABLED_GENE_IDX] > 0.5,
+                    center_frequency_hz: g[7] as f32,
+                    beat_frequency_hz: g[8] as f32,
+                    gain_db: g[9] as f32,
+                    lower_frequency_ear: g[BINAURAL_LOWER_EAR_GENE_IDX].round() as u8,
+                }
+            },
             objects: Vec::with_capacity(MAX_OBJECTS),
         };
 
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 28;
+            let base = if legacy { 6 + i * 28 } else { 11 + i * 25 };
             let obj = ObjectConfig {
                 active: g[base] > 0.5,
                 color: g[base + 1].round() as u8,
@@ -588,11 +737,24 @@ impl Preset {
                 },
                 tint_freq: g[base + 23] as f32,
                 tint_db: g[base + 24] as f32,
-                source_kind: g[base + 25].round() as u8,
-                tone_freq: g[base + 26] as f32,
-                tone_amplitude: g[base + 27] as f32,
+                source_kind: if legacy {
+                    g[base + 25].round() as u8
+                } else {
+                    0
+                },
+                tone_freq: if legacy {
+                    g[base + 26] as f32
+                } else {
+                    default_tone_freq()
+                },
+                tone_amplitude: if legacy { g[base + 27] as f32 } else { 0.0 },
             };
             preset.objects.push(obj);
+        }
+
+        if legacy {
+            preset.binaural_beat = migrate_legacy_binaural_beat(&preset.objects);
+            retire_legacy_tone_objects(&mut preset.objects);
         }
 
         preset.clamp();
@@ -612,10 +774,12 @@ impl Preset {
         indices.push(2); // source_count
         indices.push(3); // anchor_color
         indices.push(5); // environment
+        indices.push(BINAURAL_ENABLED_GENE_IDX);
+        indices.push(BINAURAL_LOWER_EAR_GENE_IDX);
 
         // Per-object discrete params
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 28;
+            let base = 11 + i * 25;
             indices.push(base); // active (0/1)
             indices.push(base + 1); // color
             indices.push(base + 7); // bass_mod.kind
@@ -636,6 +800,11 @@ impl Preset {
         b.push((0.0, 6.0)); // anchor_color
         b.push((0.0, 1.0)); // anchor_volume
         b.push((0.0, 4.0)); // environment
+        b.push((0.0, 1.0)); // binaural beat enabled
+        b.push((100.0, 1000.0)); // binaural beat center frequency
+        b.push((0.0, 40.0)); // binaural beat frequency difference
+        b.push((-80.0, -24.0)); // binaural beat digital gain (dBFS)
+        b.push((0.0, 1.0)); // lower-frequency ear (0=Left, 1=Right)
 
         // Per-object (×8)
         for _ in 0..MAX_OBJECTS {
@@ -665,10 +834,6 @@ impl Preset {
                                 // Color tint (DSP Priority 2b): per-object spectral EQ
             b.push((0.0, 8000.0)); // tint_freq (0 = disabled, 100-8000 when active)
             b.push((-6.0, 6.0)); // tint_db (-6 to +6 dB)
-                                 // Tone source
-            b.push((0.0, 1.0)); // source_kind (0=Noise, 1=Tone)
-            b.push((20.0, 8000.0)); // tone_freq
-            b.push((0.0, 1.0)); // tone_amplitude
         }
 
         b
@@ -704,9 +869,10 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn genome_len_is_230() {
-        assert_eq!(GENOME_LEN, 6 + MAX_OBJECTS * 28);
-        assert_eq!(GENOME_LEN, 230);
+    fn genome_len_is_211() {
+        assert_eq!(GENOME_LEN, 11 + MAX_OBJECTS * 25);
+        assert_eq!(GENOME_LEN, 211);
+        assert_eq!(LEGACY_GENOME_LEN, 230);
     }
 
     // ---------------------------------------------------------------
@@ -747,9 +913,9 @@ mod tests {
 
     #[test]
     fn discrete_indices_count() {
-        // 4 global + 8 * 5 per-object = 44
+        // 6 global + 8 * 5 per-object = 46
         let indices = Preset::discrete_gene_indices();
-        assert_eq!(indices.len(), 4 + MAX_OBJECTS * 5);
+        assert_eq!(indices.len(), 6 + MAX_OBJECTS * 5);
     }
 
     // ---------------------------------------------------------------
@@ -801,6 +967,104 @@ mod tests {
         assert!((decoded.objects[0].volume - 0.75).abs() < 1e-5);
         assert_eq!(decoded.objects[0].bass_mod.kind, 1);
         assert!((decoded.objects[0].bass_mod.param_a - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn genome_roundtrip_preserves_global_binaural_beat() {
+        let mut preset = Preset::default();
+        preset.binaural_beat = BinauralBeatPresetConfig {
+            enabled: true,
+            center_frequency_hz: 432.0,
+            beat_frequency_hz: 12.0,
+            gain_db: -36.0,
+            lower_frequency_ear: 1,
+        };
+
+        let decoded = Preset::from_genome(&preset.to_genome());
+        assert_eq!(decoded.binaural_beat, preset.binaural_beat);
+    }
+
+    #[test]
+    fn legacy_json_migrates_first_tone_and_uses_default_beat() {
+        let preset: Preset = serde_json::from_str(include_str!(
+            "../presets/normal_set_flow_v3_adhd_tuned_v3.json"
+        ))
+        .expect("legacy tone preset should migrate");
+
+        assert!(preset.binaural_beat.enabled);
+        assert_eq!(preset.binaural_beat.center_frequency_hz, 220.0);
+        assert_eq!(preset.binaural_beat.beat_frequency_hz, 6.0);
+        assert_eq!(preset.binaural_beat.gain_db, -40.0);
+        assert_eq!(preset.binaural_beat.lower_frequency_ear, 0);
+        assert!(!preset.objects[4].active);
+        assert!(!preset.objects[5].active);
+        assert!(preset.objects[4..=5]
+            .iter()
+            .all(|object| object.source_kind == 0 && object.tone_amplitude == 0.0));
+
+        let saved = serde_json::to_string(&preset).expect("migrated preset should serialize");
+        let reloaded: Preset = serde_json::from_str(&saved).expect("migrated preset should reload");
+        assert_eq!(reloaded.binaural_beat, preset.binaural_beat);
+        assert!(reloaded.objects[4..=5]
+            .iter()
+            .all(|object| !object.active && object.source_kind == 0));
+    }
+
+    #[test]
+    fn legacy_migration_prefers_satellite_periodic_frequency() {
+        let mut first = ObjectConfig::default();
+        first.active = true;
+        first.source_kind = 1;
+        first.tone_freq = 300.0;
+        first.tone_amplitude = 0.5;
+        first.bass_mod.kind = 4;
+        first.bass_mod.param_a = 10.0;
+        first.satellite_mod.kind = 5;
+        first.satellite_mod.param_a = 14.0;
+
+        let migrated = migrate_legacy_binaural_beat(&[first]);
+        assert_eq!(migrated.center_frequency_hz, 300.0);
+        assert_eq!(migrated.beat_frequency_hz, 14.0);
+    }
+
+    #[test]
+    fn new_json_omits_legacy_tone_fields() {
+        let serialized = serde_json::to_value(Preset::default()).unwrap();
+        assert!(serialized.get("binaural_beat").is_some());
+        for object in serialized["objects"].as_array().unwrap() {
+            assert!(object.get("source_kind").is_none());
+            assert!(object.get("tone_freq").is_none());
+            assert!(object.get("tone_amplitude").is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_genome_migrates_tone_to_global_binaural_beat() {
+        let mut genome = vec![0.0; LEGACY_GENOME_LEN];
+        genome[0] = 0.8;
+        genome[1] = 1.0;
+        genome[2] = 2.0;
+        let base = 6;
+        genome[base] = 1.0;
+        genome[base + 5] = 1.0;
+        genome[base + 7] = 4.0;
+        genome[base + 8] = 9.0;
+        genome[base + 9] = 0.5;
+        genome[base + 11] = 4.0;
+        genome[base + 12] = 13.0;
+        genome[base + 13] = 0.5;
+        genome[base + 25] = 1.0;
+        genome[base + 26] = 250.0;
+        genome[base + 27] = 0.5;
+
+        let migrated = Preset::from_genome(&genome);
+        assert!(migrated.binaural_beat.enabled);
+        assert_eq!(migrated.binaural_beat.center_frequency_hz, 250.0);
+        assert_eq!(migrated.binaural_beat.beat_frequency_hz, 13.0);
+        assert!(!migrated.objects[0].active);
+        assert_eq!(migrated.objects[0].source_kind, 0);
+        assert_eq!(migrated.objects[0].tone_amplitude, 0.0);
+        assert_eq!(migrated.to_genome().len(), GENOME_LEN);
     }
 
     #[test]
@@ -937,7 +1201,7 @@ mod tests {
         let genome = preset.to_genome();
 
         // The genome param_b slot should be in [0, 1]
-        let bass_param_b_idx = 6 + 0 * 23 + 9; // base + 9
+        let bass_param_b_idx = 11 + 9; // object base + bass param_b
         assert!(
             genome[bass_param_b_idx] >= 0.0 && genome[bass_param_b_idx] <= 1.0,
             "Stochastic genome param_b should be [0,1], got {}",
@@ -1039,7 +1303,7 @@ mod tests {
         genome[3] = 6.0; // anchor_color
         genome[5] = 4.0; // environment
         for i in 0..MAX_OBJECTS {
-            let base = 6 + i * 28;
+            let base = 11 + i * 25;
             genome[base + 1] = 6.0; // color
             genome[base + 7] = 0.0; // bass kind (Flat)
             genome[base + 11] = 0.0; // sat kind (Flat)
@@ -1098,6 +1362,28 @@ mod tests {
 
         assert!((engine.object_spread(0) - 0.65).abs() < 1e-6);
         assert_eq!(engine.object_spread(1), 0.0);
+    }
+
+    #[test]
+    fn apply_to_engine_sets_global_binaural_beat() {
+        let engine = NoiseEngine::new(48_000, 0.8);
+        let mut preset = Preset::default();
+        preset.binaural_beat = BinauralBeatPresetConfig {
+            enabled: true,
+            center_frequency_hz: 440.0,
+            beat_frequency_hz: 8.0,
+            gain_db: -40.0,
+            lower_frequency_ear: 0,
+        };
+
+        preset.apply_to_engine(&engine);
+
+        let applied = engine.binaural_beat_config();
+        assert!(applied.enabled);
+        assert_eq!(applied.center_frequency_hz, 440.0);
+        assert_eq!(applied.beat_frequency_hz, 8.0);
+        assert_eq!(applied.gain_db, -40.0);
+        assert_eq!(applied.lower_frequency_ear, Ear::Left);
     }
 
     #[test]

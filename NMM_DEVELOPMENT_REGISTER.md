@@ -1,7 +1,7 @@
 # NMM — kanoniczny rejestr rozwoju
 
-**Stan na:** 2026-09-04
-**Przejrzana rewizja bazowa NMM:** `4082bb5`
+**Stan na:** 2026-09-17
+**Przejrzana rewizja bazowa NMM:** `53f4808`
 **Rola dokumentu:** jedno miejsce, które mówi, co naprawdę jest w kodzie i co nadal trzeba zrobić.
 
 Ten rejestr łączy:
@@ -11,7 +11,9 @@ Ten rejestr łączy:
 - [Neural Model Improvement Roadmap](update_model.md),
 - [Paper Findings](paper_findings.md),
 - plany Stage 8 i Stage 8d,
-- oraz review kodu wykonane 2026-09-03.
+- review kodu wykonane 2026-09-03,
+- audyt RNG i research P-06 wykonane 2026-09-04–05,
+- oraz review kolejności prac wykonane 2026-09-06.
 
 Stare dokumenty nadal wyjaśniają historię i szczegóły decyzji. Ten plik jest nadrzędnym źródłem **aktualnego statusu**.
 
@@ -416,22 +418,28 @@ Prosty słownik:
 **Status:** `planned`
 **Priorytet:** P0
 **Dotyczy:** `update_model.md` Priority 7, Audit Stage 0, nowe review RNG
+**Plan wykonawczy:** [`P06_SEEDS_AND_ROBUSTNESS_PLAN.md`](P06_SEEDS_AND_ROBUSTNESS_PLAN.md)
 
-**Problem:** Każdy JR startuje z seedem `42`, więc różne kolumny mogą mieć sztucznie podobny szum. `--seed` jest głównie metadanymi. „Najlepszy” preset jest oceniany na jednej realizacji.
+**Bieżąca kolejność:** Najpierw dokończenie rozpoczętych prac nad seedami w DSP,
+następnie integracja i pełny odbiór P-06 w NMM. Status pozostaje `planned`
+do spełnienia kryteriów odbioru; nie oznacza to, że prace nie zostały rozpoczęte.
+
+**Problem:** Każdy JR startuje z seedem `42`, więc różne kolumny mogą mieć sztucznie podobny szum. DSP, random walk, zakłócenia i losowa odpowiedź pomieszczenia mają kolejne własne stałe seedy. `--seed` jest głównie metadanymi, a seed algorytmu DE jest pomieszany z seedem symulacji. „Najlepszy” preset jest oceniany na jednej realizacji.
 
 **Pomysł na rozwiązanie:**
 
-1. Jeden jawny seed główny ma sterować audio, ruchem i neuronami.
-2. Z niego deterministycznie wyprowadzać osobne seedy dla ucha, pasma, półkuli i kolumny.
-3. Zapisać w sygnaturze reguły wyprowadzania osobnych seedów.
-4. Kandydatów końcowych oceniać na kilku seedach.
-5. Fitness końcowy liczyć jako średnią z karą za duży rozrzut albo jako dolny przedział ufności.
+1. Jeden jawny seed uruchomienia ma sterować audio, ruchem, neuronami, odpowiedzią pomieszczenia, zakłóceniami i wyszukiwaniem, ale przez rozdzielone domeny.
+2. Z wersjonowanego drzewa deterministycznie wyprowadzać osobne strumienie dla DSP, obiektu, ruchu, półkuli, pasma i kolumny.
+3. Zastąpić produkcyjny xorshift i nieprzenośny `StdRng` jawnym, przypiętym `ChaCha12Rng`; regułę wyprowadzania i RNG zapisać w sygnaturze schema 3.
+4. Porównywać finalistów na wspólnym, rozłącznym od wyszukiwania panelu seedów (common random numbers).
+5. Raportować wyniki per-seed, średnią, sample SD, SE i 95% CI. Gdy różnicy większej od jawnego `delta` nie da się wykazać, zwracać `inconclusive` zamiast sztucznego zwycięzcy.
+6. Domyślną liczbę realizacji wybrać w wersjonowanym benchmarku względem panelu referencyjnego 64 seedów.
 
 **Dlaczego warto:** Usuwa sztuczną synchronizację i wybiera preset, który działa stabilnie, a nie tylko miał szczęście w jednej symulacji.
 
-**Prace naukowe i metodyczne:** [Buckwar et al. 2017](https://doi.org/10.1186/s13408-017-0046-4), [Sandve et al. 2013](https://doi.org/10.1371/journal.pcbi.1003285).
+**Prace naukowe i metodyczne:** [Ableidinger, Buckwar i Hinterleitner 2017](https://doi.org/10.1186/s13408-017-0046-4), [Salmon et al. 2011](https://doi.org/10.1145/2063384.2063405), [Nelson i Matejcik 1995](https://doi.org/10.1287/mnsc.41.12.1935), [Monks et al. 2019](https://doi.org/10.1080/17477778.2018.1442155), [Sandve et al. 2013](https://doi.org/10.1371/journal.pcbi.1003285).
 
-**Kryteria odbioru:** Ten sam seed daje ten sam wynik; różne seedy dają kontrolowaną różnicę; półkule i pasma nie współdzielą tego samego strumienia; finalista ma raport średniej, odchylenia i liczby realizacji.
+**Kryteria odbioru:** Obowiązuje pełne Definition of Done z planu P-06: kompletny inwentarz RNG; known-answer tests drzewa seedów; ten sam seed daje ten sam hash audio, wynik i replay; półkule, pasma i obiekty nie współdzielą strumieni; wielowątkowość nie zmienia payloadu; finaliści mają wspólny panel seedów, pełne statystyki i uczciwy status `unique`/`inconclusive`; liczba realizacji wynika z benchmarku 64-seedowego; testy NMM i DSP oraz całe CI są zielone.
 
 ## P-07. Pobudzenie jako zmienna z niepewnością
 
@@ -667,36 +675,133 @@ Prosty słownik:
 
 # Kolejność realizacji
 
-## Faza A — wynik musi być technicznie wiarygodny
+**Aktualny priorytet:** dokończyć rozpoczęte seedowanie DSP, a następnie P-06
+w NMM. Pozostałe prace rozpoczynamy po zamknięciu tego etapu.
 
-1. P-01 — zielony baseline (`implemented`).
-2. P-10 — martwe geny, walidacja DE i czas oceny.
-3. P-06 — prawdziwe seedy.
-4. P-16 — porządek statusu i komentarzy.
+Dalsza kolejność rozdziela pilne naprawy, przygotowanie walidacji i rozwój modelu.
+Zadania P-10, P-11, P-12 i P-13 obejmują kilka etapów, dlatego pojawiają się
+w więcej niż jednej fazie z jawnym zakresem. Wykonanie części zadania nie
+zmienia jego całego statusu na `implemented`.
 
-## Faza B — poprawa znaczenia wejścia i odpowiedzi
+P-12 zaczyna się od protokołu i danych rozwojowych. Wyniki na tych danych
+kierują rozbudową modelu; zamknięty holdout służy dopiero do końcowej oceny
+zamrożonego wariantu. P-16 jest utrzymywane na bieżąco we wszystkich fazach.
 
-1. P-02 — stała amplituda/SPL.
-2. P-03 — rozdzielenie nośnej i modulacji.
-3. P-05 — ASSR z wyrenderowanego audio.
-4. P-15 — kontrolowana decymacja.
+## Faza 0 — dokończenie seedów w DSP i NMM (bieżąca praca)
 
-## Faza C — CandidateV2 i nowy score
+Punktem odniesienia jest P-01 — zielony baseline (`implemented`).
 
-1. P-04 — dynamiczny candidate.
-2. P-07 — arousal z niepewnością.
-3. P-08 — wielowymiarowy scoring.
-4. P-09 — ciągłe profile osób.
+1. Dokończyć rozpoczęte zmiany DSP zgodnie z
+   [`DSP_SEEDED_ENGINE_API_PLAN.md`](DSP_SEEDED_ENGINE_API_PLAN.md), wykonać
+   odbiór i zapisać konkretny commit/tag z finalnym API seedów.
+2. Uzgodnić plan P-06 z wydanym API DSP i przypiąć tę rewizję jako zależność NMM.
+3. Dokończyć P-06 w NMM: doprowadzenie seedów do wszystkich objętych kontraktem
+   warstw, rozdzielenie strumieni, sygnatura i replay, ocena wielorealizacyjna
+   oraz porównanie finalistów.
+4. Wykonać pełny odbiór P-06, w tym benchmark liczby realizacji dla jawnie
+   zapisanej bieżącej konfiguracji modelu, i zaktualizować status wraz z dowodami.
 
-## Faza D — uczenie i dane
+**Warunek przejścia:** DSP i P-06 NMM spełniają swoje kryteria odbioru.
+Naprawy konieczne do ich spełnienia należą do tego etapu; pozostałe naprawy
+DE, surrogate, kalibracja SPL i przygotowanie badań nie są nowymi warunkami
+rozpoczęcia ani zamknięcia seedowania. Późniejsze zmiany modelu wymagają
+ponowienia odpowiednich benchmarków, a nie odkładania obecnego odbioru P-06.
 
-1. P-11 — poprawny surrogate.
-2. P-12 — prawdziwa walidacja i kalibracja.
-3. P-13 — osobny zakres snu.
+**Stan bieżący:** DSP `v0.4.0` jest wydany na commicie
+`81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06` i przypięty w NMM po pełnym SHA.
+Pełny odbiór przeszedł 7/7, w tym niezależny replay 1 344 renderów, obie pary
+CPU bez retry, historyczne bramy CPU przy limicie 3%, alokacje, Rust,
+Swift/XCFramework i WASM/TypeScript. Integracja presetów NMM została wykonana:
+nowe presety używają
+globalnego `binaural_beat`, a legacy `source_kind=1` jest migrowane przy
+wczytaniu. Pierwszy aktywny i słyszalny Tone wygrywa; kolejne są ignorowane z
+ostrzeżeniem; częstotliwość różnicowa pochodzi kolejno z okresowego modulatora
+satellite, bass albo z wartości 6 Hz; gain wynosi -40 dB, a niższa częstotliwość
+trafia do lewego ucha. Po wyznaczeniu globalnej pary dawne sloty Tone są
+wyłączane i normalizowane przed ponownym zapisem, więc nie wracają jako obiekty
+szumowe po kolejnym wczytaniu. Nowy genom ma 211 pól, a decoder przyjmuje również stary
+genom 230-polowy. Artefakty surrogate wytrenowane dla 230-polowego genomu są
+celowo odrzucane przez kontrolę wymiaru i wymagają ponownego treningu.
 
-## Faza E — złożoność tylko wtedy, gdy pomaga
+## Faza A — pilne naprawy i przygotowanie sprawdzianu
 
-1. P-14 — dynamiczne półkule i ewentualna sieć wielu kolumn.
+1. P-10, zakres naprawczy — walidacja populacji `>= 4`, parametrów DE i czasu
+   oceny; zastosowanie albo usunięcie niewykorzystywanego `spatial_mode`.
+2. P-11, zakres naprawczy — zgodne skalowanie trening/runtime i jawne
+   odrzucanie niezgodnych artefaktów przed dalszym używaniem filtra surrogate.
+3. P-12, zakres infrastruktury — naprawa agregacji foldów i przypisywania CI
+   w raportach kalibracji; sprawdzenie poprawności podziałów po uczestnikach.
+4. P-12, zakres protokołu — wybór danych, mierzonych wyników, prostych modeli
+   odniesienia i progów odbioru; wydzielenie danych rozwojowych i zamkniętego
+   holdoutu przed strojeniem nowego modelu.
+5. P-16 oraz dokumentacyjna część P-13 — aktualny status, dowody odbioru
+   i granice interpretacji, w tym zakres open-loop Sleep.
+
+**Warunek przejścia:** podstawowe narzędzia nie zawieszają się na błędnych
+wejściach, raporty mają poprawną semantykę, a sprawdzian przyszłego modelu
+jest określony przed jego budową.
+
+## Faza B — kalibracja poziomu i stabilność numeryczna
+
+1. P-02 — stała amplituda i jawny profil kalibracji SPL.
+2. P-10, zakres czasu oceny, oraz weryfikacja numeryczna rdzenia przed P-04 —
+   ustalenie warm-upu i długości analizy; sprawdzenie wrażliwości wyników na
+   krok integracji i długość sygnału, w tym stabilności rankingu presetów.
+
+Korzystamy z seedowania odebranego w fazie 0.
+Po zmianie skali wejścia albo czasu analizy trzeba
+ponowić benchmark liczby realizacji P-06 dla docelowej konfiguracji.
+
+**Warunek przejścia:** porównanie presetów ma jawną skalę wejścia, realizacje
+losowe i okno analizy; wpływ ustawień numerycznych jest zmierzony względem
+wcześniej zapisanych tolerancji.
+
+## Faza C — minimalny model i walidacja komponentów
+
+1. P-03 — rozdzielenie nośnej i modulacji.
+2. P-15 — kontrolowana decymacja i zachowanie fazy przed odbiorem metryk
+   modulacji oraz PLV.
+3. P-05 — ASSR z wyrenderowanego audio, z kontrolą niemodulowaną.
+4. P-04 — mały dynamiczny CandidateV2 z własnym wynikiem, testami
+   syntetycznymi i odzyskiwania parametrów.
+5. P-12, zakres komponentów — ocena na danych rozwojowych i porównanie
+   z prostymi modelami akustycznymi oraz modulacyjnymi według protokołu fazy A.
+
+**Warunek przejścia:** minimalny candidate przechodzi testy techniczne,
+a wyniki walidacji komponentów określają, które mechanizmy warto rozwijać.
+Brak przewagi nad prostszym modelem wymaga rewizji hipotezy, zanim dodamy
+kolejne parametry i moduły.
+
+## Faza D — scoring i profile uzasadnione danymi
+
+1. P-07 — arousal z niepewnością, rozwijane na podstawie wyników fazy C.
+2. P-08 — wielowymiarowy scoring, jawna obsługa brakujących metryk i wagi
+   dopasowywane wyłącznie na danych treningowych.
+3. P-09 — ciągłe profile osób, w zakresie parametrów możliwych do oszacowania
+   z dostępnych danych.
+4. P-12, zakres końcowego odbioru — zamrożenie modelu, scoringu i profili;
+   ocena na zamkniętym holdoucie oraz decyzja o promocji dla konkretnego
+   komponentu lub celu.
+
+**Warunek przejścia:** promocja zależy od wcześniej ustalonych kryteriów
+i porównania z baseline'em, a nie od samego uzyskania wyniku z CI.
+Holdout nie służy do kolejnych poprawek modelu; strojenie na podstawie jego
+wyniku wymaga nowego, niezależnego sprawdzianu przed kolejną promocją.
+
+## Faza E — wydajność wyszukiwania i warunkowa rozbudowa
+
+1. P-10, pełna przebudowa — zmienne mieszane, usunięcie martwych wymiarów,
+   crowding, restarty i adaptacja DE; porównanie jakości przy tym samym
+   budżecie prawdziwych ewaluacji na ustabilizowanym celu optymalizacji.
+2. P-11, pełny zakres — nowy dataset i surrogate dla ustabilizowanego
+   kontraktu; ocena top-K recall/regret oraz niewidzianych trajektorii.
+3. P-14 — dynamiczne półkule i ewentualna sieć wielu kolumn wyłącznie jako
+   eksperyment wymagający wykazania przewagi nad prostszym modelem.
+4. P-13, zakres closed-loop — osobny przyszły projekt z własnym protokołem
+   snu; nie jest zależnością obecnego narzędzia do projektowania presetów.
+
+Przyspieszenie wyszukiwania nie zastępuje walidacji modelu. Zmiany mechanizmów
+w fazie E ponownie przechodzą właściwe sprawdziany P-12 przed promocją.
 
 # Zasada wyboru „najlepszego presetu” do czasu wykonania planu
 

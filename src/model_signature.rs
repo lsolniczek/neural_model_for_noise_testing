@@ -16,7 +16,7 @@ pub const MODEL_SIGNATURE_SCHEMA_VERSION: u32 = 2;
 /// This value is updated together with the pinned Cargo dependency. Keeping it
 /// in the exported signature makes a result self-describing even after the
 /// lockfile is no longer available.
-pub const DSP_SOURCE_REVISION: &str = "20611c7e2b93e170657cda432f4faca41028f2fe";
+pub const DSP_SOURCE_REVISION: &str = "81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06";
 
 fn legacy_schema_version() -> u32 {
     1
@@ -30,6 +30,8 @@ pub enum RendererRevision {
     LegacyUnversioned,
     /// Brown-noise high-frequency damping introduced by the DSP renderer.
     DspBrownHfV2,
+    /// Brown-noise damping plus the engine-level binaural-beat mixer.
+    DspBrownHfV2BinauralBeatV1,
 }
 
 impl RendererRevision {
@@ -37,6 +39,7 @@ impl RendererRevision {
         match self {
             Self::LegacyUnversioned => "legacy_unversioned",
             Self::DspBrownHfV2 => "dsp_brown_hf_v2",
+            Self::DspBrownHfV2BinauralBeatV1 => "dsp_brown_hf_v2_binaural_beat_v1",
         }
     }
 }

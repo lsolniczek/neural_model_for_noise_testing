@@ -179,6 +179,7 @@ mod tests {
             anchor_volume: 0.0,
             environment: 1, // FocusRoom
             room: crate::preset::RoomConfig::default(),
+            binaural_beat: crate::preset::BinauralBeatPresetConfig::default(),
             objects,
         };
         preset.clamp();
@@ -371,6 +372,7 @@ mod tests {
                 anchor_volume: 0.0,
                 environment: 1,
                 room: crate::preset::RoomConfig::default(),
+                binaural_beat: crate::preset::BinauralBeatPresetConfig::default(),
                 objects,
             };
             preset.clamp();

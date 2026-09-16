@@ -152,7 +152,7 @@ enum Commands {
         /// rather than the parent it was generated from. Maintains
         /// niches across the search space and counters the documented
         /// tendency of vanilla DE/rand/1/bin to collapse to a single
-        /// basin on a high-dimensional genome (the 230-D preset space).
+        /// basin on a high-dimensional genome (the 211-D preset space).
         /// Generation cost is unchanged; only the replacement target
         /// is redirected.
         #[arg(long, default_value_t = false)]
@@ -164,7 +164,7 @@ enum Commands {
         /// reseed the worst `--stagnation-fraction` of the population
         /// with uniform-random genomes; the elite is preserved.
         ///
-        /// Set to 0 (default) to disable. Typical: 10–20 for the 230-D
+        /// Set to 0 (default) to disable. Typical: 10–20 for the 211-D
         /// preset genome at 100 generations. Counter is exposed in the
         /// per-generation progress display.
         #[arg(long, default_value_t = 0)]
@@ -2754,7 +2754,7 @@ fn run_optimize(
     }
 
     // Seed population from an existing preset if provided. Spread is not part
-    // of the genome (the surrogate contract requires a stable 230-dim input),
+    // of the genome (the surrogate contract requires a stable 211-dim input),
     // so we capture it as a per-slot side-channel here and re-apply it on every
     // `from_genome` call below. Without this, seed presets that use spread
     // would silently lose those values on the first round-trip and the

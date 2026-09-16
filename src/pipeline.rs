@@ -279,7 +279,7 @@ impl SimulationConfig {
     pub fn model_signature(&self) -> ModelSignature {
         ModelSignature {
             schema_version: MODEL_SIGNATURE_SCHEMA_VERSION,
-            renderer_revision: RendererRevision::DspBrownHfV2,
+            renderer_revision: RendererRevision::DspBrownHfV2BinauralBeatV1,
             renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
             version: self.model_version,
             pipeline_variant: match self.model_version {
@@ -361,7 +361,7 @@ impl TryFrom<&ModelSignature> for SimulationConfig {
                 signature.schema_version, MODEL_SIGNATURE_SCHEMA_VERSION
             )));
         }
-        if signature.renderer_revision != RendererRevision::DspBrownHfV2 {
+        if signature.renderer_revision != RendererRevision::DspBrownHfV2BinauralBeatV1 {
             return Err(SignatureReplayError::new(format!(
                 "unsupported renderer revision {}",
                 signature.renderer_revision.as_str()
