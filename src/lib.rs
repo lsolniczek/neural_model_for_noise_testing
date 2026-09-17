@@ -4,6 +4,7 @@ pub mod auditory;
 pub mod brain_type;
 pub mod disturb;
 pub mod export;
+pub mod genome_v2;
 pub mod model_signature;
 pub mod movement;
 pub mod neural;

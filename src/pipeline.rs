@@ -13,9 +13,10 @@ use crate::auditory::{
 };
 use crate::brain_type::BrainType;
 use crate::model_signature::{
-    AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
-    NumericParamsSnapshot, PipelineVariant, RendererRevision, ReproducibilitySeeds, ScoringProfile,
-    DSP_SOURCE_REVISION, LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION, MODEL_SIGNATURE_SCHEMA_VERSION,
+    AuditoryFeatureFlags, EnvironmentRenderRevision, ModelSignature, ModelVersion,
+    NeuralFeatureFlags, NormalizationMode, NumericParamsSnapshot, PipelineVariant,
+    RendererRevision, ReproducibilitySeeds, ScoringProfile, DSP_SOURCE_REVISION,
+    LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION, MODEL_SIGNATURE_SCHEMA_VERSION,
 };
 use crate::movement::MovementController;
 use crate::neural::{
@@ -109,6 +110,8 @@ pub(crate) fn deinterleave(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
 pub struct SimulationConfig {
     /// Duration of audio to render per evaluation (seconds).
     pub duration_secs: f32,
+    /// Selects whether NMM adds its historical synthetic RIR after DSP.
+    pub environment_render_revision: EnvironmentRenderRevision,
     /// Initial seconds of neural output to discard before analysis.
     /// Allows differential-equation models to settle past startup transients.
     pub warmup_discard_secs: f32,
@@ -256,6 +259,7 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         SimulationConfig {
             duration_secs: 12.0,
+            environment_render_revision: EnvironmentRenderRevision::DspOnlyV2,
             warmup_discard_secs: DEFAULT_WARMUP_DISCARD_SECS,
             brain_type: BrainType::Normal,
             assr_enabled: true,
@@ -317,6 +321,7 @@ impl SimulationConfig {
         ModelSignature {
             schema_version,
             renderer_revision,
+            environment_render_revision: self.environment_render_revision,
             renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
             seed_derivation_revision: revisions.0,
             optimizer_rng_revision: revisions.1,
@@ -530,6 +535,7 @@ impl TryFrom<&ModelSignature> for SimulationConfig {
 
         let config = Self {
             duration_secs: signature.duration_secs,
+            environment_render_revision: signature.environment_render_revision,
             warmup_discard_secs: signature.warmup_discard_secs,
             brain_type: signature.brain_type,
             assr_enabled: signature.auditory_flags.assr_enabled,
@@ -891,15 +897,24 @@ pub(crate) fn render_preset_ear_signals(
     preset: &Preset,
     duration_secs: f32,
 ) -> RenderedStereoAudio {
-    render_preset_ear_signals_with_seed_plan(preset, duration_secs, None)
+    render_preset_ear_signals_with_seed_plan(
+        preset,
+        duration_secs,
+        None,
+        EnvironmentRenderRevision::LegacyDspPlusSyntheticRirV1,
+    )
 }
 
 fn render_preset_ear_signals_with_seed_plan(
     preset: &Preset,
     duration_secs: f32,
     seed_plan: Option<EvaluationSeedPlan>,
+    environment_render_revision: EnvironmentRenderRevision,
 ) -> RenderedStereoAudio {
     let rendered = render_preset_stereo_dry_with_seed_plan(preset, duration_secs, seed_plan);
+    if environment_render_revision == EnvironmentRenderRevision::DspOnlyV2 {
+        return rendered;
+    }
     if preset.room.uses_image_source() {
         return rendered;
     }
@@ -954,6 +969,7 @@ pub(crate) fn prepare_canonical_auditory_state(
         preset,
         config.duration_secs,
         config.seed_policy.evaluation_plan(),
+        config.environment_render_revision,
     );
     let sr = rendered_audio.sample_rate_hz as f64;
     let left = rendered_audio.left.clone();
@@ -1987,6 +2003,79 @@ mod tests {
         assert_eq!(rendered.sample_rate_hz, SAMPLE_RATE);
         assert_eq!(rendered.frame_count(), (SAMPLE_RATE as f32 * 0.5) as usize);
         assert!(rendered.is_finite());
+    }
+
+    #[test]
+    fn dsp_only_environment_skips_the_second_nmm_rir() {
+        let mut preset = simple_active_preset();
+        preset.environment = 3;
+        let plan = crate::reproducibility::SeedTreeV1::new(991)
+            .evaluation(crate::reproducibility::SeedPanel::Search, 0);
+        let dsp_only = render_preset_ear_signals_with_seed_plan(
+            &preset,
+            0.25,
+            Some(plan),
+            EnvironmentRenderRevision::DspOnlyV2,
+        );
+        let direct = render_preset_stereo_dry_with_seed_plan(&preset, 0.25, Some(plan));
+        assert_eq!(dsp_only.left, direct.left);
+        assert_eq!(dsp_only.right, direct.right);
+
+        let legacy = render_preset_ear_signals_with_seed_plan(
+            &preset,
+            0.25,
+            Some(plan),
+            EnvironmentRenderRevision::LegacyDspPlusSyntheticRirV1,
+        );
+        assert!(
+            legacy
+                .left
+                .iter()
+                .zip(&dsp_only.left)
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "legacy room path should add the NMM RIR"
+        );
+    }
+
+    #[test]
+    fn anechoic_audio_is_identical_across_environment_revisions() {
+        let mut preset = simple_active_preset();
+        preset.environment = 0;
+        let plan = crate::reproducibility::SeedTreeV1::new(992)
+            .evaluation(crate::reproducibility::SeedPanel::Search, 0);
+        let legacy = render_preset_ear_signals_with_seed_plan(
+            &preset,
+            0.25,
+            Some(plan),
+            EnvironmentRenderRevision::LegacyDspPlusSyntheticRirV1,
+        );
+        let dsp_only = render_preset_ear_signals_with_seed_plan(
+            &preset,
+            0.25,
+            Some(plan),
+            EnvironmentRenderRevision::DspOnlyV2,
+        );
+        assert_eq!(legacy.left, dsp_only.left);
+        assert_eq!(legacy.right, dsp_only.right);
+    }
+
+    #[test]
+    fn historical_signature_without_environment_revision_replays_legacy_room_path() {
+        let signature = SimulationConfig::default().model_signature();
+        let mut json = serde_json::to_value(signature).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("environment_render_revision");
+        let restored: crate::model_signature::ModelSignature =
+            serde_json::from_value(json).unwrap();
+        assert_eq!(
+            restored.environment_render_revision,
+            EnvironmentRenderRevision::LegacyDspPlusSyntheticRirV1
+        );
+        assert_eq!(
+            SimulationConfig::default().environment_render_revision,
+            EnvironmentRenderRevision::DspOnlyV2
+        );
     }
 
     #[test]

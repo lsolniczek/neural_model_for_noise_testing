@@ -4,6 +4,7 @@ mod auditory;
 mod brain_type;
 mod disturb;
 mod export;
+mod genome_v2;
 mod model_signature;
 mod movement;
 mod neural;
@@ -26,7 +27,7 @@ use std::time::Instant;
 
 use crate::auditory::ArousalModel;
 use brain_type::BrainType;
-use optimizer::DifferentialEvolution;
+use optimizer::{BoundaryPolicy, DifferentialEvolution, OptimizeConfig};
 use pipeline::{
     evaluate_preset, evaluate_preset_detailed, validate_analysis_window, DetailedSimulationResult,
     SimulationConfig, SimulationResult,
@@ -57,6 +58,7 @@ struct SeedPresetContext {
     spread_per_slot: [f32; preset::MAX_OBJECTS],
     position_space_per_slot: [u8; preset::MAX_OBJECTS],
     room: preset::RoomConfig,
+    mixed: Option<(genome_v2::PresetGenomeV2, genome_v2::MixedGenomeContext)>,
 }
 
 impl Default for SeedPresetContext {
@@ -65,6 +67,7 @@ impl Default for SeedPresetContext {
             spread_per_slot: [0.0_f32; preset::MAX_OBJECTS],
             position_space_per_slot: [0_u8; preset::MAX_OBJECTS],
             room: preset::RoomConfig::default(),
+            mixed: None,
         }
     }
 }
@@ -86,7 +89,7 @@ enum Commands {
         population: usize,
 
         /// Audio duration per evaluation (seconds)
-        #[arg(long, default_value_t = 3.0)]
+        #[arg(long, default_value_t = 10.0)]
         duration: f32,
 
         /// Output JSON path (auto-generated if omitted)
@@ -120,6 +123,22 @@ enum Commands {
         /// DE crossover rate
         #[arg(long, default_value_t = 0.8)]
         de_cr: f64,
+
+        /// Optimizer genome/variation contract: legacy-v1 or mixed-v2.
+        #[arg(long, default_value = "legacy-v1")]
+        optimizer_schema: String,
+
+        /// Out-of-range continuous mutation policy for mixed-v2.
+        #[arg(long, default_value = "reflect")]
+        boundary_policy: String,
+
+        /// SHADE successful-history memory size (0 disables adaptation).
+        #[arg(long, default_value_t = 0)]
+        shade_memory: usize,
+
+        /// L-SHADE linear population reduction target (0 disables reduction).
+        #[arg(long, default_value_t = 0)]
+        population_min: usize,
 
         /// Convergence threshold (stop if fitness std < this)
         #[arg(long, default_value_t = 0.001)]
@@ -301,6 +320,14 @@ enum Commands {
         /// DE crossover rate
         #[arg(long, default_value_t = 0.8)]
         de_cr: f64,
+
+        /// Optimizer genome/variation contract: legacy-v1 or mixed-v2.
+        #[arg(long, default_value = "legacy-v1")]
+        optimizer_schema: String,
+
+        /// Out-of-range continuous mutation policy for mixed-v2.
+        #[arg(long, default_value = "reflect")]
+        boundary_policy: String,
 
         /// Convergence threshold (legacy DE only)
         #[arg(long, default_value_t = 0.001)]
@@ -737,6 +764,7 @@ fn build_eval_config(
 ) -> SimulationConfig {
     SimulationConfig {
         duration_secs: duration,
+        environment_render_revision: model_signature::EnvironmentRenderRevision::DspOnlyV2,
         brain_type,
         assr_enabled: flags.assr,
         thalamic_gate_enabled: flags.thalamic_gate,
@@ -1799,6 +1827,11 @@ fn evaluate_preset_for_dataset_export(
 }
 
 fn preset_from_genome_with_seed_context(genome: &[f64], seed_ctx: &SeedPresetContext) -> Preset {
+    if let Some((schema, context)) = &seed_ctx.mixed {
+        return schema
+            .decode(genome, context)
+            .expect("validated mixed-v2 genome must decode");
+    }
     let mut preset = Preset::from_genome_with_spread(genome, &seed_ctx.spread_per_slot);
     preset.room = seed_ctx.room.clone();
     for (i, obj) in preset.objects.iter_mut().enumerate() {
@@ -2008,6 +2041,8 @@ fn run_optimize_staged(
     indifference_delta: f64,
     de_f: f64,
     de_cr: f64,
+    optimizer_schema: &str,
+    boundary_policy: &str,
     convergence: f64,
     brain_type: &str,
     init_preset: Option<&Path>,
@@ -2061,6 +2096,10 @@ fn run_optimize_staged(
         indifference_delta,
         de_f,
         de_cr,
+        optimizer_schema,
+        boundary_policy,
+        0,
+        0,
         convergence,
         brain_type,
         stage1_seed.as_deref(),
@@ -2095,6 +2134,10 @@ fn run_optimize_staged(
         indifference_delta,
         de_f,
         de_cr,
+        optimizer_schema,
+        boundary_policy,
+        0,
+        0,
         convergence,
         brain_type,
         Some(stage2_seed.as_path()),
@@ -2129,6 +2172,10 @@ fn run_optimize_staged(
         indifference_delta,
         de_f,
         de_cr,
+        optimizer_schema,
+        boundary_policy,
+        0,
+        0,
         convergence,
         brain_type,
         Some(stage3_seed.as_path()),
@@ -2172,6 +2219,10 @@ fn main() {
             indifference_delta,
             de_f,
             de_cr,
+            optimizer_schema,
+            boundary_policy,
+            shade_memory,
+            population_min,
             convergence,
             brain_type,
             init_preset,
@@ -2203,6 +2254,10 @@ fn main() {
                 indifference_delta,
                 de_f,
                 de_cr,
+                &optimizer_schema,
+                &boundary_policy,
+                shade_memory,
+                population_min,
                 convergence,
                 &brain_type,
                 init_preset.as_deref(),
@@ -2234,6 +2289,8 @@ fn main() {
             indifference_delta,
             de_f,
             de_cr,
+            optimizer_schema,
+            boundary_policy,
             convergence,
             brain_type,
             init_preset,
@@ -2274,6 +2331,8 @@ fn main() {
                 indifference_delta,
                 de_f,
                 de_cr,
+                &optimizer_schema,
+                &boundary_policy,
                 convergence,
                 &brain_type,
                 init_preset.as_deref(),
@@ -2818,6 +2877,10 @@ fn run_optimize(
     indifference_delta: f64,
     de_f: f64,
     de_cr: f64,
+    optimizer_schema: &str,
+    boundary_policy: &str,
+    shade_memory: usize,
+    population_min: usize,
     convergence: f64,
     brain_type_str: &str,
     init_preset: Option<&std::path::Path>,
@@ -2836,16 +2899,24 @@ fn run_optimize(
     surrogate_k: usize,
     log_evaluations_path: Option<&Path>,
 ) {
-    if search_replicates == 0 {
-        eprintln!("--search-replicates must be at least 1");
-        std::process::exit(2);
-    }
-    if finalist_count < 2 {
-        eprintln!("--finalist-count must be at least 2");
-        std::process::exit(2);
-    }
-    if finalist_replicates < 2 {
-        eprintln!("--finalist-replicates must be at least 2");
+    let optimizer_config = OptimizeConfig {
+        population,
+        generations,
+        f: de_f,
+        cr: de_cr,
+        convergence,
+        search_replicates,
+        finalist_count,
+        finalist_replicates,
+        surrogate_k,
+        surrogate_enabled: use_surrogate,
+        stagnation_window,
+        stagnation_fraction,
+        duration_secs: duration,
+        warmup_secs: SimulationConfig::default().warmup_discard_secs,
+    };
+    if let Err(message) = optimizer_config.validate() {
+        eprintln!("Invalid optimize configuration: {message}");
         std::process::exit(2);
     }
     if !indifference_delta.is_finite() || indifference_delta < 0.0 {
@@ -2857,6 +2928,61 @@ fn run_optimize(
         duration,
         SimulationConfig::default().warmup_discard_secs,
     );
+    let mixed_v2 = match optimizer_schema {
+        "legacy-v1" => false,
+        genome_v2::MIXED_GENOME_SCHEMA => true,
+        other => {
+            eprintln!(
+                "Invalid optimize configuration: unknown --optimizer-schema '{other}'; expected legacy-v1 or mixed-v2"
+            );
+            std::process::exit(2);
+        }
+    };
+    let requested_boundary_policy =
+        BoundaryPolicy::parse(boundary_policy).unwrap_or_else(|message| {
+            eprintln!("Invalid optimize configuration: {message}");
+            std::process::exit(2);
+        });
+    // Legacy V1 has always clamped and remains bit-for-bit frozen. The flag is
+    // effective only for mixed V2, so provenance records the policy that was
+    // actually used.
+    let boundary_policy = if mixed_v2 {
+        requested_boundary_policy
+    } else {
+        BoundaryPolicy::Clamp
+    };
+    let boundary_policy_name = match boundary_policy {
+        BoundaryPolicy::Clamp => "clamp",
+        BoundaryPolicy::Reflect => "reflect",
+        BoundaryPolicy::Resample => "resample",
+    }
+    .to_string();
+    if mixed_v2 && use_surrogate {
+        eprintln!(
+            "Invalid optimize configuration: --optimizer-schema mixed-v2 is incompatible with --surrogate until P-11 provides a versioned V2 feature contract"
+        );
+        std::process::exit(2);
+    }
+    if mixed_v2 && log_evaluations_path.is_some() {
+        eprintln!(
+            "Invalid optimize configuration: --optimizer-schema mixed-v2 is incompatible with --log-evaluations until P-11 provides a V2 dataset schema"
+        );
+        std::process::exit(2);
+    }
+    if shade_memory > 0 && !mixed_v2 {
+        eprintln!(
+            "Invalid optimize configuration: --shade-memory is available only with --optimizer-schema mixed-v2"
+        );
+        std::process::exit(2);
+    }
+    if population_min > 0
+        && (shade_memory == 0 || population_min < 4 || population_min > population)
+    {
+        eprintln!(
+            "Invalid optimize configuration: --population-min requires SHADE and must be in 4..=population"
+        );
+        std::process::exit(2);
+    }
 
     let goal_kind = GoalKind::from_str(goal_str).unwrap_or_else(|| {
         eprintln!(
@@ -2907,6 +3033,16 @@ fn run_optimize(
     println!("  Max generations:{}", generations);
     println!("  Audio duration: {:.1}s per evaluation", duration);
     println!("  Seed:           {}", seed);
+    println!("  Genome schema:  {optimizer_schema}");
+    if mixed_v2 {
+        println!("  Boundary:       {:?}", boundary_policy);
+    }
+    if shade_memory > 0 {
+        println!("  SHADE memory:   H={shade_memory}");
+    }
+    if population_min > 0 {
+        println!("  Population:     linear reduction to {population_min}");
+    }
     println!("  Search panel:   {search_replicates} replicate(s)");
     println!(
         "  Finalist panel: top {finalist_count}, {finalist_replicates} CRN replicates, delta={indifference_delta:.4}"
@@ -2950,16 +3086,38 @@ fn run_optimize(
 
     // Force all optimizer-generated presets to keep the anchor muted so every
     // audible component goes through the object/HRTF path.
-    let bounds = Preset::bounds_with_anchor_disabled();
-    let discrete_dims = Preset::discrete_gene_indices();
-    let mut de = DifferentialEvolution::with_discrete_seed(
-        bounds,
-        population,
-        de_f,
-        de_cr,
-        SeedTreeV1::new(seed).optimizer_seed(),
-        discrete_dims,
-    );
+    let mixed_schema = mixed_v2.then(genome_v2::PresetGenomeV2::new);
+    let mut de = if let Some(schema) = &mixed_schema {
+        DifferentialEvolution::with_mixed_seed(
+            schema.specs().to_vec(),
+            population,
+            de_f,
+            de_cr,
+            SeedTreeV1::new(seed).optimizer_seed(),
+            boundary_policy,
+        )
+        .unwrap_or_else(|message| {
+            eprintln!("Invalid mixed-v2 optimizer configuration: {message}");
+            std::process::exit(2);
+        })
+    } else {
+        let bounds = Preset::bounds_with_anchor_disabled();
+        let discrete_dims = Preset::discrete_gene_indices();
+        DifferentialEvolution::with_discrete_seed(
+            bounds,
+            population,
+            de_f,
+            de_cr,
+            SeedTreeV1::new(seed).optimizer_seed(),
+            discrete_dims,
+        )
+    };
+    if shade_memory > 0 {
+        de.enable_shade(shade_memory);
+    }
+    if population_min > 0 {
+        de.enable_linear_population_reduction(population_min, generations);
+    }
 
     // Priority 28 Phase 3 — DE diversification (opt-in).
     if crowding {
@@ -2993,13 +3151,14 @@ fn run_optimize(
         );
     }
 
-    // Seed population from an existing preset if provided. Spread is not part
-    // of the genome (the surrogate contract requires a stable 211-dim input),
-    // so we capture it as a per-slot side-channel here and re-apply it on every
-    // `from_genome` call below. Without this, seed presets that use spread
-    // would silently lose those values on the first round-trip and the
-    // optimizer would "improve" a structurally different preset.
+    // Seed population from an existing preset if provided. Legacy V1 keeps
+    // spread in a per-slot side channel because its surrogate contract freezes
+    // the genome at 211 fields. Mixed V2 searches spread directly and stores
+    // only room geometry and coordinate-space choices in its frozen context.
     let mut seed_ctx = SeedPresetContext::default();
+    if let Some(schema) = &mixed_schema {
+        seed_ctx.mixed = Some((schema.clone(), genome_v2::MixedGenomeContext::default()));
+    }
     if let Some(path) = init_preset {
         let json = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("Failed to read init preset: {}", e);
@@ -3014,8 +3173,17 @@ fn run_optimize(
             seed_ctx.position_space_per_slot[i] = obj.position_space.min(2);
         }
         seed_ctx.room = preset.room.clone();
-        let mut genome = preset.to_genome();
-        Preset::disable_anchor_in_genome(&mut genome);
+        let mut genome = if let Some(schema) = &mixed_schema {
+            seed_ctx.mixed = Some((schema.clone(), schema.context_from_preset(&preset)));
+            schema.encode(&preset)
+        } else {
+            let mut legacy = preset.to_genome();
+            Preset::disable_anchor_in_genome(&mut legacy);
+            legacy
+        };
+        if !mixed_v2 {
+            Preset::disable_anchor_in_genome(&mut genome);
+        }
         de.seed_from_genome(&genome, 0.15);
         println!("  Init preset:    {}", path.display());
         let nonzero_spread: Vec<String> = seed_ctx
@@ -3025,17 +3193,18 @@ fn run_optimize(
             .filter(|(_, &s)| s > 0.0)
             .map(|(i, &s)| format!("obj{i}={s:.2}"))
             .collect();
-        if !nonzero_spread.is_empty() {
+        if !mixed_v2 && !nonzero_spread.is_empty() {
             println!(
                 "  Spread (preserved from seed, not searched by DE): {}",
                 nonzero_spread.join(", ")
             );
         }
-        if seed_ctx.room.mode != 0
-            || seed_ctx
-                .position_space_per_slot
-                .iter()
-                .any(|&space| space != 0)
+        if !mixed_v2
+            && (seed_ctx.room.mode != 0
+                || seed_ctx
+                    .position_space_per_slot
+                    .iter()
+                    .any(|&space| space != 0))
         {
             println!("  Seed context:   preserving room mode and object position spaces from seed");
         }
@@ -3580,6 +3749,9 @@ fn run_optimize(
     let finalist_report_path = output_path.with_extension("finalists.json");
     let finalist_report = serde_json::json!({
         "schema": "nmm_p06_finalist_comparison_v1",
+        "optimizer_schema": optimizer_schema,
+        "boundary_policy": boundary_policy_name,
+        "environment_render_revision": sim_config.environment_render_revision,
         "run_seed": seed,
         "search_panel_replicates": search_replicates,
         "finalist_panel": "finalist",
@@ -3612,6 +3784,49 @@ fn run_optimize(
         &seed_ctx,
     ) {
         Ok(_) => {
+            let frozen_context = serde_json::json!({
+                "room": &seed_ctx.room,
+                "position_space_per_slot": seed_ctx.position_space_per_slot,
+            });
+            let frozen_context_hash = blake3::hash(
+                &serde_json::to_vec(&frozen_context).expect("optimizer context serializes"),
+            )
+            .to_hex()
+            .to_string();
+            let provenance = export::OptimizerProvenance {
+                schema: "nmm_optimizer_provenance_v1".to_string(),
+                genome_schema: optimizer_schema.to_string(),
+                environment_render_revision: sim_config
+                    .environment_render_revision
+                    .as_str()
+                    .to_string(),
+                seed,
+                population,
+                generations,
+                de_f,
+                de_cr,
+                boundary_policy: boundary_policy_name.clone(),
+                search_replicates,
+                finalist_count,
+                finalist_replicates,
+                duration_secs: duration,
+                constrained,
+                crowding,
+                stagnation_window,
+                stagnation_fraction,
+                frozen_context_hash,
+                generated_trials: de.generated_trial_count(),
+                duplicate_trials: de.duplicate_trial_count(),
+                dead_only_trials: de.dead_only_trial_count(),
+                shade_memory,
+                population_min,
+                search_population_had_strict_feasible: constrained.then_some(returned_strict),
+                final_comfort_violation: constrained.then_some(final_violation),
+                final_strict_feasible: constrained.then_some(final_violation <= 1e-9),
+            };
+            if let Err(error) = export::attach_optimizer_provenance(&output_path, &provenance) {
+                eprintln!("  Optimizer provenance export failed: {error}");
+            }
             if let Err(error) = export::attach_replicated_analysis(&output_path, &leader_aggregate)
             {
                 eprintln!("  Replicated analysis export failed: {error}");
@@ -5584,12 +5799,22 @@ mod tests {
             .expect("optimize CLI parse should succeed");
         match optimize.command {
             Commands::Optimize {
+                duration,
                 search_replicates,
                 finalist_replicates,
+                optimizer_schema,
+                boundary_policy,
+                shade_memory,
+                population_min,
                 ..
             } => {
+                assert_eq!(duration, 10.0);
                 assert_eq!(search_replicates, 1);
                 assert_eq!(finalist_replicates, replicated::DEFAULT_REPLICATES);
+                assert_eq!(optimizer_schema, "legacy-v1");
+                assert_eq!(boundary_policy, "reflect");
+                assert_eq!(shade_memory, 0);
+                assert_eq!(population_min, 0);
             }
             _ => panic!("expected optimize command"),
         }

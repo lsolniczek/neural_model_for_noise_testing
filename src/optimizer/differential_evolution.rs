@@ -4,7 +4,112 @@
 /// presets. Population-based, gradient-free, handles non-convex landscapes.
 use rand::prelude::*;
 use rand_chacha::ChaCha12Rng;
-use rand_distr::Uniform;
+use rand_distr::{Cauchy, Distribution, Normal, Uniform};
+
+use crate::genome_v2::{GeneKind, GeneSpec};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryPolicy {
+    Clamp,
+    Reflect,
+    Resample,
+}
+
+impl BoundaryPolicy {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "clamp" => Ok(Self::Clamp),
+            "reflect" => Ok(Self::Reflect),
+            "resample" => Ok(Self::Resample),
+            _ => Err(format!(
+                "unknown boundary policy '{value}'; expected clamp, reflect, or resample"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OptimizeConfig {
+    pub population: usize,
+    pub generations: usize,
+    pub f: f64,
+    pub cr: f64,
+    pub convergence: f64,
+    pub search_replicates: usize,
+    pub finalist_count: usize,
+    pub finalist_replicates: usize,
+    pub surrogate_k: usize,
+    pub surrogate_enabled: bool,
+    pub stagnation_window: usize,
+    pub stagnation_fraction: f64,
+    pub duration_secs: f32,
+    pub warmup_secs: f32,
+}
+
+impl OptimizeConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.population < 4 {
+            return Err(format!(
+                "--population must be at least 4 for DE/rand/1, got {}",
+                self.population
+            ));
+        }
+        if self.generations == 0 {
+            return Err("--generations must be at least 1".to_string());
+        }
+        if !self.f.is_finite() || !(0.0..=2.0).contains(&self.f) || self.f == 0.0 {
+            return Err(format!(
+                "--de-f must be finite and in (0, 2], got {}",
+                self.f
+            ));
+        }
+        if !self.cr.is_finite() || !(0.0..=1.0).contains(&self.cr) {
+            return Err(format!(
+                "--de-cr must be finite and in [0, 1], got {}",
+                self.cr
+            ));
+        }
+        if !self.convergence.is_finite() || self.convergence < 0.0 {
+            return Err("--convergence must be finite and non-negative".to_string());
+        }
+        if self.search_replicates == 0 {
+            return Err("--search-replicates must be at least 1".to_string());
+        }
+        if self.finalist_count < 2 {
+            return Err("--finalist-count must be at least 2".to_string());
+        }
+        if self.finalist_replicates < 2 {
+            return Err("--finalist-replicates must be at least 2".to_string());
+        }
+        if self.surrogate_enabled && (self.surrogate_k == 0 || self.surrogate_k > self.population) {
+            return Err(format!(
+                "--surrogate-k must be in 1..=population, got {} for population {}",
+                self.surrogate_k, self.population
+            ));
+        }
+        if self.stagnation_window > 0
+            && (!self.stagnation_fraction.is_finite()
+                || !(0.0..=1.0).contains(&self.stagnation_fraction)
+                || self.stagnation_fraction == 0.0)
+        {
+            return Err(
+                "--stagnation-fraction must be finite and in (0, 1] when restart is enabled"
+                    .to_string(),
+            );
+        }
+        if !self.duration_secs.is_finite()
+            || self.duration_secs <= self.warmup_secs
+            || !self.warmup_secs.is_finite()
+            || self.warmup_secs < 0.0
+        {
+            return Err(format!(
+                "--duration must be finite and greater than the {:.1}s warm-up",
+                self.warmup_secs
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Result of one evaluation.
 #[derive(Clone)]
@@ -75,6 +180,24 @@ struct StagnationConfig {
     fraction: f64,
 }
 
+#[derive(Debug, Clone)]
+struct ShadeState {
+    memory_f: Vec<f64>,
+    memory_cr: Vec<f64>,
+    memory_index: usize,
+    successful_f: Vec<f64>,
+    successful_cr: Vec<f64>,
+    improvements: Vec<f64>,
+    trial_parameters: Vec<Option<(f64, f64)>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LinearPopulationReduction {
+    initial_size: usize,
+    minimum_size: usize,
+    max_generations: usize,
+}
+
 pub struct DifferentialEvolution {
     /// Population of candidate solutions.
     population: Vec<Individual>,
@@ -112,6 +235,17 @@ pub struct DifferentialEvolution {
     /// How many times the stagnation restart has fired so far. Visible
     /// for tests and progress display; never decreases.
     stagnation_restart_count: usize,
+    /// Prevents a second restart while the just-reseeded population is being
+    /// evaluated at the same generation number.
+    last_restart_generation: Option<usize>,
+    /// Typed schema for mixed-v2. `None` preserves the frozen legacy path.
+    mixed_specs: Option<Vec<GeneSpec>>,
+    boundary_policy: BoundaryPolicy,
+    generated_trial_count: usize,
+    duplicate_trial_count: usize,
+    dead_only_trial_count: usize,
+    shade: Option<ShadeState>,
+    population_reduction: Option<LinearPopulationReduction>,
 }
 
 impl DifferentialEvolution {
@@ -215,11 +349,67 @@ impl DifferentialEvolution {
             stagnation_last_best: f64::NEG_INFINITY,
             stagnation_count: 0,
             stagnation_restart_count: 0,
+            last_restart_generation: None,
+            mixed_specs: None,
+            boundary_policy: BoundaryPolicy::Clamp,
+            generated_trial_count: 0,
+            duplicate_trial_count: 0,
+            dead_only_trial_count: 0,
+            shade: None,
+            population_reduction: None,
         };
 
         // Round discrete genes in the initial population
         de.round_discrete_all();
         de
+    }
+
+    /// Construct the P-10 mixed-variable engine. Nominal genes use parent
+    /// inheritance and random category mutation; continuous genes use DE only
+    /// when their conditional branch is active for every donor.
+    pub fn with_mixed_seed(
+        specs: Vec<GeneSpec>,
+        pop_size: usize,
+        f: f64,
+        cr: f64,
+        seed: [u8; 32],
+        boundary_policy: BoundaryPolicy,
+    ) -> Result<Self, String> {
+        if pop_size < 4 {
+            return Err(format!("population must be at least 4, got {pop_size}"));
+        }
+        if specs.is_empty() {
+            return Err("mixed genome schema must contain at least one gene".to_string());
+        }
+        if !f.is_finite() || !(0.0..=2.0).contains(&f) || f == 0.0 {
+            return Err(format!("F must be finite and in (0, 2], got {f}"));
+        }
+        if !cr.is_finite() || !(0.0..=1.0).contains(&cr) {
+            return Err(format!("CR must be finite and in [0, 1], got {cr}"));
+        }
+        for (i, spec) in specs.iter().enumerate() {
+            for condition in spec.conditions.iter().chain(&spec.any_of) {
+                if condition.controller >= i {
+                    return Err(format!(
+                        "gene {i} has a non-preceding condition controller {}",
+                        condition.controller
+                    ));
+                }
+            }
+        }
+        let bounds = specs.iter().map(GeneSpec::bounds).collect();
+        let mut de = Self::with_discrete_rng(
+            bounds,
+            pop_size,
+            f,
+            cr,
+            ChaCha12Rng::from_seed(seed),
+            Vec::new(),
+        );
+        de.mixed_specs = Some(specs);
+        de.boundary_policy = boundary_policy;
+        de.canonicalize_mixed_population();
+        Ok(de)
     }
 
     /// Replace the population with perturbations of a seed genome.
@@ -228,6 +418,10 @@ impl DifferentialEvolution {
     /// generated by perturbing each gene by ±perturbation_frac of its range,
     /// clamped to bounds.
     pub fn seed_from_genome(&mut self, seed: &[f64], perturbation_frac: f64) {
+        if self.mixed_specs.is_some() {
+            self.seed_mixed_from_genome(seed, perturbation_frac);
+            return;
+        }
         for (i, ind) in self.population.iter_mut().enumerate() {
             if i == 0 {
                 ind.genome = seed.to_vec();
@@ -257,6 +451,33 @@ impl DifferentialEvolution {
             ind.violation = f64::INFINITY;
         }
         self.round_discrete_all();
+    }
+
+    fn seed_mixed_from_genome(&mut self, seed: &[f64], perturbation_frac: f64) {
+        assert_eq!(seed.len(), self.bounds.len(), "seed genome length mismatch");
+        let specs = self.mixed_specs.as_ref().unwrap().clone();
+        for (i, ind) in self.population.iter_mut().enumerate() {
+            let mut genome = seed.to_vec();
+            if i > 0 {
+                for (j, spec) in specs.iter().enumerate() {
+                    match spec.kind {
+                        GeneKind::Continuous => {
+                            let delta = self
+                                .rng
+                                .sample(Uniform::new(-perturbation_frac, perturbation_frac));
+                            genome[j] = (genome[j] + delta).clamp(0.0, 1.0);
+                        }
+                        GeneKind::Nominal { categories } => {
+                            if self.rng.gen::<f64>() < perturbation_frac {
+                                genome[j] = f64::from(self.rng.gen_range(0..categories));
+                            }
+                        }
+                    }
+                }
+            }
+            canonicalize_with_specs(&mut genome, &specs);
+            *ind = Individual::unevaluated(genome);
+        }
     }
 
     /// Get all individuals that need evaluation (fitness == NEG_INFINITY).
@@ -428,6 +649,13 @@ impl DifferentialEvolution {
         };
         // ">= " semantics: replace unless the parent strictly dominates.
         if !constrained_better(&self.population[target_index], &trial, eps) {
+            let parent = &self.population[target_index];
+            let improvement = if parent.violation <= eps && trial.violation <= eps {
+                (trial.neural_fitness - parent.neural_fitness).abs()
+            } else {
+                (parent.violation - trial.violation).abs()
+            };
+            self.record_shade_success(target_index, improvement);
             self.population[target_index] = trial.clone();
             if constrained_better(&trial, &self.best, eps) {
                 self.best = trial;
@@ -552,6 +780,35 @@ impl DifferentialEvolution {
         self.stagnation_count = 0;
     }
 
+    /// Enable SHADE successful-history adaptation with `memory_size` slots.
+    pub fn enable_shade(&mut self, memory_size: usize) {
+        assert!(memory_size > 0, "SHADE memory size must be > 0");
+        self.shade = Some(ShadeState {
+            memory_f: vec![self.f; memory_size],
+            memory_cr: vec![self.cr; memory_size],
+            memory_index: 0,
+            successful_f: Vec::new(),
+            successful_cr: Vec::new(),
+            improvements: Vec::new(),
+            trial_parameters: vec![None; self.population.len()],
+        });
+    }
+
+    pub fn enable_linear_population_reduction(
+        &mut self,
+        minimum_size: usize,
+        max_generations: usize,
+    ) {
+        assert!(minimum_size >= 4, "minimum population must be at least 4");
+        assert!(minimum_size <= self.population.len());
+        assert!(max_generations > 0);
+        self.population_reduction = Some(LinearPopulationReduction {
+            initial_size: self.population.len(),
+            minimum_size,
+            max_generations,
+        });
+    }
+
     /// True if stagnation-triggered restart is currently enabled.
     pub fn is_stagnation_restart_enabled(&self) -> bool {
         self.stagnation_config.is_some()
@@ -573,6 +830,32 @@ impl DifferentialEvolution {
     /// after normalisation. Caller is responsible for `genome.len() ==
     /// self.bounds.len()`.
     fn normalized_distance_sq(&self, a: &[f64], b: &[f64]) -> f64 {
+        if let Some(specs) = &self.mixed_specs {
+            let mut sum = 0.0;
+            let mut active = 0usize;
+            for (i, spec) in specs.iter().enumerate() {
+                if !spec.active(a) || !spec.active(b) {
+                    continue;
+                }
+                active += 1;
+                let d = match spec.kind {
+                    GeneKind::Continuous => a[i] - b[i],
+                    GeneKind::Nominal { .. } => {
+                        if a[i].round() == b[i].round() {
+                            0.0
+                        } else {
+                            1.0
+                        }
+                    }
+                };
+                sum += d * d;
+            }
+            return if active == 0 {
+                0.0
+            } else {
+                sum / active as f64
+            };
+        }
         let mut sum_sq = 0.0;
         for ((ai, bi), (lo, hi)) in a.iter().zip(b.iter()).zip(self.bounds.iter()) {
             let span = (hi - lo).max(1e-12);
@@ -610,6 +893,9 @@ impl DifferentialEvolution {
         if self.generation == 0 {
             return;
         }
+        if self.last_restart_generation == Some(self.generation) {
+            return;
+        }
         let current_best = self.best.fitness;
         let improved = current_best.is_finite()
             && (current_best - self.stagnation_last_best).abs() > 1e-9
@@ -624,26 +910,30 @@ impl DifferentialEvolution {
             return;
         }
 
-        // Stagnation trigger fired — reseed worst `fraction` of the pop,
-        // preserving the elite. Worst is defined by `fitness` so that the
-        // policy is consistent across legacy and constrained modes
-        // (constrained mode mirrors fitness = neural_fitness).
+        // Stagnation trigger fired — reseed the worst fraction using the same
+        // comparator as selection. This is essential in constrained mode:
+        // raw fitness can rank an infeasible member above a feasible elite.
         self.stagnation_count = 0;
         self.stagnation_last_best = current_best;
         self.stagnation_restart_count += 1;
+        self.last_restart_generation = Some(self.generation);
 
         let pop_size = self.population.len();
         if pop_size == 0 {
             return;
         }
         let mut indices: Vec<usize> = (0..pop_size).collect();
+        let eps = self.current_eps();
         indices.sort_by(|&x, &y| {
-            self.population[x]
-                .fitness
-                .partial_cmp(&self.population[y].fitness)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let x_better = self.individual_better(&self.population[x], &self.population[y], eps);
+            let y_better = self.individual_better(&self.population[y], &self.population[x], eps);
+            match (x_better, y_better) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => x.cmp(&y),
+            }
         });
-        let elite_index = indices[indices.len() - 1]; // highest fitness
+        let elite_index = indices[indices.len() - 1];
         let reset_n = ((pop_size as f64) * cfg.fraction).ceil() as usize;
         let reset_n = reset_n.min(pop_size);
         for &i in indices.iter().take(reset_n) {
@@ -659,17 +949,29 @@ impl DifferentialEvolution {
         }
         // Re-round discrete genes after randomization.
         self.round_discrete_all();
+        self.canonicalize_mixed_population();
     }
 
     /// Run one generation of DE. Returns trial vectors to evaluate.
     ///
     /// Call `report_trial_results()` after evaluating each trial.
     pub fn generate_trials(&mut self) -> Vec<(usize, Vec<f64>)> {
+        self.finalize_shade_generation();
+        self.apply_linear_population_reduction();
         // Priority 28 Phase 3: stagnation restart fires here so the
         // freshly randomised individuals participate in this generation's
         // trial generation as random parents (improving diversity in the
         // donor pool from the very next iteration).
         self.maybe_apply_stagnation_restart();
+
+        // Restarted individuals must be evaluated before they can act as DE
+        // donors or crowding parents. Return their own genomes as replacement
+        // trials; callers already evaluate every returned item through the
+        // real objective.
+        let pending = self.pending_evaluations();
+        if !pending.is_empty() && self.generation > 0 {
+            return pending;
+        }
 
         let pop_size = self.population.len();
         let dim = self.bounds.len();
@@ -678,6 +980,20 @@ impl DifferentialEvolution {
         for i in 0..pop_size {
             // Select three distinct random individuals (not i)
             let (a, b, c) = self.pick_three(i);
+            let (trial_f, trial_cr) = self.sample_trial_parameters();
+
+            if self.mixed_specs.is_some() {
+                let trial = self.generate_mixed_trial(i, a, b, c, trial_f, trial_cr);
+                self.record_trial_diagnostics(i, &trial);
+                let target = if self.crowding_enabled {
+                    self.nearest_parent_index(&trial)
+                } else {
+                    i
+                };
+                self.remember_trial_parameters(target, trial_f, trial_cr);
+                trials.push((target, trial));
+                continue;
+            }
 
             // Mutation: donor = a + F * (b - c)
             let mut trial = vec![0.0; dim];
@@ -685,9 +1001,9 @@ impl DifferentialEvolution {
 
             for j in 0..dim {
                 // Binomial crossover
-                if self.rng.gen::<f64>() < self.cr || j == j_rand {
+                if self.rng.gen::<f64>() < trial_cr || j == j_rand {
                     let mutant = self.population[a].genome[j]
-                        + self.f * (self.population[b].genome[j] - self.population[c].genome[j]);
+                        + trial_f * (self.population[b].genome[j] - self.population[c].genome[j]);
                     trial[j] = self.clamp_to_bounds(j, mutant);
                 } else {
                     trial[j] = self.population[i].genome[j];
@@ -695,6 +1011,7 @@ impl DifferentialEvolution {
             }
 
             self.round_discrete(&mut trial);
+            self.record_trial_diagnostics(i, &trial);
             // Priority 28 Phase 3 (Thomsen 2004): in crowding mode, the
             // trial competes against its nearest-genome parent rather
             // than the parent it was generated from. The lookup happens
@@ -706,11 +1023,277 @@ impl DifferentialEvolution {
             } else {
                 i
             };
+            self.remember_trial_parameters(target, trial_f, trial_cr);
             trials.push((target, trial));
         }
 
         self.generation += 1;
+        if self.is_constrained() {
+            self.recompute_best_under_current_eps();
+        }
         trials
+    }
+
+    fn generate_mixed_trial(
+        &mut self,
+        i: usize,
+        a: usize,
+        b: usize,
+        c: usize,
+        trial_f: f64,
+        trial_cr: f64,
+    ) -> Vec<f64> {
+        let specs = self.mixed_specs.as_ref().unwrap().clone();
+        let parent = self.population[i].genome.clone();
+        let ga = self.population[a].genome.clone();
+        let gb = self.population[b].genome.clone();
+        let gc = self.population[c].genome.clone();
+        let mut trial = parent.clone();
+
+        // Structure first. Categories are inherited as labels and occasionally
+        // resampled; no subtraction is ever applied to their numeric codes.
+        for (j, spec) in specs.iter().enumerate() {
+            let GeneKind::Nominal { categories } = spec.kind else {
+                continue;
+            };
+            if !spec.active(&trial) {
+                trial[j] = spec.canonical;
+                continue;
+            }
+            if self.rng.gen::<f64>() < trial_cr {
+                let donor = match self.rng.gen_range(0..3) {
+                    0 => ga[j],
+                    1 => gb[j],
+                    _ => gc[j],
+                };
+                trial[j] = donor.round().clamp(0.0, f64::from(categories - 1));
+            }
+            if self.rng.gen::<f64>() < 1.0 / f64::from(categories) {
+                trial[j] = f64::from(self.rng.gen_range(0..categories));
+            }
+        }
+
+        // Then parameters for the selected structure. Arithmetic mutation is
+        // valid only if all donors occupy the same conditional branch.
+        for (j, spec) in specs.iter().enumerate() {
+            if !matches!(spec.kind, GeneKind::Continuous) {
+                continue;
+            }
+            if !spec.active(&trial) {
+                trial[j] = spec.canonical;
+                continue;
+            }
+            if self.rng.gen::<f64>() >= trial_cr {
+                continue;
+            }
+            let same_branch = spec.active(&ga)
+                && spec.active(&gb)
+                && spec.active(&gc)
+                && spec.conditions.iter().all(|condition| {
+                    let k = condition.controller;
+                    ga[k].round() == trial[k].round()
+                        && gb[k].round() == trial[k].round()
+                        && gc[k].round() == trial[k].round()
+                })
+                && spec.any_of.iter().all(|condition| {
+                    let k = condition.controller;
+                    ga[k].round() == trial[k].round()
+                        && gb[k].round() == trial[k].round()
+                        && gc[k].round() == trial[k].round()
+                });
+            trial[j] = if same_branch {
+                let mutant = ga[j] + trial_f * (gb[j] - gc[j]);
+                self.apply_boundary(j, mutant)
+            } else {
+                self.rng.gen::<f64>()
+            };
+        }
+        canonicalize_with_specs(&mut trial, &specs);
+
+        // A fixed crossover coordinate can otherwise yield an identical
+        // phenotype in sparse conditional genomes. Force one active mutation.
+        if trial == parent {
+            let candidates: Vec<usize> = specs
+                .iter()
+                .enumerate()
+                .filter(|(j, spec)| {
+                    spec.active(&trial) && spec.bounds().0 < spec.bounds().1 && *j < trial.len()
+                })
+                .map(|(j, _)| j)
+                .collect();
+            if let Some(&j) = candidates.choose(&mut self.rng) {
+                match specs[j].kind {
+                    GeneKind::Continuous => {
+                        let mut value = self.rng.gen::<f64>();
+                        if (value - trial[j]).abs() < 1e-12 {
+                            value = (value + 0.5) % 1.0;
+                        }
+                        trial[j] = value;
+                    }
+                    GeneKind::Nominal { categories } => {
+                        let current = trial[j].round() as u8;
+                        let offset = self.rng.gen_range(1..categories);
+                        trial[j] = f64::from((current + offset) % categories);
+                    }
+                }
+                canonicalize_with_specs(&mut trial, &specs);
+            }
+        }
+        trial
+    }
+
+    fn apply_boundary(&mut self, dim: usize, value: f64) -> f64 {
+        let (lo, hi) = self.bounds[dim];
+        if (lo..=hi).contains(&value) {
+            return value;
+        }
+        match self.boundary_policy {
+            BoundaryPolicy::Clamp => value.clamp(lo, hi),
+            BoundaryPolicy::Resample => Self::sample_within_bound(&mut self.rng, lo, hi),
+            BoundaryPolicy::Reflect => reflect_into_bounds(value, lo, hi),
+        }
+    }
+
+    fn individual_better(&self, a: &Individual, b: &Individual, eps: f64) -> bool {
+        if self.is_constrained() {
+            constrained_better(a, b, eps)
+        } else {
+            a.fitness > b.fitness
+        }
+    }
+
+    fn record_trial_diagnostics(&mut self, parent_index: usize, trial: &[f64]) {
+        self.generated_trial_count += 1;
+        if trial == self.population[parent_index].genome {
+            self.dead_only_trial_count += 1;
+        }
+        if self.population.iter().any(|ind| ind.genome == trial) {
+            self.duplicate_trial_count += 1;
+        }
+    }
+
+    pub fn generated_trial_count(&self) -> usize {
+        self.generated_trial_count
+    }
+
+    pub fn duplicate_trial_count(&self) -> usize {
+        self.duplicate_trial_count
+    }
+
+    pub fn dead_only_trial_count(&self) -> usize {
+        self.dead_only_trial_count
+    }
+
+    fn sample_trial_parameters(&mut self) -> (f64, f64) {
+        let Some(shade) = &self.shade else {
+            return (self.f, self.cr);
+        };
+        let slot = self.rng.gen_range(0..shade.memory_f.len());
+        let mean_f = shade.memory_f[slot];
+        let mean_cr = shade.memory_cr[slot];
+        let cauchy = Cauchy::new(mean_f, 0.1).expect("valid SHADE Cauchy parameters");
+        let mut f = cauchy.sample(&mut self.rng);
+        while f <= 0.0 || !f.is_finite() {
+            f = cauchy.sample(&mut self.rng);
+        }
+        let normal = Normal::new(mean_cr, 0.1).expect("valid SHADE normal parameters");
+        let cr = normal.sample(&mut self.rng).clamp(0.0, 1.0);
+        (f.min(1.0), cr)
+    }
+
+    fn remember_trial_parameters(&mut self, target: usize, f: f64, cr: f64) {
+        if let Some(shade) = &mut self.shade {
+            if shade.trial_parameters.len() < self.population.len() {
+                shade.trial_parameters.resize(self.population.len(), None);
+            }
+            shade.trial_parameters[target] = Some((f, cr));
+        }
+    }
+
+    fn record_shade_success(&mut self, target: usize, improvement: f64) {
+        let Some(shade) = &mut self.shade else {
+            return;
+        };
+        if let Some((f, cr)) = shade
+            .trial_parameters
+            .get_mut(target)
+            .and_then(Option::take)
+        {
+            shade.successful_f.push(f);
+            shade.successful_cr.push(cr);
+            shade.improvements.push(improvement.max(1e-12));
+        }
+    }
+
+    fn finalize_shade_generation(&mut self) {
+        let Some(shade) = &mut self.shade else {
+            return;
+        };
+        if shade.successful_f.is_empty() {
+            return;
+        }
+        let total = shade.improvements.iter().sum::<f64>();
+        let weighted_lehmer = |values: &[f64]| {
+            let numerator = values
+                .iter()
+                .zip(&shade.improvements)
+                .map(|(value, improvement)| (improvement / total) * value * value)
+                .sum::<f64>();
+            let denominator = values
+                .iter()
+                .zip(&shade.improvements)
+                .map(|(value, improvement)| (improvement / total) * value)
+                .sum::<f64>();
+            if denominator > 0.0 {
+                numerator / denominator
+            } else {
+                0.0
+            }
+        };
+        let slot = shade.memory_index;
+        shade.memory_f[slot] = weighted_lehmer(&shade.successful_f).clamp(1e-6, 1.0);
+        shade.memory_cr[slot] = weighted_lehmer(&shade.successful_cr).clamp(0.0, 1.0);
+        shade.memory_index = (slot + 1) % shade.memory_f.len();
+        shade.successful_f.clear();
+        shade.successful_cr.clear();
+        shade.improvements.clear();
+    }
+
+    fn apply_linear_population_reduction(&mut self) {
+        let Some(config) = self.population_reduction else {
+            return;
+        };
+        let progress = (self.generation as f64 / config.max_generations as f64).clamp(0.0, 1.0);
+        let desired = (config.initial_size as f64
+            - progress * (config.initial_size - config.minimum_size) as f64)
+            .round() as usize;
+        let desired = desired.clamp(config.minimum_size, config.initial_size);
+        if self.population.len() <= desired {
+            return;
+        }
+        let eps = self.current_eps();
+        let constrained = self.is_constrained();
+        self.population.sort_by(|a, b| {
+            let a_better = if constrained {
+                constrained_better(a, b, eps)
+            } else {
+                a.fitness > b.fitness
+            };
+            let b_better = if constrained {
+                constrained_better(b, a, eps)
+            } else {
+                b.fitness > a.fitness
+            };
+            match (a_better, b_better) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+        self.population.truncate(desired);
+        if let Some(shade) = &mut self.shade {
+            shade.trial_parameters.resize(desired, None);
+        }
     }
 
     /// Report trial evaluation results (legacy mode). Replaces parent
@@ -722,6 +1305,8 @@ impl DifferentialEvolution {
         trial_fitness: f64,
     ) {
         if trial_fitness >= self.population[target_index].fitness {
+            let improvement = (trial_fitness - self.population[target_index].fitness).abs();
+            self.record_shade_success(target_index, improvement);
             self.population[target_index] = Individual {
                 genome: trial_genome,
                 fitness: trial_fitness,
@@ -797,8 +1382,21 @@ impl DifferentialEvolution {
         }
     }
 
+    fn canonicalize_mixed_population(&mut self) {
+        let Some(specs) = self.mixed_specs.as_ref() else {
+            return;
+        };
+        for ind in &mut self.population {
+            canonicalize_with_specs(&mut ind.genome, specs);
+        }
+    }
+
     fn pick_three(&mut self, exclude: usize) -> (usize, usize, usize) {
         let pop_size = self.population.len();
+        assert!(
+            pop_size >= 4,
+            "DE/rand/1 requires population >= 4, got {pop_size}"
+        );
         let mut a = exclude;
         while a == exclude {
             a = self.rng.gen_range(0..pop_size);
@@ -818,6 +1416,36 @@ impl DifferentialEvolution {
     fn clamp_to_bounds(&self, dim: usize, value: f64) -> f64 {
         let (lo, hi) = self.bounds[dim];
         value.clamp(lo, hi)
+    }
+}
+
+fn canonicalize_with_specs(genome: &mut [f64], specs: &[GeneSpec]) {
+    debug_assert_eq!(genome.len(), specs.len());
+    for (value, spec) in genome.iter_mut().zip(specs) {
+        let (lo, hi) = spec.bounds();
+        *value = value.clamp(lo, hi);
+        if matches!(spec.kind, GeneKind::Nominal { .. }) {
+            *value = value.round();
+        }
+    }
+    for i in 0..genome.len() {
+        if !specs[i].active(genome) {
+            genome[i] = specs[i].canonical;
+        }
+    }
+}
+
+fn reflect_into_bounds(value: f64, lo: f64, hi: f64) -> f64 {
+    if hi <= lo {
+        return lo;
+    }
+    let width = hi - lo;
+    let period = 2.0 * width;
+    let folded = (value - lo).rem_euclid(period);
+    if folded <= width {
+        lo + folded
+    } else {
+        hi - (folded - width)
     }
 }
 
@@ -859,9 +1487,252 @@ fn constrained_better(a: &Individual, b: &Individual, eps: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::genome_v2::PresetGenomeV2;
 
     fn simple_bounds(dim: usize) -> Vec<(f64, f64)> {
         vec![(-5.0, 5.0); dim]
+    }
+
+    fn valid_optimize_config() -> OptimizeConfig {
+        OptimizeConfig {
+            population: 8,
+            generations: 10,
+            f: 0.7,
+            cr: 0.8,
+            convergence: 0.001,
+            search_replicates: 1,
+            finalist_count: 5,
+            finalist_replicates: 64,
+            surrogate_k: 5,
+            surrogate_enabled: false,
+            stagnation_window: 0,
+            stagnation_fraction: 0.3,
+            duration_secs: 10.0,
+            warmup_secs: 2.0,
+        }
+    }
+
+    #[test]
+    fn optimize_config_rejects_population_below_four_and_invalid_ranges() {
+        for population in 0..4 {
+            let mut config = valid_optimize_config();
+            config.population = population;
+            assert!(config.validate().unwrap_err().contains("population"));
+        }
+        let mut config = valid_optimize_config();
+        config.f = f64::NAN;
+        assert!(config.validate().unwrap_err().contains("de-f"));
+        let mut config = valid_optimize_config();
+        config.cr = 1.1;
+        assert!(config.validate().unwrap_err().contains("de-cr"));
+        let mut config = valid_optimize_config();
+        config.duration_secs = 2.0;
+        assert!(config.validate().unwrap_err().contains("duration"));
+    }
+
+    #[test]
+    fn boundary_reflection_handles_arbitrarily_large_overshoot() {
+        assert!((reflect_into_bounds(1.2, 0.0, 1.0) - 0.8).abs() < 1e-12);
+        assert!((reflect_into_bounds(-0.2, 0.0, 1.0) - 0.2).abs() < 1e-12);
+        assert!((reflect_into_bounds(5.3, 0.0, 1.0) - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn all_mixed_boundary_policies_return_values_inside_the_gene_range() {
+        let schema = PresetGenomeV2::new();
+        for policy in [
+            BoundaryPolicy::Clamp,
+            BoundaryPolicy::Reflect,
+            BoundaryPolicy::Resample,
+        ] {
+            let mut de = DifferentialEvolution::with_mixed_seed(
+                schema.specs().to_vec(),
+                4,
+                0.7,
+                0.8,
+                [19; 32],
+                policy,
+            )
+            .unwrap();
+            for value in [de.apply_boundary(0, -3.25), de.apply_boundary(0, 4.75)] {
+                assert!((0.0..=1.0).contains(&value), "{policy:?}: {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_v2_trials_are_canonical_valid_and_change_phenotype() {
+        let schema = PresetGenomeV2::new();
+        let mut de = DifferentialEvolution::with_mixed_seed(
+            schema.specs().to_vec(),
+            8,
+            0.8,
+            0.9,
+            [7; 32],
+            BoundaryPolicy::Reflect,
+        )
+        .unwrap();
+        for (i, _) in de.pending_evaluations() {
+            de.report_fitness(i, i as f64);
+        }
+        let parents: Vec<Vec<f64>> = de.individuals().iter().map(|i| i.genome.clone()).collect();
+        let trials = de.generate_trials();
+        assert_eq!(trials.len(), 8);
+        for (target, trial) in trials {
+            let mut canonical = trial.clone();
+            schema.canonicalize(&mut canonical);
+            assert_eq!(trial, canonical);
+            assert_ne!(trial, parents[target], "mixed trial must change phenotype");
+            for (value, spec) in trial.iter().zip(schema.specs()) {
+                let (lo, hi) = spec.bounds();
+                assert!((*value >= lo) && (*value <= hi));
+                if matches!(spec.kind, GeneKind::Nominal { .. }) {
+                    assert_eq!(*value, value.round());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_distance_ignores_inactive_object_fields() {
+        let schema = PresetGenomeV2::new();
+        let de = DifferentialEvolution::with_mixed_seed(
+            schema.specs().to_vec(),
+            4,
+            0.7,
+            0.8,
+            [3; 32],
+            BoundaryPolicy::Clamp,
+        )
+        .unwrap();
+        let mut a = schema.encode(&crate::preset::Preset::default());
+        let mut b = a.clone();
+        // Slot zero starts inactive. Change every conditionally inactive value.
+        for (i, spec) in schema.specs().iter().enumerate() {
+            if !spec.active(&a) {
+                b[i] = spec.bounds().1;
+            }
+        }
+        assert_eq!(de.normalized_distance_sq(&a, &b), 0.0);
+        schema.canonicalize(&mut a);
+        schema.canonicalize(&mut b);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mixed_v2_never_emits_dead_only_trials_across_generations() {
+        let schema = PresetGenomeV2::new();
+        let mut de = DifferentialEvolution::with_mixed_seed(
+            schema.specs().to_vec(),
+            8,
+            0.7,
+            0.8,
+            [11; 32],
+            BoundaryPolicy::Reflect,
+        )
+        .unwrap();
+        for (index, genome) in de.pending_evaluations() {
+            de.report_fitness(index, -genome.iter().sum::<f64>());
+        }
+        for _ in 0..10 {
+            for (target, trial) in de.generate_trials() {
+                let fitness = -trial.iter().sum::<f64>();
+                de.report_trial_result(target, trial, fitness);
+            }
+        }
+        assert_eq!(de.generated_trial_count(), 80);
+        assert_eq!(de.dead_only_trial_count(), 0);
+    }
+
+    fn run_shade_sphere(seed: [u8; 32]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let schema = PresetGenomeV2::new();
+        let mut de = DifferentialEvolution::with_mixed_seed(
+            schema.specs().to_vec(),
+            10,
+            0.7,
+            0.8,
+            seed,
+            BoundaryPolicy::Reflect,
+        )
+        .unwrap();
+        de.enable_shade(6);
+        for (index, genome) in de.pending_evaluations() {
+            let fitness = -genome.iter().map(|value| value * value).sum::<f64>();
+            de.report_fitness(index, fitness);
+        }
+        for _ in 0..8 {
+            for (target, trial) in de.generate_trials() {
+                let fitness = -trial.iter().map(|value| value * value).sum::<f64>();
+                de.report_trial_result(target, trial, fitness);
+            }
+        }
+        // Successful parameters from generation eight are committed at the
+        // beginning of the next generation.
+        let _ = de.generate_trials();
+        let shade = de.shade.as_ref().unwrap();
+        (
+            de.best().genome.clone(),
+            shade.memory_f.clone(),
+            shade.memory_cr.clone(),
+        )
+    }
+
+    #[test]
+    fn shade_is_deterministic_and_keeps_adaptation_in_range() {
+        let first = run_shade_sphere([23; 32]);
+        let second = run_shade_sphere([23; 32]);
+        assert_eq!(first, second);
+        assert!(first.1.iter().all(|value| (0.0..=1.0).contains(value)));
+        assert!(first.2.iter().all(|value| (0.0..=1.0).contains(value)));
+    }
+
+    #[test]
+    fn linear_population_reduction_reaches_minimum_without_crossing_de_limit() {
+        let mut de = DifferentialEvolution::new(simple_bounds(4), 12, 0.7, 0.8, 17);
+        de.enable_shade(6);
+        de.enable_linear_population_reduction(4, 4);
+        for (index, genome) in de.pending_evaluations() {
+            de.report_fitness(index, -genome.iter().map(|x| x * x).sum::<f64>());
+        }
+        let mut sizes = Vec::new();
+        for _ in 0..5 {
+            let trials = de.generate_trials();
+            sizes.push(de.population.len());
+            for (target, trial) in trials {
+                let fitness = -trial.iter().map(|x| x * x).sum::<f64>();
+                de.report_trial_result(target, trial, fitness);
+            }
+        }
+        assert!(sizes.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert_eq!(sizes.last(), Some(&4));
+        assert!(sizes.iter().all(|size| *size >= 4));
+    }
+
+    #[test]
+    fn restart_window_one_allows_a_real_generation_after_reseed_evaluation() {
+        let mut de = DifferentialEvolution::new(simple_bounds(3), 6, 0.7, 0.8, 31);
+        for (index, _) in de.pending_evaluations() {
+            de.report_fitness(index, 1.0);
+        }
+        de.enable_stagnation_restart(1, 0.5);
+
+        for (target, trial) in de.generate_trials() {
+            de.report_trial_result(target, trial, 1.0);
+        }
+        assert_eq!(de.generation(), 1);
+
+        let restarted = de.generate_trials();
+        assert_eq!(de.stagnation_restart_count(), 1);
+        assert_eq!(de.generation(), 1);
+        assert!(!restarted.is_empty());
+        for (target, trial) in restarted {
+            de.report_trial_result(target, trial, 1.0);
+        }
+
+        let trials = de.generate_trials();
+        assert_eq!(de.stagnation_restart_count(), 1);
+        assert_eq!(de.generation(), 2);
+        assert_eq!(trials.len(), de.population.len());
     }
 
     // ---------------------------------------------------------------

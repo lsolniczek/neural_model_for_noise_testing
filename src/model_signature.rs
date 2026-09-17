@@ -38,6 +38,25 @@ pub enum RendererRevision {
     DspBrownHfV2BinauralBeatV1SeededV1,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentRenderRevision {
+    /// DSP environment followed by the historical NMM synthetic RIR.
+    #[default]
+    LegacyDspPlusSyntheticRirV1,
+    /// The DSP renderer is the sole authority for room/environment acoustics.
+    DspOnlyV2,
+}
+
+impl EnvironmentRenderRevision {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyDspPlusSyntheticRirV1 => "legacy_dsp_plus_synthetic_rir_v1",
+            Self::DspOnlyV2 => "dsp_only_v2",
+        }
+    }
+}
+
 impl RendererRevision {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -398,6 +417,8 @@ pub struct ModelSignature {
     pub schema_version: u32,
     #[serde(default)]
     pub renderer_revision: RendererRevision,
+    #[serde(default)]
+    pub environment_render_revision: EnvironmentRenderRevision,
     #[serde(default)]
     pub renderer_source_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

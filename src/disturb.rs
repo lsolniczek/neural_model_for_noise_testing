@@ -7,9 +7,10 @@
 use crate::auditory::ArousalModel;
 use crate::brain_type::BrainType;
 use crate::model_signature::{
-    AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
-    NumericParamsSnapshot, PipelineVariant, RendererRevision, ReproducibilitySeeds, ScoringProfile,
-    DSP_SOURCE_REVISION, LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
+    AuditoryFeatureFlags, EnvironmentRenderRevision, ModelSignature, ModelVersion,
+    NeuralFeatureFlags, NormalizationMode, NumericParamsSnapshot, PipelineVariant,
+    RendererRevision, ReproducibilitySeeds, ScoringProfile, DSP_SOURCE_REVISION,
+    LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
 };
 use crate::neural::BilateralResult;
 use crate::pipeline::{
@@ -168,6 +169,7 @@ impl DisturbConfig {
     fn canonical_simulation_config(&self) -> SimulationConfig {
         SimulationConfig {
             duration_secs: self.duration_secs,
+            environment_render_revision: EnvironmentRenderRevision::LegacyDspPlusSyntheticRirV1,
             warmup_discard_secs: self.warmup_discard_secs,
             brain_type: self.brain_type,
             assr_enabled: self.assr_enabled,
@@ -729,6 +731,7 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
     let model_signature = ModelSignature {
         schema_version: LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
         renderer_revision: RendererRevision::DspBrownHfV2,
+        environment_render_revision: EnvironmentRenderRevision::LegacyDspPlusSyntheticRirV1,
         renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
         seed_derivation_revision: None,
         optimizer_rng_revision: None,

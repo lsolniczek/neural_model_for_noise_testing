@@ -34,6 +34,8 @@ pub enum SeedPanel {
     Finalist = 3,
     Dataset = 4,
     Disturb = 5,
+    BenchmarkDevelopment = 6,
+    BenchmarkConfirmation = 7,
 }
 
 impl SeedPanel {
@@ -301,9 +303,17 @@ mod tests {
         let next = tree.evaluation(SeedPanel::Direct, 1).audio_seed();
         let search = tree.evaluation(SeedPanel::Search, 0).audio_seed();
         let finalist = tree.evaluation(SeedPanel::Finalist, 0).audio_seed();
+        let development = tree
+            .evaluation(SeedPanel::BenchmarkDevelopment, 0)
+            .audio_seed();
+        let confirmation = tree
+            .evaluation(SeedPanel::BenchmarkConfirmation, 0)
+            .audio_seed();
         assert_ne!(direct, next);
         assert_ne!(direct, search);
         assert_ne!(search, finalist);
+        assert_ne!(finalist, development);
+        assert_ne!(development, confirmation);
     }
 
     #[test]

@@ -21,6 +21,41 @@ pub struct PresetExport {
     pub analysis: ExportAnalysis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicated_analysis: Option<ReplicatedEvaluation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_provenance: Option<OptimizerProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizerProvenance {
+    pub schema: String,
+    pub genome_schema: String,
+    pub environment_render_revision: String,
+    pub seed: u64,
+    pub population: usize,
+    pub generations: usize,
+    pub de_f: f64,
+    pub de_cr: f64,
+    pub boundary_policy: String,
+    pub search_replicates: usize,
+    pub finalist_count: usize,
+    pub finalist_replicates: usize,
+    pub duration_secs: f32,
+    pub constrained: bool,
+    pub crowding: bool,
+    pub stagnation_window: usize,
+    pub stagnation_fraction: f64,
+    pub frozen_context_hash: String,
+    pub generated_trials: usize,
+    pub duplicate_trials: usize,
+    pub dead_only_trials: usize,
+    pub shade_memory: usize,
+    pub population_min: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_population_had_strict_feasible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_comfort_violation: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_strict_feasible: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,11 +123,27 @@ pub fn export_preset(
             },
         },
         replicated_analysis: None,
+        optimizer_provenance: None,
     };
 
     let json = serde_json::to_string_pretty(&export)?;
     std::fs::write(output_path, json)?;
     Ok(())
+}
+
+pub fn attach_optimizer_provenance(
+    output_path: &Path,
+    provenance: &OptimizerProvenance,
+) -> std::io::Result<()> {
+    let json = std::fs::read_to_string(output_path)?;
+    let mut export: PresetExport = serde_json::from_str(&json)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    export.optimizer_provenance = Some(provenance.clone());
+    std::fs::write(
+        output_path,
+        serde_json::to_string_pretty(&export)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    )
 }
 
 pub fn attach_replicated_analysis(

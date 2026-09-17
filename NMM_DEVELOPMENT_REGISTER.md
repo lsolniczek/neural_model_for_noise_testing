@@ -81,7 +81,7 @@ Prosty słownik:
 | P-07 | `planned` | P1 | Pobudzenie z niepewnością |
 | P-08 | `planned` | P0 | Nowy, wielowymiarowy scoring |
 | P-09 | `planned` | P1 | Ciągłe profile osób |
-| P-10 | `planned` | P0 | Optymalizator zmiennych mieszanych |
+| P-10 | `in_progress` | P0 | Optymalizator zmiennych mieszanych; implementacja gotowa, promocja czeka na benchmark |
 | P-11 | `planned` | P1 | Kontrakt i walidacja surrogate |
 | P-12 | `planned` | P0/P1 | Prawdziwe dane i promocja komponentów |
 | P-13 | `planned` | P1/P3 | Granice celu Sleep i przyszły closed-loop |
@@ -525,11 +525,17 @@ człowieka; ten dowód należy do P-12.
 
 ## P-10. Optymalizator dla zmiennych mieszanych i realnego presetu
 
-**Status:** `planned`
+**Status:** `in_progress`
 **Priorytet:** P0
-**Dotyczy:** `update_model.md` Priority 14 i 28, nowe review przestrzeni 230D
+**Dotyczy:** `update_model.md` Priority 14 i 28, review przestrzeni optymalizacji
 
-**Problem:** Genom ma 230 wymiarów. DE odejmuje kody kategorii tak, jakby `color=2` leżał pomiędzy `color=1` i `color=3`. Nieaktywne obiekty tworzą martwe wymiary. `spatial_mode` nie jest używany przez `Preset::apply_to_engine`, a populacja mniejsza niż cztery może zawiesić `pick_three`. Jedna sekunda materiału po warm-up jest za krótka dla stabilnych metryk.
+**Problem:** Historyczne dokumenty opisywały genom 230D, ale zamrożona ścieżka
+`legacy-v1` ma obecnie 211 pól i nadal odejmuje kody kategorii tak, jakby
+`color=2` leżał pomiędzy `color=1` i `color=3`. Nieaktywne obiekty tworzą
+martwe wymiary. `spatial_mode` nie był stosowany przez
+`Preset::apply_to_engine`, a populacja mniejsza niż cztery mogła zawiesić
+`pick_three`. Krótkie okno po warm-upie nie dawało wiarygodnej podstawy do
+wyboru czasu oceny i liczby realizacji.
 
 **Pomysł na rozwiązanie:**
 
@@ -545,9 +551,58 @@ człowieka; ten dowód należy do P-12.
 
 **Dlaczego warto:** Optymalizator będzie szukał po parametrach, które rzeczywiście zmieniają audio, i przestanie nadawać sztuczny porządek kategoriom.
 
-**Prace naukowe:** [Storn i Price 1997](https://doi.org/10.1023/A:1008202821328), [Tanabe i Fukunaga 2014 — L-SHADE](https://doi.org/10.1109/SASOW.2014.25).
+**Stan implementacji 2026-09-17:**
 
-**Kryteria odbioru:** Brak martwych genów; niepoprawna konfiguracja kończy się czytelnym błędem; test wszystkich genów pokazuje wpływ na wyrenderowany preset; mieszane kategorie nie są mutowane przez arytmetyczną różnicę kodów; benchmark pokazuje zysk względem obecnego DE.
+1. Dodano wersjonowany `mixed-v2` o 423 polach i ośmiu stabilnych slotach.
+   Kategorie są dziedziczone lub losowane jako etykiety. Parametry ciągłe są
+   mutowane arytmetycznie tylko wtedy, gdy dawcy należą do tej samej aktywnej
+   gałęzi. Pola nieaktywne mają wartość kanoniczną i nie uczestniczą w
+   dystansie crowding.
+2. `source_count` jest wyliczany z masek aktywności, `spatial_mode` jest
+   ustalony na ścieżkę obiektową, a nieużywany anchor wyciszony. Genom obejmuje
+   między innymi `spread`, Blue i pełny zakres RandomPulse. Kontekst pokoju i
+   układu współrzędnych jest zamrożony poza genomem.
+3. Nowe ewaluacje używają rewizji `dsp_only_v2`: akustyka pokoju pochodzi tylko
+   z DSP. Stare sygnatury bez pola rewizji odtwarzają historyczną ścieżkę z
+   dodatkowym syntetycznym RIR.
+4. Walidacja odrzuca populację mniejszą niż cztery, błędne `F`, `CR`, liczby
+   generacji, panele finalistów i czas nieprzekraczający warm-upu. Dostępne są
+   polityki granic clamp, reflect i resample oraz poprawne porównanie ograniczeń
+   przy restartach.
+5. Jako warianty eksperymentalne dodano crowding, częściowy restart, SHADE z
+   pamięcią udanych `F`/`CR` i liniową redukcję populacji. Restart zawsze
+   ocenia nowe osobniki przed użyciem ich jako dawców.
+6. Eksport zapisuje schemat, rewizję pokoju, seedy, konfigurację DE, hash
+   zamrożonego kontekstu, liczniki duplikatów i martwych prób oraz — w trybie
+   constrained — wynik ograniczeń. `mixed-v2` jawnie odrzuca stary surrogate i stary format logu do
+   czasu wykonania P-11.
+7. Dodano dwa odtwarzalne narzędzia: benchmark czasu i liczby realizacji oraz
+   dwuetapowe porównanie wariantów optymalizatora. Dokładna procedura znajduje
+   się w [`benchmarks/p10/README.md`](benchmarks/p10/README.md).
+
+`legacy-v1` pozostaje domyślny. Zmiana domyślnej ścieżki nastąpi wyłącznie po
+pełnym benchmarku rozwojowym i niezależnym potwierdzeniu. Brak artefaktów
+benchmarku oznacza brak decyzji o promocji, a nie niepowodzenie implementacji.
+
+**Prace naukowe:** [Storn i Price 1997](https://doi.org/10.1023/A:1008202821328),
+[JADE — Zhang i Sanderson 2009](https://doi.org/10.1109/TEVC.2009.2014613),
+[L-SHADE — Tanabe i Fukunaga 2014](https://doi.org/10.1109/CEC.2014.6900380),
+[Thomsen 2004 — crowding DE](https://doi.org/10.1109/CEC.2004.1331058),
+[Takahama i Sakai 2009 — ograniczenia ε](https://doi.org/10.1527/tjsai.24.34),
+[Lin et al. 2018 — DE dla zmiennych mieszanych](https://doi.org/10.1016/j.ins.2018.07.035),
+[Talbi 2024 — taksonomia optymalizacji mieszanej](https://doi.org/10.1016/j.swevo.2024.101642),
+[Glasserman i Yao 1992 — wspólne liczby losowe](https://doi.org/10.1287/mnsc.38.6.884),
+[Derrac et al. 2011 — porównania statystyczne](https://doi.org/10.1016/j.swevo.2011.02.002).
+
+**Kryteria odbioru:** Testy kontraktu potwierdzają kanoniczne pola nieaktywne,
+brak prób zmieniających wyłącznie martwe pola, poprawne zakresy wszystkich
+gałęzi oraz czytelne błędy konfiguracji. Benchmark czasu musi osiągnąć
+p95 błędu bezwzględnego `<= 0.01`, Spearmana `>= 0.90` i zgodność top-1
+`>= 95%` względem 60 s/64 realizacji. Kandydat może zastąpić `legacy-v1`
+tylko wtedy, gdy niezależne potwierdzenie wykaże brak istotnej utraty jakości
+dla każdego celu, dolną jednostronną granicę bootstrap powyżej `-0.01`, spadek
+duplikatów co najmniej o 50%, zero martwych prób i częstość ścisłej
+wykonalności nie gorszą o więcej niż 5 punktów procentowych.
 
 ## P-11. Nowy kontrakt i walidacja surrogate
 
@@ -689,8 +744,9 @@ człowieka; ten dowód należy do P-12.
 
 # Kolejność realizacji
 
-**Aktualny priorytet:** Faza 0 jest zamknięta. Następne jest P-10 w zakresie
-naprawczym, potem P-11 i infrastruktura P-12 zgodnie z Fazą A.
+**Aktualny priorytet:** Faza 0 jest zamknięta. Kod kandydata P-10 i procedury
+testowe są gotowe; następny krok to wykonanie pełnego benchmarku P-10 i decyzja
+o promocji. Potem następują P-11 i infrastruktura P-12 zgodnie z Fazą A.
 
 Dalsza kolejność rozdziela pilne naprawy, przygotowanie walidacji i rozwój modelu.
 Zadania P-10, P-11, P-12 i P-13 obejmują kilka etapów, dlatego pojawiają się
@@ -727,8 +783,9 @@ odpowiednich testów i benchmarku P-06.
 
 ## Faza A — pilne naprawy i przygotowanie sprawdzianu
 
-1. P-10, zakres naprawczy — walidacja populacji `>= 4`, parametrów DE i czasu
-   oceny; zastosowanie albo usunięcie niewykorzystywanego `spatial_mode`.
+1. P-10, zakres naprawczy (`implemented`) — walidacja populacji `>= 4`,
+   parametrów DE i czasu oceny; usunięcie `spatial_mode` z przestrzeni
+   wyszukiwania i jawne użycie ścieżki obiektowej.
 2. P-11, zakres naprawczy — zgodne skalowanie trening/runtime i jawne
    odrzucanie niezgodnych artefaktów przed dalszym używaniem filtra surrogate.
 3. P-12, zakres infrastruktury — naprawa agregacji foldów i przypisywania CI
@@ -746,9 +803,9 @@ jest określony przed jego budową.
 ## Faza B — kalibracja poziomu i stabilność numeryczna
 
 1. P-02 — stała amplituda i jawny profil kalibracji SPL.
-2. P-10, zakres czasu oceny, oraz weryfikacja numeryczna rdzenia przed P-04 —
-   ustalenie warm-upu i długości analizy; sprawdzenie wrażliwości wyników na
-   krok integracji i długość sygnału, w tym stabilności rankingu presetów.
+2. P-10, zakres czasu oceny (`in_progress`), oraz weryfikacja numeryczna
+   rdzenia przed P-04 — narzędzie i progi są zamrożone; pozostaje wykonanie
+   benchmarku względem 60 s/64 realizacji i zapis artefaktów.
 
 Korzystamy z seedowania odebranego w fazie 0.
 Po zmianie skali wejścia albo czasu analizy trzeba
@@ -792,9 +849,10 @@ wyniku wymaga nowego, niezależnego sprawdzianu przed kolejną promocją.
 
 ## Faza E — wydajność wyszukiwania i warunkowa rozbudowa
 
-1. P-10, pełna przebudowa — zmienne mieszane, usunięcie martwych wymiarów,
-   crowding, restarty i adaptacja DE; porównanie jakości przy tym samym
-   budżecie prawdziwych ewaluacji na ustabilizowanym celu optymalizacji.
+1. P-10, pełna przebudowa (`in_progress`) — implementacja zmiennych mieszanych,
+   masek, crowding, restartów, SHADE i redukcji populacji jest gotowa;
+   pozostaje porównanie jakości przy tym samym budżecie prawdziwych ewaluacji
+   oraz osobna decyzja o zmianie wartości domyślnej.
 2. P-11, pełny zakres — nowy dataset i surrogate dla ustabilizowanego
    kontraktu; ocena top-K recall/regret oraz niewidzianych trajektorii.
 3. P-14 — dynamiczne półkule i ewentualna sieć wielu kolumn wyłącznie jako
