@@ -7,7 +7,10 @@
 /// During evaluation the controller is stepped in discrete time increments
 /// (matching the render chunk size) so that the rendered audio reflects
 /// object motion through the HRTF pipeline.
+use crate::reproducibility::EvaluationSeedPlan;
 use noise_generator_core::NoiseEngine;
+use rand::RngCore;
+use rand_chacha::ChaCha12Rng;
 use serde::{Deserialize, Serialize};
 
 // ── Movement pattern enum ───────────────────────────────────────────────────
@@ -149,18 +152,27 @@ struct SatelliteState {
     rw_z: f32,
     rw_vel_x: f32,
     rw_vel_z: f32,
-    /// Simple xorshift RNG state for deterministic random walk.
-    rng_state: u64,
+    rng: MovementRng,
+}
+
+enum MovementRng {
+    LegacyXorShift64(u64),
+    DomainSeparatedV1(ChaCha12Rng),
 }
 
 impl SatelliteState {
-    /// Deterministic random float in [-1, 1] using xorshift64.
     fn rand_f32(&mut self) -> f32 {
-        self.rng_state ^= self.rng_state << 13;
-        self.rng_state ^= self.rng_state >> 7;
-        self.rng_state ^= self.rng_state << 17;
+        let value = match &mut self.rng {
+            MovementRng::LegacyXorShift64(state) => {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                *state
+            }
+            MovementRng::DomainSeparatedV1(rng) => rng.next_u64(),
+        };
         // Map to [-1, 1]
-        (self.rng_state as i64 as f64 / i64::MAX as f64) as f32
+        (value as i64 as f64 / i64::MAX as f64) as f32
     }
 }
 
@@ -176,6 +188,20 @@ impl MovementController {
     /// `objects` provides the initial position and movement config for each object.
     /// Only objects with a non-static movement pattern are tracked.
     pub fn from_preset(preset: &crate::preset::Preset) -> Self {
+        Self::from_preset_with_seed_plan(preset, None)
+    }
+
+    pub fn from_preset_seeded(
+        preset: &crate::preset::Preset,
+        seed_plan: EvaluationSeedPlan,
+    ) -> Self {
+        Self::from_preset_with_seed_plan(preset, Some(seed_plan))
+    }
+
+    fn from_preset_with_seed_plan(
+        preset: &crate::preset::Preset,
+        seed_plan: Option<EvaluationSeedPlan>,
+    ) -> Self {
         let mut satellites = Vec::new();
 
         for (i, obj) in preset.objects.iter().enumerate() {
@@ -205,10 +231,14 @@ impl MovementController {
                 rw_z: obj.z,
                 rw_vel_x: 0.0,
                 rw_vel_z: 0.0,
-                // Seed RNG from object index + phase for determinism
-                rng_state: 0xDEAD_BEEF_u64
-                    .wrapping_add(i as u64 * 7919)
-                    .wrapping_add((mv.phase * 1000.0) as u64),
+                rng: match seed_plan {
+                    Some(plan) => MovementRng::DomainSeparatedV1(plan.movement_rng(i as u32)),
+                    None => MovementRng::LegacyXorShift64(
+                        0xDEAD_BEEF_u64
+                            .wrapping_add(i as u64 * 7919)
+                            .wrapping_add((mv.phase * 1000.0) as u64),
+                    ),
+                },
             });
         }
 
@@ -603,6 +633,35 @@ mod tests {
 
         assert_eq!(ctrl1.satellites[0].rw_x, ctrl2.satellites[0].rw_x);
         assert_eq!(ctrl1.satellites[0].rw_z, ctrl2.satellites[0].rw_z);
+    }
+
+    #[test]
+    fn domain_separated_random_walk_replays_and_changes_by_replicate() {
+        let preset = preset_with_movement(MovementConfig {
+            kind: 3,
+            radius: 3.0,
+            speed: 1.0,
+            phase: 0.5,
+            ..MovementConfig::default()
+        });
+        let tree = crate::reproducibility::SeedTreeV1::new(42);
+        let run = |replicate_index| {
+            let engine = test_engine();
+            preset.apply_to_engine(&engine);
+            let mut controller = MovementController::from_preset_seeded(
+                &preset,
+                tree.evaluation(crate::reproducibility::SeedPanel::Direct, replicate_index),
+            );
+            for _ in 0..100 {
+                controller.tick(0.05, &engine);
+            }
+            (
+                controller.satellites[0].rw_x.to_bits(),
+                controller.satellites[0].rw_z.to_bits(),
+            )
+        };
+        assert_eq!(run(0), run(0));
+        assert_ne!(run(0), run(1));
     }
 
     // ---------------------------------------------------------------

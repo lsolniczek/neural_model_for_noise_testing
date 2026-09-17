@@ -8,8 +8,10 @@ use crate::neural::wilson_cowan::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Current JSON schema written into every model signature.
-pub const MODEL_SIGNATURE_SCHEMA_VERSION: u32 = 2;
+/// Current JSON schema for domain-separated stochastic runs.
+pub const MODEL_SIGNATURE_SCHEMA_VERSION: u32 = 3;
+/// Frozen schema used by `LegacyFixedV1` and historical P-01 exports.
+pub const LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION: u32 = 2;
 
 /// Exact DSP source revision used by this NMM build.
 ///
@@ -32,6 +34,8 @@ pub enum RendererRevision {
     DspBrownHfV2,
     /// Brown-noise damping plus the engine-level binaural-beat mixer.
     DspBrownHfV2BinauralBeatV1,
+    /// The same renderer with the public DSP seed-tree contract enabled.
+    DspBrownHfV2BinauralBeatV1SeededV1,
 }
 
 impl RendererRevision {
@@ -40,6 +44,9 @@ impl RendererRevision {
             Self::LegacyUnversioned => "legacy_unversioned",
             Self::DspBrownHfV2 => "dsp_brown_hf_v2",
             Self::DspBrownHfV2BinauralBeatV1 => "dsp_brown_hf_v2_binaural_beat_v1",
+            Self::DspBrownHfV2BinauralBeatV1SeededV1 => {
+                "dsp_brown_hf_v2_binaural_beat_v1_seeded_v1"
+            }
         }
     }
 }
@@ -263,7 +270,8 @@ pub struct NumericParamsSnapshot {
     pub habituation_rate: f64,
     pub habituation_recovery: f64,
     pub cet_c_slow_connectivity: f64,
-    pub jr_stochastic_rng_seed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jr_stochastic_rng_seed: Option<u64>,
     pub jr_v_max: f64,
     pub jr_default_c: f64,
     pub jr_default_c1: f64,
@@ -290,6 +298,7 @@ impl NumericParamsSnapshot {
         fixed_arousal: Option<f64>,
         habituation_enabled: bool,
         cet_enabled: bool,
+        legacy_fixed_rng: bool,
     ) -> Self {
         let params = brain_type.params();
         let tonotopic = brain_type.tonotopic_params();
@@ -333,7 +342,7 @@ impl NumericParamsSnapshot {
             habituation_rate: if habituation_enabled { 0.0003 } else { 0.0 },
             habituation_recovery: if habituation_enabled { 0.0001 } else { 0.0 },
             cet_c_slow_connectivity: if cet_enabled { 30.0 } else { 0.0 },
-            jr_stochastic_rng_seed: 42,
+            jr_stochastic_rng_seed: legacy_fixed_rng.then_some(42),
             jr_v_max: jr_constants.v_max,
             jr_default_c: jr_constants.default_c,
             jr_default_c1: jr_constants.default_c1,
@@ -371,8 +380,15 @@ impl NumericParamsSnapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReproducibilitySeeds {
+    #[serde(default)]
     pub primary_seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<crate::reproducibility::SeedPanel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_index: Option<u64>,
+    #[serde(default)]
     pub disturbance_left_spike_seed: Option<u64>,
+    #[serde(default)]
     pub disturbance_right_spike_seed: Option<u64>,
 }
 
@@ -384,6 +400,18 @@ pub struct ModelSignature {
     pub renderer_revision: RendererRevision,
     #[serde(default)]
     pub renderer_source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_derivation_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_rng_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement_rng_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_rng_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_transform_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_seed_derivation_revision: Option<String>,
     pub version: ModelVersion,
     pub pipeline_variant: PipelineVariant,
     pub scoring_profile: ScoringProfile,

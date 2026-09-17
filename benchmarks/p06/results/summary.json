@@ -1,0 +1,56 @@
+{
+  "schema": "nmm_p06_replication_benchmark_result_v1",
+  "manifest_path": "benchmarks/p06/manifest.json",
+  "elapsed_seconds": 105.207498042,
+  "raw_rows": 14400,
+  "reference_replicates": 64,
+  "paired_difference_variance": {
+    "pairs": 450,
+    "sample_variance_median": 0.004786829742809443,
+    "sample_variance_p95": 0.01389539706659052,
+    "sample_variance_max": 0.0259157568336519
+  },
+  "panel_summaries": [
+    {
+      "replicates": 4,
+      "absolute_mean_error_p95": 0.05781121537699618,
+      "median_spearman": 0.9,
+      "top1_or_reference_inconclusive_rate": 0.9638888888888889,
+      "passes_absolute_mean_error": false,
+      "passes_spearman": false,
+      "passes_top1": true,
+      "passes_all": false
+    },
+    {
+      "replicates": 8,
+      "absolute_mean_error_p95": 0.039695984250158245,
+      "median_spearman": 0.9,
+      "top1_or_reference_inconclusive_rate": 0.9902777777777778,
+      "passes_absolute_mean_error": false,
+      "passes_spearman": false,
+      "passes_top1": true,
+      "passes_all": false
+    },
+    {
+      "replicates": 16,
+      "absolute_mean_error_p95": 0.025420385852166272,
+      "median_spearman": 0.9,
+      "top1_or_reference_inconclusive_rate": 1.0,
+      "passes_absolute_mean_error": false,
+      "passes_spearman": false,
+      "passes_top1": true,
+      "passes_all": false
+    },
+    {
+      "replicates": 32,
+      "absolute_mean_error_p95": 0.01392682425633085,
+      "median_spearman": 1.0,
+      "top1_or_reference_inconclusive_rate": 1.0,
+      "passes_absolute_mean_error": false,
+      "passes_spearman": true,
+      "passes_top1": true,
+      "passes_all": false
+    }
+  ],
+  "selected_default_finalist_replicates": 64
+}

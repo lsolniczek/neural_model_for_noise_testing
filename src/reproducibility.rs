@@ -50,6 +50,46 @@ pub enum Hemisphere {
     Right = 1,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SeedPolicy {
+    #[default]
+    LegacyFixedV1,
+    DomainSeparatedV1 {
+        run_seed: u64,
+        panel: SeedPanel,
+        replicate_index: u64,
+    },
+}
+
+impl SeedPolicy {
+    pub const fn domain_separated(run_seed: u64, panel: SeedPanel, replicate_index: u64) -> Self {
+        Self::DomainSeparatedV1 {
+            run_seed,
+            panel,
+            replicate_index,
+        }
+    }
+
+    pub const fn evaluation_plan(self) -> Option<EvaluationSeedPlan> {
+        match self {
+            Self::LegacyFixedV1 => None,
+            Self::DomainSeparatedV1 {
+                run_seed,
+                panel,
+                replicate_index,
+            } => Some(SeedTreeV1::new(run_seed).evaluation(panel, replicate_index)),
+        }
+    }
+
+    pub const fn run_seed(self) -> Option<u64> {
+        match self {
+            Self::LegacyFixedV1 => None,
+            Self::DomainSeparatedV1 { run_seed, .. } => Some(run_seed),
+        }
+    }
+}
+
 impl Hemisphere {
     const fn id(self) -> u64 {
         self as u64
@@ -94,11 +134,7 @@ impl SeedTreeV1 {
         ChaCha12Rng::from_seed(self.dataset_genome_seed(sample_slot))
     }
 
-    pub const fn evaluation(
-        self,
-        panel: SeedPanel,
-        replicate_index: u64,
-    ) -> EvaluationSeedPlan {
+    pub const fn evaluation(self, panel: SeedPanel, replicate_index: u64) -> EvaluationSeedPlan {
         EvaluationSeedPlan {
             tree: self,
             panel,
@@ -134,6 +170,15 @@ impl EvaluationSeedPlan {
         }
     }
 
+    /// Stable 64-bit compatibility token for legacy flat `seed_eval` columns.
+    /// The structured identity remains authoritative for replay.
+    pub fn compatibility_seed(self) -> u64 {
+        seed_u64(
+            self.tree
+                .derive(&[DOMAIN_EVALUATION, self.panel.id(), self.replicate_index]),
+        )
+    }
+
     pub fn audio_seed(self) -> u64 {
         seed_u64(self.consumer_seed(CONSUMER_AUDIO, &[]))
     }
@@ -151,7 +196,10 @@ impl EvaluationSeedPlan {
     }
 
     pub fn neural_seed(self, hemisphere: Hemisphere, band: u8) -> [u8; 32] {
-        assert!(band < NEURAL_BANDS, "neural band {band} is outside 0..{NEURAL_BANDS}");
+        assert!(
+            band < NEURAL_BANDS,
+            "neural band {band} is outside 0..{NEURAL_BANDS}"
+        );
         self.consumer_seed(CONSUMER_NEURAL, &[hemisphere.id(), band as u64])
     }
 
@@ -205,9 +253,18 @@ mod tests {
     #[test]
     fn seed_tree_v1_known_answers_are_stable() {
         let cases = [
-            (0, "7c3e77e9b2ececed22fa471b0187080db1ffe1a965d52dbf699a02c63543d47e"),
-            (1, "cf396f0bb85f3ac331fd5f46f97c96224c3360fe531159dd368afd037a75737c"),
-            (42, "2798b4db8550d8166c64a232687be0cbbddb6810d6a0945a1770032d4f8f292d"),
+            (
+                0,
+                "7c3e77e9b2ececed22fa471b0187080db1ffe1a965d52dbf699a02c63543d47e",
+            ),
+            (
+                1,
+                "cf396f0bb85f3ac331fd5f46f97c96224c3360fe531159dd368afd037a75737c",
+            ),
+            (
+                42,
+                "2798b4db8550d8166c64a232687be0cbbddb6810d6a0945a1770032d4f8f292d",
+            ),
             (
                 u64::MAX,
                 "27ff2bfd34099fc1c310659a0bf8a7b606888c995b15c64a9a44dd9f397e48c4",

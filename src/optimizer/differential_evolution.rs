@@ -3,6 +3,7 @@
 /// Well-suited for the mixed continuous/discrete parameter space of noise
 /// presets. Population-based, gradient-free, handles non-convex landscapes.
 use rand::prelude::*;
+use rand_chacha::ChaCha12Rng;
 use rand_distr::Uniform;
 
 /// Result of one evaluation.
@@ -88,7 +89,7 @@ pub struct DifferentialEvolution {
     /// Current generation.
     generation: usize,
     /// RNG
-    rng: StdRng,
+    rng: ChaCha12Rng,
     /// Indices of discrete (integer-valued) dimensions to round after mutation.
     discrete_dims: Vec<usize>,
     /// Priority 28 Phase 2: optional ε-constrained schedule. `None` means
@@ -115,7 +116,7 @@ pub struct DifferentialEvolution {
 
 impl DifferentialEvolution {
     #[inline]
-    fn sample_within_bound(rng: &mut StdRng, lo: f64, hi: f64) -> f64 {
+    fn sample_within_bound(rng: &mut ChaCha12Rng, lo: f64, hi: f64) -> f64 {
         if hi <= lo {
             lo
         } else {
@@ -147,8 +148,44 @@ impl DifferentialEvolution {
         seed: u64,
         discrete_dims: Vec<usize>,
     ) -> Self {
+        Self::with_discrete_rng(
+            bounds,
+            pop_size,
+            f,
+            cr,
+            ChaCha12Rng::seed_from_u64(seed),
+            discrete_dims,
+        )
+    }
+
+    /// Create a DE optimizer from the full versioned 256-bit optimizer seed.
+    pub fn with_discrete_seed(
+        bounds: Vec<(f64, f64)>,
+        pop_size: usize,
+        f: f64,
+        cr: f64,
+        seed: [u8; 32],
+        discrete_dims: Vec<usize>,
+    ) -> Self {
+        Self::with_discrete_rng(
+            bounds,
+            pop_size,
+            f,
+            cr,
+            ChaCha12Rng::from_seed(seed),
+            discrete_dims,
+        )
+    }
+
+    fn with_discrete_rng(
+        bounds: Vec<(f64, f64)>,
+        pop_size: usize,
+        f: f64,
+        cr: f64,
+        mut rng: ChaCha12Rng,
+        discrete_dims: Vec<usize>,
+    ) -> Self {
         let dim = bounds.len();
-        let mut rng = StdRng::seed_from_u64(seed);
 
         // Initialise population with uniform random samples
         let population: Vec<Individual> = (0..pop_size)
@@ -702,6 +739,11 @@ impl DifferentialEvolution {
         &self.best
     }
 
+    /// Current population, exposed for deterministic finalist selection.
+    pub fn individuals(&self) -> &[Individual] {
+        &self.population
+    }
+
     pub fn generation(&self) -> usize {
         self.generation
     }
@@ -1061,6 +1103,54 @@ mod tests {
             assert_eq!(i1, i2);
             assert_eq!(t1, t2);
         }
+    }
+
+    #[test]
+    fn versioned_optimizer_seed_has_a_frozen_trajectory() {
+        let seed = crate::reproducibility::SeedTreeV1::new(42).optimizer_seed();
+        let mut de =
+            DifferentialEvolution::with_discrete_seed(simple_bounds(3), 6, 0.8, 0.9, seed, vec![2]);
+        for index in 0..6 {
+            de.report_fitness(index, index as f64 * 0.1);
+        }
+        let population_bits = de
+            .population
+            .iter()
+            .take(2)
+            .flat_map(|individual| individual.genome.iter().map(|value| value.to_bits()))
+            .collect::<Vec<_>>();
+        let trials = de.generate_trials();
+        let trial_bits = trials
+            .iter()
+            .take(2)
+            .flat_map(|(target, genome)| {
+                std::iter::once(*target as u64).chain(genome.iter().map(|value| value.to_bits()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            population_bits,
+            vec![
+                13_838_905_265_716_473_936,
+                4_603_412_187_003_162_640,
+                13_837_309_855_095_848_960,
+                13_838_992_015_200_976_051,
+                13_838_642_237_380_450_386,
+                4_613_937_818_241_073_152,
+            ]
+        );
+        assert_eq!(
+            trial_bits,
+            vec![
+                0,
+                4_616_324_879_998_462_496,
+                4_600_853_581_600_263_130,
+                13_839_561_654_909_534_208,
+                1,
+                4_617_315_517_961_601_024,
+                4_605_328_352_399_774_600,
+                13_840_687_554_816_376_832,
+            ]
+        );
     }
 
     // ---------------------------------------------------------------

@@ -12,6 +12,7 @@ pub use candidate_v2::{
     CandidateRhythmModuleResponse,
 };
 pub use fhn::{FhnModel, FhnResult};
+pub(crate) use jansen_rit::simulate_bilateral_with_seed_plan;
 pub use jansen_rit::{
     simulate_bilateral, simulate_tonotopic, BandPowers, BilateralResult, FastInhibParams,
     JansenRitModel, JansenRitResult,

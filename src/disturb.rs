@@ -9,7 +9,7 @@ use crate::brain_type::BrainType;
 use crate::model_signature::{
     AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
     NumericParamsSnapshot, PipelineVariant, RendererRevision, ReproducibilitySeeds, ScoringProfile,
-    DSP_SOURCE_REVISION, MODEL_SIGNATURE_SCHEMA_VERSION,
+    DSP_SOURCE_REVISION, LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
 };
 use crate::neural::BilateralResult;
 use crate::pipeline::{
@@ -18,6 +18,9 @@ use crate::pipeline::{
     DECIMATION_FACTOR, DEFAULT_WARMUP_DISCARD_SECS, NEURAL_SR, SAMPLE_RATE,
 };
 use crate::preset::Preset;
+use crate::reproducibility::{seed_u64, Hemisphere, SeedPolicy};
+use rand::RngCore;
+use rand_chacha::ChaCha12Rng;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 // ── Sliding-window metrics ──────────────────────────────────────────────────
@@ -104,6 +107,7 @@ pub enum DisturbanceMode {
 }
 
 /// Configuration for the disturbance test.
+#[derive(Debug, Clone)]
 pub struct DisturbConfig {
     pub mode: DisturbanceMode,
     pub spike_time_s: f64,
@@ -120,7 +124,7 @@ pub struct DisturbConfig {
     pub cet_enabled: bool,
     pub habituation_enabled: bool,
     pub stochastic_jr_enabled: bool,
-    pub reproducibility_seed: Option<u64>,
+    pub seed_policy: SeedPolicy,
     pub arousal_model: ArousalModel,
     pub fixed_arousal: Option<f64>,
     pub jr_stochastic_sigma: f64,
@@ -148,7 +152,7 @@ impl Default for DisturbConfig {
             cet_enabled: true,
             habituation_enabled: true,
             stochastic_jr_enabled: true,
-            reproducibility_seed: None,
+            seed_policy: SeedPolicy::LegacyFixedV1,
             arousal_model: ArousalModel::LegacyHeuristic,
             fixed_arousal: None,
             jr_stochastic_sigma: 15.0,
@@ -177,7 +181,7 @@ impl DisturbConfig {
             acoustic_constraints_enabled: false,
             model_version: self.model_version,
             scoring_profile: ScoringProfile::LegacyV1,
-            reproducibility_seed: self.reproducibility_seed,
+            seed_policy: self.seed_policy,
             arousal_model: self.arousal_model,
             fixed_arousal: self.fixed_arousal,
             jr_stochastic_sigma: self.jr_stochastic_sigma,
@@ -318,6 +322,48 @@ fn inject_spike(
     sample_rate: f64,
     seed: u64,
 ) {
+    let mut state = seed;
+    inject_spike_with_noise(
+        bands,
+        spike_time_s,
+        spike_duration_s,
+        spike_gain,
+        sample_rate,
+        || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state as f64 / u64::MAX as f64) * 2.0 - 1.0
+        },
+    );
+}
+
+fn inject_spike_seeded(
+    bands: &mut [Vec<f64>; 4],
+    spike_time_s: f64,
+    spike_duration_s: f64,
+    spike_gain: f64,
+    sample_rate: f64,
+    mut rng: ChaCha12Rng,
+) {
+    inject_spike_with_noise(
+        bands,
+        spike_time_s,
+        spike_duration_s,
+        spike_gain,
+        sample_rate,
+        || (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+    );
+}
+
+fn inject_spike_with_noise(
+    bands: &mut [Vec<f64>; 4],
+    spike_time_s: f64,
+    spike_duration_s: f64,
+    spike_gain: f64,
+    sample_rate: f64,
+    mut next_noise: impl FnMut() -> f64,
+) {
     let start = (spike_time_s * sample_rate) as usize;
     let duration = (spike_duration_s * sample_rate) as usize;
     let ramp_samples = (0.005 * sample_rate) as usize; // 5ms cosine ramp
@@ -325,16 +371,6 @@ fn inject_spike(
     if bands[0].is_empty() || start + duration > bands[0].len() {
         return;
     }
-
-    // Simple deterministic PRNG (xorshift64) for reproducibility
-    let mut state = seed;
-    let mut next_noise = || -> f64 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        // Map to [-1, 1]
-        (state as f64 / u64::MAX as f64) * 2.0 - 1.0
-    };
 
     for b in 0..4 {
         for i in 0..duration {
@@ -379,6 +415,34 @@ fn apply_auditory_perturbation(
                 spec.gain,
                 NEURAL_SR,
                 right_seed,
+            );
+        }
+    }
+}
+
+fn apply_seeded_auditory_perturbation(
+    auditory: &mut crate::pipeline::AuditoryPreparedState,
+    perturbation: AuditoryPerturbation,
+    plan: crate::reproducibility::EvaluationSeedPlan,
+) {
+    match perturbation {
+        AuditoryPerturbation::None => {}
+        AuditoryPerturbation::Spike(spec) => {
+            inject_spike_seeded(
+                &mut auditory.left_bands_dec,
+                spec.time_s,
+                spec.duration_s,
+                spec.gain,
+                NEURAL_SR,
+                plan.disturbance_rng(Hemisphere::Left),
+            );
+            inject_spike_seeded(
+                &mut auditory.right_bands_dec,
+                spec.time_s,
+                spec.duration_s,
+                spec.gain,
+                NEURAL_SR,
+                plan.disturbance_rng(Hemisphere::Right),
             );
         }
     }
@@ -560,12 +624,16 @@ fn run_disturb_canonical(preset: &Preset, config: &DisturbConfig) -> DisturbResu
             gain: config.spike_gain,
         })
     };
-    apply_auditory_perturbation(
-        &mut auditory,
-        perturbation,
-        DISTURB_LEFT_SPIKE_SEED,
-        DISTURB_RIGHT_SPIKE_SEED,
-    );
+    if let Some(plan) = sim_config.seed_policy.evaluation_plan() {
+        apply_seeded_auditory_perturbation(&mut auditory, perturbation, plan);
+    } else {
+        apply_auditory_perturbation(
+            &mut auditory,
+            perturbation,
+            DISTURB_LEFT_SPIKE_SEED,
+            DISTURB_RIGHT_SPIKE_SEED,
+        );
+    }
 
     let cortical = run_canonical_cortical_stage(&auditory, &sim_config);
     let windows = sliding_window_analysis(
@@ -578,11 +646,15 @@ fn run_disturb_canonical(preset: &Preset, config: &DisturbConfig) -> DisturbResu
 
     let mut model_signature = sim_config.model_signature();
     model_signature.pipeline_variant = PipelineVariant::DisturbCanonical;
-    model_signature.seeds = ReproducibilitySeeds {
-        primary_seed: sim_config.reproducibility_seed,
-        disturbance_left_spike_seed: Some(DISTURB_LEFT_SPIKE_SEED),
-        disturbance_right_spike_seed: Some(DISTURB_RIGHT_SPIKE_SEED),
-    };
+    if let Some(plan) = sim_config.seed_policy.evaluation_plan() {
+        model_signature.seeds.disturbance_left_spike_seed =
+            Some(seed_u64(plan.disturbance_seed(Hemisphere::Left)));
+        model_signature.seeds.disturbance_right_spike_seed =
+            Some(seed_u64(plan.disturbance_seed(Hemisphere::Right)));
+    } else {
+        model_signature.seeds.disturbance_left_spike_seed = Some(DISTURB_LEFT_SPIKE_SEED);
+        model_signature.seeds.disturbance_right_spike_seed = Some(DISTURB_RIGHT_SPIKE_SEED);
+    }
 
     summarize_disturb_result(
         model_signature,
@@ -655,9 +727,15 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
     );
 
     let model_signature = ModelSignature {
-        schema_version: MODEL_SIGNATURE_SCHEMA_VERSION,
+        schema_version: LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
         renderer_revision: RendererRevision::DspBrownHfV2,
         renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
+        seed_derivation_revision: None,
+        optimizer_rng_revision: None,
+        movement_rng_revision: None,
+        neural_rng_revision: None,
+        normal_transform_revision: None,
+        renderer_seed_derivation_revision: None,
         version: config.model_version,
         pipeline_variant: PipelineVariant::DisturbLegacyAblated,
         scoring_profile: ScoringProfile::LegacyV1,
@@ -688,11 +766,14 @@ fn run_disturb_legacy_ablated(preset: &Preset, config: &DisturbConfig) -> Distur
             config.fixed_arousal,
             false,
             false,
+            true,
         ),
         warmup_discard_secs: config.warmup_discard_secs,
         duration_secs: config.duration_secs,
         seeds: ReproducibilitySeeds {
             primary_seed: None,
+            panel: None,
+            replicate_index: None,
             disturbance_left_spike_seed: Some(DISTURB_LEFT_SPIKE_SEED),
             disturbance_right_spike_seed: Some(DISTURB_RIGHT_SPIKE_SEED),
         },
@@ -1426,6 +1507,44 @@ mod tests {
             r1.spectral_resilience.to_bits(),
             r2.spectral_resilience.to_bits()
         );
+    }
+
+    #[test]
+    fn seeded_disturbance_replays_and_changes_by_replicate() {
+        let tree = crate::reproducibility::SeedTreeV1::new(42);
+        let run = |replicate_index| {
+            let mut auditory = crate::pipeline::AuditoryPreparedState {
+                rendered_audio: crate::acoustic_score::RenderedStereoAudio::new(
+                    48_000,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                left_bands_dec: std::array::from_fn(|_| vec![0.0; 100]),
+                right_bands_dec: std::array::from_fn(|_| vec![0.0; 100]),
+                left_energy: [0.0; 4],
+                right_energy: [0.0; 4],
+                band_energy_fractions: [0.0; 4],
+                cet_envelope_ref: None,
+                brightness: 0.0,
+                arousal: 0.0,
+                arousal_source: crate::auditory::ArousalSource::NeutralDefault,
+                thalamic_band_shifts: [0.0; 4],
+                target_lfo_freq: None,
+                assr_effective_gain: None,
+            };
+            apply_seeded_auditory_perturbation(
+                &mut auditory,
+                AuditoryPerturbation::Spike(SpikeSpec {
+                    time_s: 0.01,
+                    duration_s: 0.02,
+                    gain: 0.8,
+                }),
+                tree.evaluation(crate::reproducibility::SeedPanel::Disturb, replicate_index),
+            );
+            (auditory.left_bands_dec, auditory.right_bands_dec)
+        };
+        assert_eq!(run(0), run(0));
+        assert_ne!(run(0), run(1));
     }
 
     // ═══ BPPR tests ═══

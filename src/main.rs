@@ -10,8 +10,9 @@ mod neural;
 mod optimizer;
 mod pipeline;
 mod preset;
-mod reproducibility;
 mod regression_tests;
+mod replicated;
+mod reproducibility;
 mod scoring;
 mod surrogate;
 mod validate;
@@ -31,6 +32,8 @@ use pipeline::{
     SimulationConfig, SimulationResult,
 };
 use preset::Preset;
+use replicated::evaluate_preset_replicated;
+use reproducibility::{SeedPanel, SeedPolicy, SeedTreeV1};
 use scoring::{Goal, GoalKind, GoalSemantics, MetricStatus};
 
 #[derive(Parser)]
@@ -90,9 +93,25 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
 
-        /// Random seed for reproducibility
+        /// Root seed; optimizer and evaluation panels use separate derived streams.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+
+        /// Search-panel realizations used for every DE fitness evaluation.
+        #[arg(long, default_value_t = 1)]
+        search_replicates: usize,
+
+        /// Number of distinct final population candidates screened on the finalist panel.
+        #[arg(long, default_value_t = 5)]
+        finalist_count: usize,
+
+        /// Common-random-number finalist-panel realizations per candidate.
+        #[arg(long, default_value_t = replicated::DEFAULT_REPLICATES)]
+        finalist_replicates: usize,
+
+        /// Practical score difference required for a unique winner.
+        #[arg(long, default_value_t = 0.01)]
+        indifference_delta: f64,
 
         /// DE mutation scale factor
         #[arg(long, default_value_t = 0.7)]
@@ -255,9 +274,25 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
 
-        /// Random seed for reproducibility
+        /// Root seed; optimizer and evaluation panels use separate derived streams.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+
+        /// Search-panel realizations used in every stage.
+        #[arg(long, default_value_t = 1)]
+        search_replicates: usize,
+
+        /// Distinct candidates screened after each stage.
+        #[arg(long, default_value_t = 5)]
+        finalist_count: usize,
+
+        /// Common finalist-panel realizations per candidate.
+        #[arg(long, default_value_t = replicated::DEFAULT_REPLICATES)]
+        finalist_replicates: usize,
+
+        /// Practical score difference required for a unique winner.
+        #[arg(long, default_value_t = 0.01)]
+        indifference_delta: f64,
 
         /// DE mutation scale factor
         #[arg(long, default_value_t = 0.7)]
@@ -364,6 +399,14 @@ enum Commands {
         /// Audio duration per evaluation (seconds)
         #[arg(long, default_value_t = 10.0)]
         duration: f32,
+
+        /// Root seed for all domain-separated stochastic streams.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// Number of independent direct-panel realizations.
+        #[arg(long, default_value_t = replicated::DEFAULT_REPLICATES)]
+        replicates: usize,
 
         /// Enable ASSR transfer function (auditory pathway filtering)
         #[arg(long, default_value_t = false)]
@@ -485,6 +528,14 @@ enum Commands {
         #[arg(long, default_value_t = 15.0)]
         duration: f32,
 
+        /// Root seed for audio, movement, neural, room, and disturbance streams.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// Number of independent disturbance-panel realizations.
+        #[arg(long, default_value_t = replicated::DEFAULT_REPLICATES)]
+        replicates: usize,
+
         /// Enable ASSR transfer function in canonical disturbance mode.
         #[arg(long, default_value_t = false)]
         assr: bool,
@@ -583,9 +634,13 @@ enum Commands {
         #[arg(long = "fixed-arousal")]
         fixed_arousal: Option<f64>,
 
-        /// Random seed
+        /// Root seed for dataset genomes and evaluation streams.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+
+        /// Independent dataset-panel realizations per genome/goal/profile.
+        #[arg(long, default_value_t = 1)]
+        replicates: usize,
     },
 
     /// Walk a directory of curated presets, evaluate each, and report the
@@ -712,7 +767,7 @@ fn build_generate_data_config(
         physiological_thalamic_gate_enabled: phys_gate,
         arousal_model,
         fixed_arousal,
-        reproducibility_seed: Some(seed),
+        seed_policy: SeedPolicy::domain_separated(seed, SeedPanel::Dataset, 0),
         ..SimulationConfig::default()
     }
 }
@@ -778,7 +833,7 @@ fn build_disturb_config(
         cet_enabled: flags.cet,
         habituation_enabled: true,
         stochastic_jr_enabled: true,
-        reproducibility_seed: None,
+        seed_policy: SeedPolicy::LegacyFixedV1,
         arousal_model: ArousalModel::LegacyHeuristic,
         fixed_arousal: None,
         jr_stochastic_sigma: jr_sigma,
@@ -829,7 +884,7 @@ fn build_optimize_config(
         jr_stochastic_sigma: jr_sigma,
         cet_b_slow_rate: gaba_b_rate,
         cet_b_slow_gain: gaba_b_gain,
-        reproducibility_seed: Some(seed),
+        seed_policy: SeedPolicy::domain_separated(seed, SeedPanel::Search, 0),
         ..SimulationConfig::default()
     }
 }
@@ -1245,7 +1300,7 @@ fn pairs_csv_row(
         bool01(config.acoustic_constraints_enabled),
         "1".to_string(),
         "1".to_string(),
-        crate::model_signature::MODEL_SIGNATURE_SCHEMA_VERSION.to_string(),
+        config.model_signature().schema_version.to_string(),
         csv_escape_field(&signature_json),
     ]
     .join(",")
@@ -1352,7 +1407,7 @@ fn runs_csv_row(
         pairs_path.display().to_string(),
         total_examples.to_string(),
         total_pairs.to_string(),
-        crate::model_signature::MODEL_SIGNATURE_SCHEMA_VERSION.to_string(),
+        config.model_signature().schema_version.to_string(),
         csv_escape_field(&signature_json),
     ]
     .join(",")
@@ -1371,6 +1426,11 @@ fn surrogate_csv_header() -> String {
         "stage".into(),
         "source".into(),
         "seed_eval".into(),
+        "run_seed".into(),
+        "seed_panel".into(),
+        "replicate_index".into(),
+        "seed_tree_revision".into(),
+        "replicate_group_id".into(),
         "created_at".into(),
         "goal".into(),
         "goal_id".into(),
@@ -1485,6 +1545,31 @@ fn surrogate_csv_row(
     config: &SimulationConfig,
     result: &SimulationResult,
 ) -> String {
+    surrogate_csv_row_with_stats(
+        meta,
+        genome,
+        goal_kind,
+        brain_type,
+        config,
+        result,
+        result.score,
+        None,
+        1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn surrogate_csv_row_with_stats(
+    meta: &CsvExampleMeta,
+    genome: &[f64],
+    goal_kind: GoalKind,
+    brain_type: BrainType,
+    config: &SimulationConfig,
+    result: &SimulationResult,
+    score_mean: f64,
+    score_std: Option<f64>,
+    repeats: usize,
+) -> String {
     assert_eq!(
         genome.len(),
         surrogate::GENOME_DIM,
@@ -1519,6 +1604,35 @@ fn surrogate_csv_row(
     let fmt_opt = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
     let bool01 = |v: bool| if v { "1".to_string() } else { "0".to_string() };
     let score = result.score;
+    let seed_panel = result
+        .model_signature
+        .seeds
+        .panel
+        .and_then(|panel| serde_json::to_value(panel).ok())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let run_seed = result
+        .model_signature
+        .seeds
+        .primary_seed
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let replicate_index = result
+        .model_signature
+        .seeds
+        .replicate_index
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let seed_tree_revision = result
+        .model_signature
+        .seed_derivation_revision
+        .clone()
+        .unwrap_or_default();
+    let mut group_material = serde_json::to_vec(genome).expect("genome serializes");
+    group_material.extend_from_slice(goal_kind.to_string().as_bytes());
+    group_material.extend_from_slice(brain_type.to_string().as_bytes());
+    group_material.extend_from_slice(run_seed.as_bytes());
+    let replicate_group_id = blake3::hash(&group_material).to_hex().to_string();
     // Stage 0 compact serialized config object (see surrogate_csv_header comment).
     let signature_json = serde_json::to_string(&result.model_signature)
         .unwrap_or_else(|_| "{\"error\":\"signature_serialization_failed\"}".to_string());
@@ -1545,6 +1659,11 @@ fn surrogate_csv_row(
         meta.stage.clone(),
         meta.source.clone(),
         meta.seed_eval.clone(),
+        run_seed,
+        seed_panel,
+        replicate_index,
+        seed_tree_revision,
+        replicate_group_id,
         meta.created_at.clone(),
         goal_kind.to_string(),
         goal_id.to_string(),
@@ -1649,10 +1768,10 @@ fn surrogate_csv_row(
         is_good_30s,
         is_good_60s,
         String::new(), // is_stable_10_60
-        format!("{score:.6}"),
-        String::new(), // score_std
-        "1".to_string(),
-        crate::model_signature::MODEL_SIGNATURE_SCHEMA_VERSION.to_string(),
+        format!("{score_mean:.6}"),
+        fmt_opt(score_std),
+        repeats.to_string(),
+        result.model_signature.schema_version.to_string(),
         csv_escape_field(&signature_json),
     ]);
     cols.join(",")
@@ -1747,6 +1866,8 @@ fn evaluate_score_matrix(
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
+    run_seed: u64,
+    replicates: usize,
 ) -> Vec<Vec<f64>> {
     brain_types
         .iter()
@@ -1767,7 +1888,20 @@ fn evaluate_score_matrix(
                         gaba_b_rate,
                         gaba_b_gain,
                     );
-                    evaluate_preset(preset, &goal, &sim_config).score
+                    evaluate_preset_replicated(
+                        preset,
+                        &goal,
+                        &sim_config,
+                        run_seed,
+                        SeedPanel::Direct,
+                        replicates,
+                    )
+                    .unwrap_or_else(|error| {
+                        eprintln!("Replicated evaluation failed: {error}");
+                        std::process::exit(2);
+                    })
+                    .score
+                    .mean
                 })
                 .collect()
         })
@@ -1868,6 +2002,10 @@ fn run_optimize_staged(
     stage3_duration: f32,
     output: Option<PathBuf>,
     seed: u64,
+    search_replicates: usize,
+    finalist_count: usize,
+    finalist_replicates: usize,
+    indifference_delta: f64,
     de_f: f64,
     de_cr: f64,
     convergence: f64,
@@ -1917,6 +2055,10 @@ fn run_optimize_staged(
         stage1_duration,
         Some(stage1_output.clone()),
         seed,
+        search_replicates,
+        finalist_count,
+        finalist_replicates,
+        indifference_delta,
         de_f,
         de_cr,
         convergence,
@@ -1946,7 +2088,11 @@ fn run_optimize_staged(
         stage2_population,
         stage2_duration,
         Some(stage2_output.clone()),
-        seed.wrapping_add(1),
+        seed,
+        search_replicates,
+        finalist_count,
+        finalist_replicates,
+        indifference_delta,
         de_f,
         de_cr,
         convergence,
@@ -1976,7 +2122,11 @@ fn run_optimize_staged(
         stage3_population,
         stage3_duration,
         Some(final_output.clone()),
-        seed.wrapping_add(2),
+        seed,
+        search_replicates,
+        finalist_count,
+        finalist_replicates,
+        indifference_delta,
         de_f,
         de_cr,
         convergence,
@@ -2016,6 +2166,10 @@ fn main() {
             duration,
             output,
             seed,
+            search_replicates,
+            finalist_count,
+            finalist_replicates,
+            indifference_delta,
             de_f,
             de_cr,
             convergence,
@@ -2043,6 +2197,10 @@ fn main() {
                 duration,
                 output,
                 seed,
+                search_replicates,
+                finalist_count,
+                finalist_replicates,
+                indifference_delta,
                 de_f,
                 de_cr,
                 convergence,
@@ -2070,6 +2228,10 @@ fn main() {
             generations,
             output,
             seed,
+            search_replicates,
+            finalist_count,
+            finalist_replicates,
+            indifference_delta,
             de_f,
             de_cr,
             convergence,
@@ -2106,6 +2268,10 @@ fn main() {
                 stage3_duration,
                 output,
                 seed,
+                search_replicates,
+                finalist_count,
+                finalist_replicates,
+                indifference_delta,
                 de_f,
                 de_cr,
                 convergence,
@@ -2128,6 +2294,8 @@ fn main() {
             goal,
             brain_type,
             duration,
+            seed,
+            replicates,
             assr,
             no_assr,
             thalamic_gate,
@@ -2159,6 +2327,8 @@ fn main() {
                 &goal,
                 &brain_type,
                 duration,
+                seed,
+                replicates,
                 flags,
                 acoustic_score,
                 acoustic_score_fusion,
@@ -2178,6 +2348,8 @@ fn main() {
             spike_duration,
             spike_gain,
             duration,
+            seed,
+            replicates,
             assr,
             no_assr,
             thalamic_gate,
@@ -2206,6 +2378,8 @@ fn main() {
                 spike_duration,
                 spike_gain,
                 duration,
+                seed,
+                replicates,
                 flags,
                 jr_sigma,
                 gaba_b_rate,
@@ -2239,6 +2413,7 @@ fn main() {
             arousal_model,
             fixed_arousal,
             seed,
+            replicates,
         } => {
             run_generate_data(
                 &output,
@@ -2251,6 +2426,7 @@ fn main() {
                 &arousal_model,
                 fixed_arousal,
                 seed,
+                replicates,
             );
         }
         Commands::CalibrateComfort {
@@ -2595,6 +2771,39 @@ fn print_distributions(goal_label: &str, samples: &[ComfortSample]) {
 
 // ── Optimize ─────────────────────────────────────────────────────────────────
 
+fn evaluate_search_candidate(
+    preset: &Preset,
+    goal: &Goal,
+    base_config: &SimulationConfig,
+    run_seed: u64,
+    replicates: usize,
+) -> (SimulationResult, f64, f64) {
+    let mut first = None;
+    let mut score_sum = 0.0;
+    let mut violation_sum = 0.0;
+    for replicate_index in 0..replicates {
+        let mut config = base_config.clone();
+        config.seed_policy =
+            SeedPolicy::domain_separated(run_seed, SeedPanel::Search, replicate_index as u64);
+        let result = evaluate_preset(preset, goal, &config);
+        score_sum += result.score;
+        violation_sum += compute_comfort_violation(goal, &result);
+        if first.is_none() {
+            first = Some(result);
+        }
+    }
+    (
+        first.expect("replicate validation guarantees at least one result"),
+        score_sum / replicates as f64,
+        violation_sum / replicates as f64,
+    )
+}
+
+fn canonical_preset_hash(preset: &Preset) -> String {
+    let bytes = serde_json::to_vec(preset).expect("preset serializes for canonical hashing");
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_optimize(
     goal_str: &str,
@@ -2603,6 +2812,10 @@ fn run_optimize(
     duration: f32,
     output: Option<PathBuf>,
     seed: u64,
+    search_replicates: usize,
+    finalist_count: usize,
+    finalist_replicates: usize,
+    indifference_delta: f64,
     de_f: f64,
     de_cr: f64,
     convergence: f64,
@@ -2623,6 +2836,22 @@ fn run_optimize(
     surrogate_k: usize,
     log_evaluations_path: Option<&Path>,
 ) {
+    if search_replicates == 0 {
+        eprintln!("--search-replicates must be at least 1");
+        std::process::exit(2);
+    }
+    if finalist_count < 2 {
+        eprintln!("--finalist-count must be at least 2");
+        std::process::exit(2);
+    }
+    if finalist_replicates < 2 {
+        eprintln!("--finalist-replicates must be at least 2");
+        std::process::exit(2);
+    }
+    if !indifference_delta.is_finite() || indifference_delta < 0.0 {
+        eprintln!("--indifference-delta must be finite and non-negative");
+        std::process::exit(2);
+    }
     ensure_analysis_window_or_exit(
         "optimize",
         duration,
@@ -2678,6 +2907,10 @@ fn run_optimize(
     println!("  Max generations:{}", generations);
     println!("  Audio duration: {:.1}s per evaluation", duration);
     println!("  Seed:           {}", seed);
+    println!("  Search panel:   {search_replicates} replicate(s)");
+    println!(
+        "  Finalist panel: top {finalist_count}, {finalist_replicates} CRN replicates, delta={indifference_delta:.4}"
+    );
     if cet {
         println!("  CET:            enabled");
     }
@@ -2719,8 +2952,14 @@ fn run_optimize(
     // audible component goes through the object/HRTF path.
     let bounds = Preset::bounds_with_anchor_disabled();
     let discrete_dims = Preset::discrete_gene_indices();
-    let mut de =
-        DifferentialEvolution::with_discrete(bounds, population, de_f, de_cr, seed, discrete_dims);
+    let mut de = DifferentialEvolution::with_discrete_seed(
+        bounds,
+        population,
+        de_f,
+        de_cr,
+        SeedTreeV1::new(seed).optimizer_seed(),
+        discrete_dims,
+    );
 
     // Priority 28 Phase 3 — DE diversification (opt-in).
     if crowding {
@@ -2810,7 +3049,8 @@ fn run_optimize(
     let mut population_example_ids = vec![String::new(); population];
     for (idx, genome) in &pending {
         let preset = preset_from_genome_with_seed_context(genome, &seed_ctx);
-        let result = evaluate_preset(&preset, &goal, &sim_config);
+        let (result, search_score, search_violation) =
+            evaluate_search_candidate(&preset, &goal, &sim_config, seed, search_replicates);
         if let Some(ref mut logger) = eval_logger {
             let meta = logger.build_example_meta(
                 None,
@@ -2827,10 +3067,9 @@ fn run_optimize(
             // pure-NMM score (fusion is force-disabled); violation comes
             // from goal.comfort_violation over the populated acoustic
             // features.
-            let violation = compute_comfort_violation(&goal, &result);
-            de.report_constrained(*idx, result.score, violation);
+            de.report_constrained(*idx, search_score, search_violation);
         } else {
-            de.report_fitness(*idx, result.score);
+            de.report_fitness(*idx, search_score);
         }
     }
 
@@ -2923,11 +3162,17 @@ fn run_optimize(
                     // Validate with real pipeline
                     let parent_before = de.individual(target_idx).clone();
                     let preset = preset_from_genome_with_seed_context(trial_genome, &seed_ctx);
-                    let result = evaluate_preset(&preset, &goal, &sim_config);
+                    let (result, search_score, _search_violation) = evaluate_search_candidate(
+                        &preset,
+                        &goal,
+                        &sim_config,
+                        seed,
+                        search_replicates,
+                    );
                     let parent_preset =
                         preset_from_genome_with_seed_context(&parent_before.genome, &seed_ctx);
                     let parent_result = evaluate_preset(&parent_preset, &goal, &sim_config);
-                    let child_selected = de.trial_would_replace(target_idx, result.score);
+                    let child_selected = de.trial_would_replace(target_idx, search_score);
                     let parent_example_id = population_example_ids[target_idx].clone();
                     let child_example_id = if let Some(ref mut logger) = eval_logger {
                         let meta = logger.build_example_meta(
@@ -2962,7 +3207,7 @@ fn run_optimize(
                     } else {
                         String::new()
                     };
-                    de.report_trial_result(target_idx, trial_genome.clone(), result.score);
+                    de.report_trial_result(target_idx, trial_genome.clone(), search_score);
                     if child_selected && !child_example_id.is_empty() {
                         population_example_ids[target_idx] = child_example_id;
                     }
@@ -2975,16 +3220,13 @@ fn run_optimize(
             for (target_idx, trial_genome) in trials {
                 let parent_before = de.individual(target_idx).clone();
                 let preset = preset_from_genome_with_seed_context(&trial_genome, &seed_ctx);
-                let result = evaluate_preset(&preset, &goal, &sim_config);
-                let violation = if constrained {
-                    compute_comfort_violation(&goal, &result)
-                } else {
-                    0.0
-                };
+                let (result, search_score, search_violation) =
+                    evaluate_search_candidate(&preset, &goal, &sim_config, seed, search_replicates);
+                let violation = if constrained { search_violation } else { 0.0 };
                 let child_selected = if constrained {
-                    de.trial_would_replace_constrained(target_idx, result.score, violation)
+                    de.trial_would_replace_constrained(target_idx, search_score, violation)
                 } else {
-                    de.trial_would_replace(target_idx, result.score)
+                    de.trial_would_replace(target_idx, search_score)
                 };
                 let parent_example_id = population_example_ids[target_idx].clone();
                 let child_example_id = if let Some(ref mut logger) = eval_logger {
@@ -3017,9 +3259,9 @@ fn run_optimize(
                     String::new()
                 };
                 if constrained {
-                    de.report_trial_constrained(target_idx, trial_genome, result.score, violation);
+                    de.report_trial_constrained(target_idx, trial_genome, search_score, violation);
                 } else {
-                    de.report_trial_result(target_idx, trial_genome, result.score);
+                    de.report_trial_result(target_idx, trial_genome, search_score);
                 }
                 if child_selected && !child_example_id.is_empty() {
                     population_example_ids[target_idx] = child_example_id;
@@ -3137,30 +3379,104 @@ fn run_optimize(
     // getting. Legacy / fusion modes always return best() because every
     // individual has violation = 0 by construction.
     let mut returned_strict = true;
-    let best_genome = if constrained {
-        match de.best_strict() {
-            Some(s) => s.genome.clone(),
-            None => {
-                returned_strict = false;
-                eprintln!("  WARNING: no strictly feasible candidate found in constrained run.");
-                eprintln!(
-                    "           Returning the ε-relaxed best (violation = {:.4}) — this preset",
-                    de.best().violation
-                );
-                eprintln!(
-                    "           does not satisfy the comfort constraints. Consider increasing"
-                );
-                eprintln!(
-                    "           --generations, loosening thresholds, or adjusting --init-preset."
-                );
-                de.best().genome.clone()
-            }
+    let mut ranked = de
+        .individuals()
+        .iter()
+        .filter(|individual| individual.fitness.is_finite())
+        .filter(|individual| !constrained || individual.violation <= 1e-9)
+        .cloned()
+        .collect::<Vec<_>>();
+    if ranked.is_empty() {
+        returned_strict = false;
+        eprintln!("  WARNING: no strictly feasible candidate found in constrained run.");
+        eprintln!(
+            "           Screening the ε-relaxed best (violation = {:.4}) on the finalist panel.",
+            de.best().violation
+        );
+        ranked.push(de.best().clone());
+    }
+    ranked.sort_by(|first, second| {
+        second
+            .fitness
+            .partial_cmp(&first.fitness)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut seen_hashes = std::collections::BTreeSet::new();
+    let mut finalist_entries = Vec::new();
+    for individual in ranked {
+        let preset = preset_from_genome_with_seed_context(&individual.genome, &seed_ctx);
+        let hash = canonical_preset_hash(&preset);
+        if !seen_hashes.insert(hash.clone()) {
+            continue;
         }
-    } else {
-        de.best().genome.clone()
-    };
+        let aggregate = evaluate_preset_replicated(
+            &preset,
+            &goal,
+            &sim_config,
+            seed,
+            SeedPanel::Finalist,
+            finalist_replicates,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Finalist evaluation failed: {error}");
+            std::process::exit(2);
+        });
+        finalist_entries.push((hash, individual.genome, aggregate));
+        if finalist_entries.len() == finalist_count {
+            break;
+        }
+    }
+    let finalist_comparison = replicated::compare_finalist_scores(
+        finalist_entries
+            .iter()
+            .map(|(hash, _, aggregate)| replicated::FinalistScores {
+                canonical_hash: hash.clone(),
+                scores: aggregate
+                    .replicates
+                    .iter()
+                    .map(|replicate| replicate.score)
+                    .collect(),
+            })
+            .collect(),
+        indifference_delta,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("Finalist comparison failed: {error}");
+        std::process::exit(2);
+    });
+    let leader_hash = finalist_comparison
+        .observed_leader
+        .as_deref()
+        .expect("at least one evaluated finalist has an observed leader");
+    let best_genome = finalist_entries
+        .iter()
+        .find(|(hash, _, _)| hash == leader_hash)
+        .map(|(_, genome, _)| genome.clone())
+        .expect("observed leader belongs to finalist entries");
+    let leader_aggregate = finalist_entries
+        .iter()
+        .find(|(hash, _, _)| hash == leader_hash)
+        .map(|(_, _, aggregate)| aggregate.clone())
+        .expect("observed leader aggregate belongs to finalist entries");
+    println!();
+    println!(
+        "  Finalist decision: {:?} (leader {}, n={}, delta={:.4})",
+        finalist_comparison.status,
+        &leader_hash[..leader_hash.len().min(12)],
+        finalist_comparison.n,
+        finalist_comparison.delta
+    );
+    if finalist_comparison.status != replicated::FinalistStatus::Unique {
+        println!(
+            "  Inconclusive set: {}",
+            finalist_comparison.inconclusive_set.join(", ")
+        );
+    }
+    let mut finalist_config = sim_config.clone();
+    finalist_config.seed_policy = SeedPolicy::domain_separated(seed, SeedPanel::Finalist, 0);
     let (best_preset, best_result) =
-        reevaluate_best_preset(&best_genome, &goal, &sim_config, &seed_ctx);
+        reevaluate_best_preset(&best_genome, &goal, &finalist_config, &seed_ctx);
     let final_violation = if constrained {
         compute_comfort_violation(&goal, &best_result)
     } else {
@@ -3261,6 +3577,29 @@ fn run_optimize(
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         PathBuf::from(format!("preset_{}_{}.json", goal_kind, ts))
     });
+    let finalist_report_path = output_path.with_extension("finalists.json");
+    let finalist_report = serde_json::json!({
+        "schema": "nmm_p06_finalist_comparison_v1",
+        "run_seed": seed,
+        "search_panel_replicates": search_replicates,
+        "finalist_panel": "finalist",
+        "seed_tree_revision": reproducibility::SEED_DERIVATION_REVISION,
+        "replicate_identities": finalist_entries
+            .first()
+            .map(|(_, _, aggregate)| aggregate.replicates.iter().map(|item| &item.identity).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "candidate_aggregates": finalist_entries
+            .iter()
+            .map(|(hash, _, aggregate)| serde_json::json!({"canonical_hash": hash, "evaluation": aggregate}))
+            .collect::<Vec<_>>(),
+        "comparison": &finalist_comparison,
+    });
+    if let Err(error) = std::fs::write(
+        &finalist_report_path,
+        serde_json::to_string_pretty(&finalist_report).expect("finalist report serializes"),
+    ) {
+        eprintln!("  Finalist report export failed: {error}");
+    }
 
     match export_best_genome(
         &output_path,
@@ -3269,12 +3608,17 @@ fn run_optimize(
         goal_kind,
         de.generation(),
         duration,
-        &sim_config,
+        &finalist_config,
         &seed_ctx,
     ) {
         Ok(_) => {
+            if let Err(error) = export::attach_replicated_analysis(&output_path, &leader_aggregate)
+            {
+                eprintln!("  Replicated analysis export failed: {error}");
+            }
             println!();
             println!("  Exported: {}", output_path.display());
+            println!("  Finalists: {}", finalist_report_path.display());
         }
         Err(e) => {
             eprintln!("  Export failed: {}", e);
@@ -3331,6 +3675,8 @@ fn run_evaluate(
     goal_str: &str,
     brain_type_str: &str,
     duration: f32,
+    run_seed: u64,
+    replicates: usize,
     flags: EvaluateFeatureFlags,
     acoustic_score: bool,
     acoustic_score_fusion: bool,
@@ -3342,6 +3688,10 @@ fn run_evaluate(
     log_evaluations_path: Option<&Path>,
     json_report_path: Option<&Path>,
 ) {
+    if replicates == 0 {
+        eprintln!("--replicates must be at least 1");
+        std::process::exit(2);
+    }
     ensure_analysis_window_or_exit(
         "evaluate",
         duration,
@@ -3414,6 +3764,7 @@ fn run_evaluate(
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
     println!("  Preset: {}", preset_path.display());
     println!("  Audio:  {:.1}s per evaluation", duration);
+    println!("  Run seed: {run_seed}  replicates: {replicates}  panel: direct");
     println!(
         "  Features: assr={}  thalamic_gate={}  cet={}  phys_gate={}",
         flags.assr, flags.thalamic_gate, flags.cet, flags.phys_gate
@@ -3462,8 +3813,10 @@ fn run_evaluate(
             jr_sigma,
             gaba_b_rate,
             gaba_b_gain,
+            run_seed,
+            replicates,
         );
-        let signature_preview = build_eval_config(
+        let mut signature_preview = build_eval_config(
             duration,
             brain_types[0],
             flags,
@@ -3475,6 +3828,8 @@ fn run_evaluate(
             gaba_b_rate,
             gaba_b_gain,
         );
+        signature_preview.seed_policy =
+            SeedPolicy::domain_separated(run_seed, SeedPanel::Direct, 0);
         print_model_signature(&signature_preview.model_signature());
         if acoustic_score {
             println!("  Note: acoustic metrics are shown only for single goal/brain evaluate.");
@@ -3492,7 +3847,7 @@ fn run_evaluate(
         let mut eval_logger =
             log_evaluations_path.map(|path| OptimizeCsvLogger::new(path, "evaluate"));
         let show_acoustic = acoustic_score || acoustic_score_fusion;
-        let sim_config = build_eval_config(
+        let mut sim_config = build_eval_config(
             duration,
             bt,
             flags,
@@ -3504,8 +3859,23 @@ fn run_evaluate(
             gaba_b_rate,
             gaba_b_gain,
         );
+        sim_config.seed_policy = SeedPolicy::domain_separated(run_seed, SeedPanel::Direct, 0);
         let detailed = evaluate_preset_detailed(&preset, &goal, &sim_config);
         let result = &detailed.summary;
+        let replicated = (replicates > 1).then(|| {
+            evaluate_preset_replicated(
+                &preset,
+                &goal,
+                &sim_config,
+                run_seed,
+                SeedPanel::Direct,
+                replicates,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("Replicated evaluation failed: {error}");
+                std::process::exit(2);
+            })
+        });
         let diagnosis = diagnose_detailed_result(&goal, &detailed);
         let fusion_applied = result
             .acoustic_score
@@ -3524,6 +3894,24 @@ fn run_evaluate(
             println!("  Score:      {:.4} (fused)", result.score);
         } else {
             println!("  Score:      {:.4}", result.score);
+        }
+        if let Some(aggregate) = replicated.as_ref() {
+            let score = &aggregate.score;
+            let interval = score
+                .confidence_interval_95
+                .as_ref()
+                .expect("n > 1 has a confidence interval");
+            println!("  Replicated score (n={}):", score.n);
+            println!(
+                "    mean={:.6}, sample SD={:.6}, SE={:.6}",
+                score.mean,
+                score.sample_std.unwrap(),
+                score.standard_error.unwrap()
+            );
+            println!(
+                "    approximate 95% t-CI=[{:.6}, {:.6}], range=[{:.6}, {:.6}]",
+                interval.lower, interval.upper, score.min, score.max
+            );
         }
         if acoustic_score_fusion && !goal.supports_acoustic_fusion() {
             println!("  Acoustic fusion: requested, but this goal still uses legacy NMM scoring.");
@@ -3857,14 +4245,21 @@ fn run_evaluate(
         println!();
 
         if let Some(json_path) = json_report_path {
-            let report = build_single_evaluate_structured_report(
-                preset_path.as_path(),
-                goal_kind,
-                bt,
-                result,
-                &diagnosis,
-            );
-            write_single_evaluate_structured_report(json_path, &report).unwrap_or_else(|e| {
+            let write_result = if let Some(aggregate) = replicated.as_ref() {
+                serde_json::to_string_pretty(aggregate)
+                    .map_err(std::io::Error::other)
+                    .and_then(|json| std::fs::write(json_path, json))
+            } else {
+                let report = build_single_evaluate_structured_report(
+                    preset_path.as_path(),
+                    goal_kind,
+                    bt,
+                    result,
+                    &diagnosis,
+                );
+                write_single_evaluate_structured_report(json_path, &report)
+            };
+            write_result.unwrap_or_else(|e| {
                 eprintln!(
                     "Failed to write JSON report to '{}': {}",
                     json_path.display(),
@@ -3950,6 +4345,8 @@ fn print_comparison_matrix(
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
+    run_seed: u64,
+    replicates: usize,
 ) {
     let scores = evaluate_score_matrix(
         preset,
@@ -3963,6 +4360,8 @@ fn print_comparison_matrix(
         jr_sigma,
         gaba_b_rate,
         gaba_b_gain,
+        run_seed,
+        replicates,
     );
 
     // Header
@@ -4196,7 +4595,10 @@ fn practical_reasons(goal_kind: GoalKind, diagnosis: &scoring::Diagnosis) -> Vec
         .collect::<Vec<_>>();
     failing_bands.sort();
     if !failing_bands.is_empty() {
-        reasons.push(format!("bands out of target ({})", failing_bands.join(", ")));
+        reasons.push(format!(
+            "bands out of target ({})",
+            failing_bands.join(", ")
+        ));
     }
 
     if !matches!(diagnosis.firing_rate_status, scoring::MetricStatus::Pass) {
@@ -4400,12 +4802,22 @@ fn run_disturb_cmd(
     spike_duration: f64,
     spike_gain: f64,
     duration: f32,
+    run_seed: u64,
+    replicates: usize,
     flags: EvaluateFeatureFlags,
     jr_sigma: f64,
     gaba_b_rate: f64,
     gaba_b_gain: f64,
     legacy_ablated: bool,
 ) {
+    if replicates == 0 {
+        eprintln!("--replicates must be at least 1");
+        std::process::exit(2);
+    }
+    if legacy_ablated && replicates != 1 {
+        eprintln!("--legacy-ablated supports exactly one frozen legacy realization");
+        std::process::exit(2);
+    }
     ensure_analysis_window_or_exit(
         "disturb",
         duration,
@@ -4455,7 +4867,7 @@ fn run_disturb_cmd(
         std::process::exit(1);
     }
 
-    let config = build_disturb_config(
+    let mut config = build_disturb_config(
         duration,
         bt,
         spike_time,
@@ -4467,9 +4879,19 @@ fn run_disturb_cmd(
         gaba_b_gain,
         legacy_ablated,
     );
+    if !legacy_ablated {
+        config.seed_policy = SeedPolicy::domain_separated(run_seed, SeedPanel::Disturb, 0);
+    }
 
     let start = Instant::now();
     let result = disturb::run_disturb(&preset, &config);
+    let replicated = (replicates > 1).then(|| {
+        replicated::evaluate_disturbance_replicated(&preset, &config, run_seed, replicates)
+            .unwrap_or_else(|error| {
+                eprintln!("Replicated disturbance failed: {error}");
+                std::process::exit(2);
+            })
+    });
     let elapsed = start.elapsed();
 
     // ── Display ─────────────────────────────────────────────────────────
@@ -4477,6 +4899,7 @@ fn run_disturb_cmd(
     println!("  \u{2550}\u{2550}\u{2550} Disturbance Resilience Test \u{2550}\u{2550}\u{2550}");
     println!();
     println!("  Brain type:      {}", bt);
+    println!("  Run seed:        {run_seed} ({replicates} replicates, disturb panel)");
     println!(
         "  Spike:           {:.0}ms white noise burst at t={:.1}s, gain={:.2}",
         spike_duration * 1000.0,
@@ -4487,6 +4910,20 @@ fn run_disturb_cmd(
         println!("  Target LFO:      {:.1} Hz", tf);
     }
     println!("  Brightness:      {:.2}", result.brightness);
+    if let Some(aggregate) = replicated.as_ref() {
+        let resilience = &aggregate.spectral_resilience;
+        let interval = resilience
+            .confidence_interval_95
+            .as_ref()
+            .expect("n > 1 has a confidence interval");
+        println!(
+            "  Resilience mean: {:.4} (SD {:.4}, 95% t-CI [{:.4}, {:.4}])",
+            resilience.mean,
+            resilience.sample_std.unwrap(),
+            interval.lower,
+            interval.upper
+        );
+    }
     print_model_signature(&result.model_signature);
     println!(
         "  Duration:        {:.1}s ({:.2}s elapsed)",
@@ -4666,6 +5103,19 @@ fn run_disturb_cmd(
 
 // ── Generate Training Data (Priority 14a) ──────────────────────────────────
 
+struct GeneratedDatasetRow {
+    preset_index: usize,
+    replicate_index: usize,
+    genome: Vec<f64>,
+    goal: GoalKind,
+    brain_type: BrainType,
+    config: SimulationConfig,
+    result: SimulationResult,
+    score_mean: f64,
+    score_std: Option<f64>,
+    repeats: usize,
+}
+
 fn run_generate_data(
     output: &Path,
     count: usize,
@@ -4677,10 +5127,16 @@ fn run_generate_data(
     arousal_model_str: &str,
     fixed_arousal: Option<f64>,
     seed: u64,
+    replicates: usize,
 ) {
+    use rand::Rng;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     let arousal_model = resolve_arousal_model_or_exit(arousal_model_str, fixed_arousal);
+    if replicates == 0 {
+        eprintln!("--replicates must be at least 1");
+        std::process::exit(2);
+    }
 
     ensure_analysis_window_or_exit(
         "generate-data",
@@ -4714,7 +5170,8 @@ fn run_generate_data(
         std::process::exit(1);
     }
 
-    let total_evals = count * goals.len() * brain_types.len();
+    let total_groups = count * goals.len() * brain_types.len();
+    let total_evals = total_groups * replicates;
     println!();
     println!("  Surrogate Training Data Generator");
     println!("  \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
@@ -4730,6 +5187,7 @@ fn run_generate_data(
     );
     println!("  Brain types:    {}", brain_types.len());
     println!("  Total evals:    {total_evals}");
+    println!("  Replicates:     {replicates} per genome/goal/profile group");
     println!("  Duration:       {duration:.1}s per eval");
     println!("  Threads:        {threads}");
     println!(
@@ -4757,22 +5215,13 @@ fn run_generate_data(
 
     // Generate random presets using the same genome bounds as DE.
     let bounds = Preset::bounds();
-    let mut rng_state = seed;
-    let mut next_u64 = || -> u64 {
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        rng_state
-    };
-
     let mut genomes: Vec<Vec<f64>> = Vec::with_capacity(count);
-    for _ in 0..count {
+    let seed_tree = SeedTreeV1::new(seed);
+    for sample_slot in 0..count {
+        let mut rng = seed_tree.dataset_genome_rng(sample_slot as u64);
         let genome: Vec<f64> = bounds
             .iter()
-            .map(|(lo, hi)| {
-                let u = next_u64() as f64 / u64::MAX as f64;
-                lo + u * (hi - lo)
-            })
+            .map(|(lo, hi)| rng.gen_range(*lo..=*hi))
             .collect();
         genomes.push(genome);
     }
@@ -4789,18 +5238,8 @@ fn run_generate_data(
     }
 
     // Thread-safe results collector
-    let results: Arc<
-        Mutex<
-            Vec<(
-                usize,
-                Vec<f64>,
-                GoalKind,
-                BrainType,
-                SimulationConfig,
-                SimulationResult,
-            )>,
-        >,
-    > = Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
+    let results: Arc<Mutex<Vec<GeneratedDatasetRow>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(total_evals)));
     let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Parallel evaluation
@@ -4820,32 +5259,54 @@ fn run_generate_data(
                     let (preset_idx, ref genome, goal_kind, bt) = work[i];
                     let preset = Preset::from_genome(genome);
                     let goal = Goal::new(goal_kind);
-                    let config = build_generate_data_config(
-                        duration,
-                        bt,
-                        phys_gate,
-                        arousal_model,
-                        fixed_arousal,
-                        seed,
-                    );
-                    let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
-
-                    results.lock().unwrap().push((
-                        preset_idx,
-                        genome.clone(),
-                        goal_kind,
-                        bt,
-                        config,
-                        result,
-                    ));
-
-                    let done = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if done % 100 == 0 || done == total_evals {
-                        eprint!(
-                            "\r  Progress: {done}/{total_evals} ({:.1}%)",
-                            100.0 * done as f64 / total_evals as f64
+                    let mut group = Vec::with_capacity(replicates);
+                    for replicate_index in 0..replicates {
+                        let mut config = build_generate_data_config(
+                            duration,
+                            bt,
+                            phys_gate,
+                            arousal_model,
+                            fixed_arousal,
+                            seed,
                         );
+                        config.seed_policy = SeedPolicy::domain_separated(
+                            seed,
+                            SeedPanel::Dataset,
+                            replicate_index as u64,
+                        );
+                        let result = evaluate_preset_for_dataset_export(&preset, &goal, &config);
+                        group.push((replicate_index, config, result));
+
+                        let done = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if done % 100 == 0 || done == total_evals {
+                            eprint!(
+                                "\r  Progress: {done}/{total_evals} ({:.1}%)",
+                                100.0 * done as f64 / total_evals as f64
+                            );
+                        }
                     }
+                    let summary = replicated::ScalarSummary::from_values(
+                        &group
+                            .iter()
+                            .map(|(_, _, result)| result.score)
+                            .collect::<Vec<_>>(),
+                    )
+                    .expect("dataset replicate scores are finite");
+                    let mut output = results.lock().unwrap();
+                    output.extend(group.into_iter().map(|(replicate_index, config, result)| {
+                        GeneratedDatasetRow {
+                            preset_index: preset_idx,
+                            replicate_index,
+                            genome: genome.clone(),
+                            goal: goal_kind,
+                            brain_type: bt,
+                            config,
+                            result,
+                            score_mean: summary.mean,
+                            score_std: summary.sample_std,
+                            repeats: summary.n,
+                        }
+                    }));
                 }
             });
         }
@@ -4863,7 +5324,19 @@ fn run_generate_data(
             std::process::exit(1);
         }
     };
-    results.sort_by_key(|(preset_idx, _, _, _, _, _)| *preset_idx);
+    results.sort_by(|first, second| {
+        first
+            .preset_index
+            .cmp(&second.preset_index)
+            .then_with(|| first.goal.to_string().cmp(&second.goal.to_string()))
+            .then_with(|| {
+                first
+                    .brain_type
+                    .to_string()
+                    .cmp(&second.brain_type.to_string())
+            })
+            .then_with(|| first.replicate_index.cmp(&second.replicate_index))
+    });
     let mut file = std::fs::File::create(output).unwrap_or_else(|e| {
         eprintln!("Failed to create output file: {e}");
         std::process::exit(1);
@@ -4874,20 +5347,36 @@ fn run_generate_data(
 
     // Data rows
     let run_id = make_run_id("generate_data");
-    for (row_idx, (_, genome, goal_kind, bt, config, result)) in results.iter().enumerate() {
+    for (row_idx, row) in results.iter().enumerate() {
         let meta = CsvExampleMeta {
             example_id: format!("{run_id}_e{row_idx:06}"),
             run_id: run_id.clone(),
             parent_example_id: String::new(),
             stage: "generate_data".to_string(),
             source: "random".to_string(),
-            seed_eval: String::new(),
+            seed_eval: row
+                .config
+                .seed_policy
+                .evaluation_plan()
+                .expect("dataset rows use domain-separated seeds")
+                .compatibility_seed()
+                .to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         writeln!(
             file,
             "{}",
-            surrogate_csv_row(&meta, genome, *goal_kind, *bt, config, result)
+            surrogate_csv_row_with_stats(
+                &meta,
+                &row.genome,
+                row.goal,
+                row.brain_type,
+                &row.config,
+                &row.result,
+                row.score_mean,
+                row.score_std,
+                row.repeats,
+            )
         )
         .unwrap();
     }
@@ -4991,7 +5480,10 @@ mod tests {
         assert!(config.cet_enabled);
         assert!(config.physiological_thalamic_gate_enabled);
         assert!(!config.acoustic_scoring_enabled);
-        assert_eq!(config.reproducibility_seed, Some(42));
+        assert_eq!(
+            config.seed_policy,
+            SeedPolicy::domain_separated(42, SeedPanel::Dataset, 0)
+        );
     }
 
     #[test]
@@ -5061,8 +5553,45 @@ mod tests {
         ])
         .expect("CLI parse should succeed");
         match cli.command {
-            Commands::Disturb { legacy_ablated, .. } => assert!(!legacy_ablated),
+            Commands::Disturb {
+                legacy_ablated,
+                replicates,
+                ..
+            } => {
+                assert!(!legacy_ablated);
+                assert_eq!(replicates, replicated::DEFAULT_REPLICATES);
+            }
             _ => panic!("expected disturb command"),
+        }
+    }
+
+    #[test]
+    fn calibrated_replication_defaults_are_exposed_by_cli() {
+        let evaluate = Cli::try_parse_from([
+            "neural-preset-optimizer",
+            "evaluate",
+            "presets/the_shield_v1.json",
+        ])
+        .expect("evaluate CLI parse should succeed");
+        match evaluate.command {
+            Commands::Evaluate { replicates, .. } => {
+                assert_eq!(replicates, replicated::DEFAULT_REPLICATES)
+            }
+            _ => panic!("expected evaluate command"),
+        }
+
+        let optimize = Cli::try_parse_from(["neural-preset-optimizer", "optimize"])
+            .expect("optimize CLI parse should succeed");
+        match optimize.command {
+            Commands::Optimize {
+                search_replicates,
+                finalist_replicates,
+                ..
+            } => {
+                assert_eq!(search_replicates, 1);
+                assert_eq!(finalist_replicates, replicated::DEFAULT_REPLICATES);
+            }
+            _ => panic!("expected optimize command"),
         }
     }
 
@@ -5108,7 +5637,10 @@ mod tests {
         assert_eq!(config.jr_stochastic_sigma, 15.0);
         assert_eq!(config.cet_b_slow_rate, 5.0);
         assert_eq!(config.cet_b_slow_gain, 10.0);
-        assert_eq!(config.reproducibility_seed, Some(42));
+        assert_eq!(
+            config.seed_policy,
+            SeedPolicy::domain_separated(42, SeedPanel::Search, 0)
+        );
     }
 
     /// **P18 wiring pin**: build_optimize_config must propagate
@@ -5132,7 +5664,10 @@ mod tests {
         assert_eq!(config.jr_stochastic_sigma, 100.0);
         assert_eq!(config.cet_b_slow_rate, 25.0);
         assert_eq!(config.cet_b_slow_gain, 18.0);
-        assert_eq!(config.reproducibility_seed, Some(42));
+        assert_eq!(
+            config.seed_policy,
+            SeedPolicy::domain_separated(42, SeedPanel::Search, 0)
+        );
     }
 
     #[test]
@@ -5304,7 +5839,12 @@ mod tests {
         let cols: Vec<&str> = header.split(',').collect();
 
         assert_eq!(cols[0], "example_id");
-        assert_eq!(cols[7], "goal");
+        assert_eq!(cols[6], "run_seed");
+        assert_eq!(cols[7], "seed_panel");
+        assert_eq!(cols[8], "replicate_index");
+        assert_eq!(cols[9], "seed_tree_revision");
+        assert_eq!(cols[10], "replicate_group_id");
+        assert_eq!(cols[12], "goal");
         let gaba_idx = cols
             .iter()
             .position(|c| *c == "gaba_b_gain")
@@ -5399,7 +5939,7 @@ mod tests {
             &config,
             &result,
         );
-        let cols: Vec<&str> = row.split(',').collect();
+        let cols = parse_csv_fields(&row);
         let header = surrogate_csv_header();
         let header_cols: Vec<&str> = header.split(',').collect();
         let idx = |name: &str| {
@@ -5408,7 +5948,6 @@ mod tests {
                 .position(|c| *c == name)
                 .expect("column should exist")
         };
-        let meta_start = 0usize;
         let expected_goal_id = GoalKind::all()
             .iter()
             .position(|&g| g == GoalKind::Sleep)
@@ -5420,26 +5959,23 @@ mod tests {
             .unwrap()
             .to_string();
 
-        assert_eq!(cols[meta_start], "ex1");
-        assert_eq!(cols[meta_start + 1], "run1");
-        assert_eq!(cols[meta_start + 2], "parent0");
-        assert_eq!(cols[meta_start + 3], "optimize_generation");
-        assert_eq!(cols[meta_start + 4], "trial");
-        assert_eq!(cols[meta_start + 5], "42");
-        assert_eq!(cols[meta_start + 8], expected_goal_id);
-        assert_eq!(cols[meta_start + 10], expected_brain_type_id);
-        assert_eq!(cols[meta_start + 12], "1");
-        assert_eq!(cols[meta_start + 13], "0");
-        assert_eq!(cols[meta_start + 14], "1");
-        assert_eq!(cols[meta_start + 15], "1");
+        assert_eq!(cols[idx("example_id")], "ex1");
+        assert_eq!(cols[idx("run_id")], "run1");
+        assert_eq!(cols[idx("parent_example_id")], "parent0");
+        assert_eq!(cols[idx("stage")], "optimize_generation");
+        assert_eq!(cols[idx("source")], "trial");
+        assert_eq!(cols[idx("seed_eval")], "42");
+        assert_eq!(cols[idx("goal_id")], expected_goal_id);
+        assert_eq!(cols[idx("brain_type_id")], expected_brain_type_id);
+        assert_eq!(cols[idx("assr")], "1");
+        assert_eq!(cols[idx("thalamic_gate")], "0");
+        assert_eq!(cols[idx("cet")], "1");
+        assert_eq!(cols[idx("phys_gate")], "1");
         assert_eq!(cols[idx("jr_sigma")], "100.000000");
         assert_eq!(cols[idx("gaba_b_rate")], "25.000000");
         assert_eq!(cols[idx("gaba_b_gain")], "18.000000");
         assert_eq!(cols[idx("g0")], "0.500000");
-        assert_eq!(
-            cols[idx("score")],
-            format!("{:.6}", result.score)
-        );
+        assert_eq!(cols[idx("score")], format!("{:.6}", result.score));
         assert!(
             row.contains(",2,\"{"),
             "row should contain signature schema marker"
@@ -5878,7 +6414,7 @@ mod tests {
         let goal_kind = GoalKind::Meditation;
         let brain_type = BrainType::Anxious;
         let goal = Goal::new(goal_kind);
-        let config = build_eval_config(
+        let mut config = build_eval_config(
             duration,
             brain_type,
             flags,
@@ -5890,6 +6426,7 @@ mod tests {
             5.0,
             10.0,
         );
+        config.seed_policy = SeedPolicy::domain_separated(42, SeedPanel::Direct, 0);
 
         let direct = evaluate_preset(&preset, &goal, &config);
         let matrix = evaluate_score_matrix(
@@ -5904,6 +6441,8 @@ mod tests {
             15.0,
             5.0,
             10.0,
+            42,
+            1,
         );
 
         assert_eq!(matrix.len(), 1);
@@ -6174,25 +6713,22 @@ mod tests {
         let json = std::fs::read_to_string(&output_path).expect("exported JSON should exist");
         let exported: serde_json::Value =
             serde_json::from_str(&json).expect("exported JSON should parse");
-        assert_eq!(exported["meta"]["goal_semantics"]["goal"].as_str(), Some("focus"));
-        assert!(
-            exported["meta"]["goal_semantics"]["plain_language_purpose"]
-                .as_str()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
+        assert_eq!(
+            exported["meta"]["goal_semantics"]["goal"].as_str(),
+            Some("focus")
         );
-        assert!(
-            exported["meta"]["goal_semantics"]["unsupported_claims"]
-                .as_array()
-                .map(|arr| !arr.is_empty())
-                .unwrap_or(false)
-        );
-        assert!(
-            exported["meta"]["goal_semantics"]["evidence_level"]
-                .as_str()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-        );
+        assert!(exported["meta"]["goal_semantics"]["plain_language_purpose"]
+            .as_str()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false));
+        assert!(exported["meta"]["goal_semantics"]["unsupported_claims"]
+            .as_array()
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false));
+        assert!(exported["meta"]["goal_semantics"]["evidence_level"]
+            .as_str()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false));
 
         let _ = std::fs::remove_file(output_path);
     }
@@ -6220,6 +6756,8 @@ mod tests {
             15.0,
             5.0,
             10.0,
+            42,
+            1,
         );
         assert_eq!(matrix.len(), brains.len());
         assert_eq!(matrix[0].len(), goals.len());
@@ -6315,12 +6853,10 @@ mod tests {
         assert_eq!(report.goal, "shield");
         assert!(!report.practical_status.trim().is_empty());
         assert_eq!(report_json["goal_semantics"]["goal"], "shield");
-        assert!(
-            report
-                .limitations
-                .iter()
-                .any(|l| l.contains("model-based proxy report"))
-        );
+        assert!(report
+            .limitations
+            .iter()
+            .any(|l| l.contains("model-based proxy report")));
     }
 
     #[test]
@@ -6447,7 +6983,8 @@ mod tests {
         let _ = std::fs::remove_file(&output_path);
         write_single_evaluate_structured_report(&output_path, &report)
             .expect("json report should be written");
-        let written = std::fs::read_to_string(&output_path).expect("json report should be readable");
+        let written =
+            std::fs::read_to_string(&output_path).expect("json report should be readable");
         let parsed: serde_json::Value =
             serde_json::from_str(&written).expect("json report should parse");
         assert_eq!(parsed["goal"], "shield");
@@ -6466,16 +7003,14 @@ mod tests {
         assert!(err_goal.contains("--json-report is only supported"));
 
         let mode_brain_all = evaluate_output_mode(&[GoalKind::Shield], BrainType::all());
-        let err_brain =
-            validate_json_report_mode(mode_brain_all, Some(Path::new("report.json")))
-                .expect_err("brain-type=all should reject --json-report");
+        let err_brain = validate_json_report_mode(mode_brain_all, Some(Path::new("report.json")))
+            .expect_err("brain-type=all should reject --json-report");
         assert!(err_brain.contains("--json-report is only supported"));
     }
 
     #[test]
     fn workflow_structured_evaluate_report_cli_path_writes_json() {
-        let output_path =
-            std::env::temp_dir().join("workflow_evaluate_json_report_cli_path.json");
+        let output_path = std::env::temp_dir().join("workflow_evaluate_json_report_cli_path.json");
         let _ = std::fs::remove_file(&output_path);
 
         let flags = EvaluateFeatureFlags {
@@ -6489,6 +7024,8 @@ mod tests {
             "isolation",
             "normal",
             2.1,
+            42,
+            1,
             flags,
             false,
             false,

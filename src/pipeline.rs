@@ -7,24 +7,28 @@ use crate::acoustic_score::{
 /// into a single evaluation function that the optimizer calls.
 use crate::auditory::{
     apply_rir, diagnostics_for_modulation, estimate_arousal, extract_candidate_auditory_features,
-    generate_rir, ArousalModel, ArousalSource, AssrDiagnostics, AssrModulationSummary,
-    AssrTransfer, ButterworthCrossover, CandidateAuditoryFeatures, EnvironmentParams,
-    GammatoneFilterbank, PhysiologicalThalamicGate, ThalamicGate,
+    generate_rir, generate_rir_seeded, ArousalModel, ArousalSource, AssrDiagnostics,
+    AssrModulationSummary, AssrTransfer, ButterworthCrossover, CandidateAuditoryFeatures,
+    EnvironmentParams, GammatoneFilterbank, PhysiologicalThalamicGate, ThalamicGate,
 };
 use crate::brain_type::BrainType;
 use crate::model_signature::{
     AuditoryFeatureFlags, ModelSignature, ModelVersion, NeuralFeatureFlags, NormalizationMode,
     NumericParamsSnapshot, PipelineVariant, RendererRevision, ReproducibilitySeeds, ScoringProfile,
-    DSP_SOURCE_REVISION, MODEL_SIGNATURE_SCHEMA_VERSION,
+    DSP_SOURCE_REVISION, LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION, MODEL_SIGNATURE_SCHEMA_VERSION,
 };
 use crate::movement::MovementController;
 use crate::neural::{
-    aperiodic, simulate_bilateral, simulate_candidate_v2, BilateralResult,
+    aperiodic, simulate_bilateral_with_seed_plan, simulate_candidate_v2, BilateralResult,
     CandidateCorticalResponse, FastInhibParams, FhnModel, FhnResult, PerformanceVector,
     SpectralParameterization,
 };
 use crate::preset::Preset;
-use crate::scoring::Goal;
+use crate::reproducibility::{
+    EvaluationSeedPlan, SeedPolicy, NORMAL_TRANSFORM_REVISION, RNG_ALGORITHM_REVISION,
+    SEED_DERIVATION_REVISION,
+};
+use crate::scoring::{Goal, GoalKind};
 use noise_generator_core::NoiseEngine;
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +105,7 @@ pub(crate) fn deinterleave(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
     (left, right)
 }
 
+#[derive(Debug, Clone)]
 pub struct SimulationConfig {
     /// Duration of audio to render per evaluation (seconds).
     pub duration_secs: f32,
@@ -179,9 +184,8 @@ pub struct SimulationConfig {
     pub model_version: ModelVersion,
     /// Active scalar scoring profile for this run.
     pub scoring_profile: ScoringProfile,
-    /// Optional run seed when an outer command has an explicit reproducibility seed.
-    /// Does not affect simulation behavior by itself; metadata only.
-    pub reproducibility_seed: Option<u64>,
+    /// Versioned policy controlling every stochastic consumer in an evaluation.
+    pub seed_policy: SeedPolicy,
     /// Explicit arousal model for this run.
     pub arousal_model: ArousalModel,
     /// Fixed arousal value used when `arousal_model=fixed`.
@@ -265,7 +269,7 @@ impl Default for SimulationConfig {
             acoustic_constraints_enabled: false,
             model_version: ModelVersion::LegacyV1,
             scoring_profile: ScoringProfile::LegacyV1,
-            reproducibility_seed: None,
+            seed_policy: SeedPolicy::LegacyFixedV1,
             arousal_model: ArousalModel::LegacyHeuristic,
             fixed_arousal: None,
             jr_stochastic_sigma: 15.0,
@@ -277,10 +281,49 @@ impl Default for SimulationConfig {
 
 impl SimulationConfig {
     pub fn model_signature(&self) -> ModelSignature {
+        let (schema_version, renderer_revision, revisions, seeds, legacy_fixed_rng) =
+            match self.seed_policy {
+                SeedPolicy::LegacyFixedV1 => (
+                    LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
+                    RendererRevision::DspBrownHfV2BinauralBeatV1,
+                    (None, None, None, None, None, None),
+                    ReproducibilitySeeds::default(),
+                    true,
+                ),
+                SeedPolicy::DomainSeparatedV1 {
+                    run_seed,
+                    panel,
+                    replicate_index,
+                } => (
+                    MODEL_SIGNATURE_SCHEMA_VERSION,
+                    RendererRevision::DspBrownHfV2BinauralBeatV1SeededV1,
+                    (
+                        Some(SEED_DERIVATION_REVISION.to_string()),
+                        Some(RNG_ALGORITHM_REVISION.to_string()),
+                        Some(RNG_ALGORITHM_REVISION.to_string()),
+                        Some(RNG_ALGORITHM_REVISION.to_string()),
+                        Some(NORMAL_TRANSFORM_REVISION.to_string()),
+                        Some(noise_generator_core::SEED_DERIVATION_REVISION.to_string()),
+                    ),
+                    ReproducibilitySeeds {
+                        primary_seed: Some(run_seed),
+                        panel: Some(panel),
+                        replicate_index: Some(replicate_index),
+                        ..ReproducibilitySeeds::default()
+                    },
+                    false,
+                ),
+            };
         ModelSignature {
-            schema_version: MODEL_SIGNATURE_SCHEMA_VERSION,
-            renderer_revision: RendererRevision::DspBrownHfV2BinauralBeatV1,
+            schema_version,
+            renderer_revision,
             renderer_source_revision: Some(DSP_SOURCE_REVISION.to_string()),
+            seed_derivation_revision: revisions.0,
+            optimizer_rng_revision: revisions.1,
+            movement_rng_revision: revisions.2,
+            neural_rng_revision: revisions.3,
+            normal_transform_revision: revisions.4,
+            renderer_seed_derivation_revision: revisions.5,
             version: self.model_version,
             pipeline_variant: match self.model_version {
                 ModelVersion::LegacyV1 => PipelineVariant::EvaluateCanonical,
@@ -314,14 +357,11 @@ impl SimulationConfig {
                 self.fixed_arousal,
                 self.habituation_enabled,
                 self.cet_enabled,
+                legacy_fixed_rng,
             ),
             warmup_discard_secs: self.warmup_discard_secs,
             duration_secs: self.duration_secs,
-            seeds: ReproducibilitySeeds {
-                primary_seed: self.reproducibility_seed,
-                disturbance_left_spike_seed: None,
-                disturbance_right_spike_seed: None,
-            },
+            seeds,
             candidate_brain_profile_v2: match self.model_version {
                 ModelVersion::LegacyV1 => None,
                 ModelVersion::CandidateV2 => Some(self.brain_type.candidate_profile_v2()),
@@ -355,13 +395,24 @@ impl TryFrom<&ModelSignature> for SimulationConfig {
     type Error = SignatureReplayError;
 
     fn try_from(signature: &ModelSignature) -> Result<Self, Self::Error> {
-        if signature.schema_version != MODEL_SIGNATURE_SCHEMA_VERSION {
+        if !matches!(
+            signature.schema_version,
+            LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION | MODEL_SIGNATURE_SCHEMA_VERSION
+        ) {
             return Err(SignatureReplayError::new(format!(
-                "unsupported model signature schema {}; expected {}",
-                signature.schema_version, MODEL_SIGNATURE_SCHEMA_VERSION
+                "unsupported model signature schema {}; expected {} or {}",
+                signature.schema_version,
+                LEGACY_MODEL_SIGNATURE_SCHEMA_VERSION,
+                MODEL_SIGNATURE_SCHEMA_VERSION
             )));
         }
-        if signature.renderer_revision != RendererRevision::DspBrownHfV2BinauralBeatV1 {
+        let is_seeded = signature.schema_version == MODEL_SIGNATURE_SCHEMA_VERSION;
+        let expected_renderer = if is_seeded {
+            RendererRevision::DspBrownHfV2BinauralBeatV1SeededV1
+        } else {
+            RendererRevision::DspBrownHfV2BinauralBeatV1
+        };
+        if signature.renderer_revision != expected_renderer {
             return Err(SignatureReplayError::new(format!(
                 "unsupported renderer revision {}",
                 signature.renderer_revision.as_str()
@@ -373,13 +424,87 @@ impl TryFrom<&ModelSignature> for SimulationConfig {
                 signature.renderer_source_revision
             )));
         }
-        if noise_generator_core::RENDERER_REVISION != signature.renderer_revision.as_str() {
+        let linked_renderer_revision = if is_seeded {
+            noise_generator_core::SEEDED_RENDERER_REVISION
+        } else {
+            noise_generator_core::RENDERER_REVISION
+        };
+        if linked_renderer_revision != signature.renderer_revision.as_str() {
             return Err(SignatureReplayError::new(format!(
                 "renderer semantic revision mismatch: dsp={}, signature={}",
-                noise_generator_core::RENDERER_REVISION,
+                linked_renderer_revision,
                 signature.renderer_revision.as_str()
             )));
         }
+        let seed_policy = if is_seeded {
+            let require_revision = |label: &str,
+                                    actual: Option<&str>,
+                                    expected: &str|
+             -> Result<(), SignatureReplayError> {
+                if actual == Some(expected) {
+                    Ok(())
+                } else {
+                    Err(SignatureReplayError::new(format!(
+                        "{label} mismatch: export={actual:?}, binary={expected}"
+                    )))
+                }
+            };
+            require_revision(
+                "seed derivation revision",
+                signature.seed_derivation_revision.as_deref(),
+                SEED_DERIVATION_REVISION,
+            )?;
+            require_revision(
+                "optimizer RNG revision",
+                signature.optimizer_rng_revision.as_deref(),
+                RNG_ALGORITHM_REVISION,
+            )?;
+            require_revision(
+                "movement RNG revision",
+                signature.movement_rng_revision.as_deref(),
+                RNG_ALGORITHM_REVISION,
+            )?;
+            require_revision(
+                "neural RNG revision",
+                signature.neural_rng_revision.as_deref(),
+                RNG_ALGORITHM_REVISION,
+            )?;
+            require_revision(
+                "normal transform revision",
+                signature.normal_transform_revision.as_deref(),
+                NORMAL_TRANSFORM_REVISION,
+            )?;
+            require_revision(
+                "renderer seed derivation revision",
+                signature.renderer_seed_derivation_revision.as_deref(),
+                noise_generator_core::SEED_DERIVATION_REVISION,
+            )?;
+            let run_seed = signature.seeds.primary_seed.ok_or_else(|| {
+                SignatureReplayError::new("schema 3 signature is missing run_seed")
+            })?;
+            let panel = signature.seeds.panel.ok_or_else(|| {
+                SignatureReplayError::new("schema 3 signature is missing seed panel")
+            })?;
+            let replicate_index = signature.seeds.replicate_index.ok_or_else(|| {
+                SignatureReplayError::new("schema 3 signature is missing replicate_index")
+            })?;
+            SeedPolicy::domain_separated(run_seed, panel, replicate_index)
+        } else {
+            if signature.seed_derivation_revision.is_some()
+                || signature.optimizer_rng_revision.is_some()
+                || signature.movement_rng_revision.is_some()
+                || signature.neural_rng_revision.is_some()
+                || signature.normal_transform_revision.is_some()
+                || signature.renderer_seed_derivation_revision.is_some()
+                || signature.seeds.panel.is_some()
+                || signature.seeds.replicate_index.is_some()
+            {
+                return Err(SignatureReplayError::new(
+                    "schema 2 signature cannot contain schema 3 seed metadata",
+                ));
+            }
+            SeedPolicy::LegacyFixedV1
+        };
         let expected_pipeline = match signature.version {
             ModelVersion::LegacyV1 => PipelineVariant::EvaluateCanonical,
             ModelVersion::CandidateV2 => PipelineVariant::EvaluateCandidateV2,
@@ -420,7 +545,7 @@ impl TryFrom<&ModelSignature> for SimulationConfig {
             acoustic_constraints_enabled: signature.auditory_flags.acoustic_constraints_enabled,
             model_version: signature.version,
             scoring_profile: signature.scoring_profile,
-            reproducibility_seed: signature.seeds.primary_seed,
+            seed_policy,
             arousal_model: signature.auditory_flags.arousal_model,
             fixed_arousal: signature.numeric_params.fixed_arousal,
             jr_stochastic_sigma: signature.numeric_params.jr_stochastic_sigma,
@@ -429,7 +554,12 @@ impl TryFrom<&ModelSignature> for SimulationConfig {
         };
 
         let rebuilt = config.model_signature();
-        if rebuilt != *signature {
+        let mut normalized_signature = signature.clone();
+        if !is_seeded {
+            // Schema 2's primary seed was metadata-only. It cannot affect replay.
+            normalized_signature.seeds.primary_seed = None;
+        }
+        if rebuilt != normalized_signature {
             return Err(SignatureReplayError::new(
                 "signature contains derived rates, flags, or numeric parameters that do not match this binary",
             ));
@@ -667,16 +797,63 @@ pub fn evaluate_preset(
     evaluate_preset_detailed_internal(preset, goal, config, false).summary
 }
 
+/// Evaluate all legacy goals from one stochastic cortical realization.
+///
+/// This is used by the P-06 replication benchmark so changing the goal does
+/// not re-render a different stochastic realization. It is valid only for the
+/// unfused `LegacyV1` scoring profile.
+pub fn evaluate_preset_goal_scores(
+    preset: &Preset,
+    config: &SimulationConfig,
+) -> Vec<(GoalKind, f64)> {
+    assert_eq!(
+        config.scoring_profile,
+        ScoringProfile::LegacyV1,
+        "multi-goal scoring requires legacy_v1 scoring"
+    );
+    assert!(
+        !config.acoustic_score_fusion_enabled,
+        "multi-goal scoring does not support acoustic fusion"
+    );
+    validate_arousal_model_config(config);
+    validate_analysis_window(config.duration_secs, config.warmup_discard_secs)
+        .unwrap_or_else(|message| panic!("invalid SimulationConfig: {message}"));
+    let auditory = prepare_canonical_auditory_state(preset, config);
+    let cortical = run_canonical_cortical_stage(&auditory, config);
+    GoalKind::all()
+        .iter()
+        .copied()
+        .map(|kind| {
+            let goal = Goal::new(kind);
+            (kind, compute_neural_score(&goal, &cortical))
+        })
+        .collect()
+}
+
 pub(crate) fn render_preset_stereo_dry(preset: &Preset, duration_secs: f32) -> RenderedStereoAudio {
+    render_preset_stereo_dry_with_seed_plan(preset, duration_secs, None)
+}
+
+fn render_preset_stereo_dry_with_seed_plan(
+    preset: &Preset,
+    duration_secs: f32,
+    seed_plan: Option<EvaluationSeedPlan>,
+) -> RenderedStereoAudio {
     if !duration_secs.is_finite() || duration_secs <= 0.0 {
         panic!("invalid render duration: {duration_secs:.3}s");
     }
 
     let num_frames = (SAMPLE_RATE as f32 * duration_secs) as u32;
-    let engine = NoiseEngine::new(SAMPLE_RATE, 0.8);
+    let engine = match seed_plan {
+        Some(plan) => NoiseEngine::seeded(SAMPLE_RATE, 0.8, plan.audio_seed()),
+        None => NoiseEngine::new(SAMPLE_RATE, 0.8),
+    };
     preset.apply_to_engine(&engine);
 
-    let mut movement = MovementController::from_preset(preset);
+    let mut movement = match seed_plan {
+        Some(plan) => MovementController::from_preset_seeded(preset, plan),
+        None => MovementController::from_preset(preset),
+    };
     let warmup_frames = (SAMPLE_RATE as f32 * 1.0) as u32;
     let chunk_frames = (SAMPLE_RATE as f32 * 0.05) as u32;
 
@@ -714,7 +891,15 @@ pub(crate) fn render_preset_ear_signals(
     preset: &Preset,
     duration_secs: f32,
 ) -> RenderedStereoAudio {
-    let rendered = render_preset_stereo_dry(preset, duration_secs);
+    render_preset_ear_signals_with_seed_plan(preset, duration_secs, None)
+}
+
+fn render_preset_ear_signals_with_seed_plan(
+    preset: &Preset,
+    duration_secs: f32,
+    seed_plan: Option<EvaluationSeedPlan>,
+) -> RenderedStereoAudio {
+    let rendered = render_preset_stereo_dry_with_seed_plan(preset, duration_secs, seed_plan);
     if preset.room.uses_image_source() {
         return rendered;
     }
@@ -722,7 +907,14 @@ pub(crate) fn render_preset_ear_signals(
     if env_params.is_anechoic() {
         rendered
     } else {
-        let rir = generate_rir(&env_params, rendered.sample_rate_hz);
+        let rir = match seed_plan {
+            Some(plan) => generate_rir_seeded(
+                &env_params,
+                rendered.sample_rate_hz,
+                plan.environment_rir_seed(),
+            ),
+            None => generate_rir(&env_params, rendered.sample_rate_hz),
+        };
         let left = apply_rir(&rendered.left, &rir, env_params.wet_mix);
         let right = apply_rir(&rendered.right, &rir, env_params.wet_mix);
         RenderedStereoAudio::new(rendered.sample_rate_hz, left, right)
@@ -758,7 +950,11 @@ pub(crate) fn prepare_canonical_auditory_state(
     config: &SimulationConfig,
 ) -> AuditoryPreparedState {
     validate_arousal_model_config(config);
-    let rendered_audio = render_preset_ear_signals(preset, config.duration_secs);
+    let rendered_audio = render_preset_ear_signals_with_seed_plan(
+        preset,
+        config.duration_secs,
+        config.seed_policy.evaluation_plan(),
+    );
     let sr = rendered_audio.sample_rate_hz as f64;
     let left = rendered_audio.left.clone();
     let right = rendered_audio.right.clone();
@@ -969,7 +1165,7 @@ pub(crate) fn run_canonical_cortical_stage(
         (0.0, 0.0, 0.0)
     };
 
-    let bilateral_result = simulate_bilateral(
+    let bilateral_result = simulate_bilateral_with_seed_plan(
         &auditory.left_bands_dec,
         &auditory.right_bands_dec,
         &auditory.left_energy,
@@ -999,6 +1195,7 @@ pub(crate) fn run_canonical_cortical_stage(
         b_slow_rate,
         c_slow,
         auditory.arousal,
+        config.seed_policy.evaluation_plan(),
     );
 
     let jr_result = &bilateral_result.combined;
@@ -1304,7 +1501,8 @@ fn evaluate_preset_detailed_internal(
             "invalid SimulationConfig: acoustic constraints are incompatible with acoustic score fusion (would double-count comfort)"
         );
     }
-    if config.scoring_profile == ScoringProfile::ProductAcoustic && !config.acoustic_scoring_enabled {
+    if config.scoring_profile == ScoringProfile::ProductAcoustic && !config.acoustic_scoring_enabled
+    {
         panic!("invalid SimulationConfig: product_acoustic scoring requires acoustic scoring");
     }
     let auditory = prepare_canonical_auditory_state(preset, config);
@@ -1348,24 +1546,35 @@ fn evaluate_preset_detailed_internal(
         None
     };
     let candidate_research_v2 = match goal.kind() {
-        crate::scoring::GoalKind::Ignition => Some(compute_candidate_research_forty_hz_score(&cortical)),
+        crate::scoring::GoalKind::Ignition => {
+            Some(compute_candidate_research_forty_hz_score(&cortical))
+        }
         _ => None,
     };
     let product_acoustic = compute_product_acoustic_score(acoustic_score.as_ref());
     let multi_score = MultiScoreResult {
         legacy_v1_neural: Some(neural_score),
-        legacy_v1_fused: if config.acoustic_score_fusion_enabled { Some(score) } else { None },
+        legacy_v1_fused: if config.acoustic_score_fusion_enabled {
+            Some(score)
+        } else {
+            None
+        },
         candidate_research_v2,
         product_acoustic,
     };
     let active_score = match config.scoring_profile {
         ScoringProfile::LegacyV1 => score,
-        ScoringProfile::CandidateResearchV2 => multi_score
-            .candidate_research_v2
-            .unwrap_or_else(|| panic!("selected CandidateResearchV2 profile unavailable for goal {}", goal.kind())),
-        ScoringProfile::ProductAcoustic => multi_score
-            .product_acoustic
-            .unwrap_or_else(|| panic!("selected ProductAcoustic profile unavailable for current evaluation inputs")),
+        ScoringProfile::CandidateResearchV2 => {
+            multi_score.candidate_research_v2.unwrap_or_else(|| {
+                panic!(
+                    "selected CandidateResearchV2 profile unavailable for goal {}",
+                    goal.kind()
+                )
+            })
+        }
+        ScoringProfile::ProductAcoustic => multi_score.product_acoustic.unwrap_or_else(|| {
+            panic!("selected ProductAcoustic profile unavailable for current evaluation inputs")
+        }),
     };
     let norm_bands = jr_result.band_powers.normalized();
 
@@ -1403,6 +1612,126 @@ fn evaluate_preset_detailed_internal(
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    fn audio_hash(audio: &RenderedStereoAudio) -> blake3::Hash {
+        let mut bytes = Vec::with_capacity((audio.left.len() + audio.right.len()) * 4);
+        for sample in audio.left.iter().chain(audio.right.iter()) {
+            bytes.extend_from_slice(&sample.to_bits().to_le_bytes());
+        }
+        blake3::hash(&bytes)
+    }
+
+    fn seeded_noise_preset() -> Preset {
+        let mut preset = Preset::default();
+        preset.anchor_volume = 0.0;
+        preset.objects[0].active = true;
+        preset.objects[0].volume = 0.8;
+        preset.objects[0].color = 2;
+        preset
+    }
+
+    #[test]
+    fn seeded_audio_hash_replays_and_changes_with_replicate() {
+        let preset = seeded_noise_preset();
+        let tree = crate::reproducibility::SeedTreeV1::new(42);
+        let first_plan = tree.evaluation(crate::reproducibility::SeedPanel::Direct, 0);
+        let second_plan = tree.evaluation(crate::reproducibility::SeedPanel::Direct, 1);
+        let first = render_preset_stereo_dry_with_seed_plan(&preset, 0.1, Some(first_plan));
+        let replay = render_preset_stereo_dry_with_seed_plan(&preset, 0.1, Some(first_plan));
+        let second = render_preset_stereo_dry_with_seed_plan(&preset, 0.1, Some(second_plan));
+        assert_eq!(audio_hash(&first), audio_hash(&replay));
+        assert_ne!(audio_hash(&first), audio_hash(&second));
+    }
+
+    #[test]
+    fn inactive_object_does_not_shift_existing_seeded_audio_streams() {
+        let preset = seeded_noise_preset();
+        let mut with_inactive_object = preset.clone();
+        with_inactive_object.objects[7].active = false;
+        with_inactive_object.objects[7].volume = 0.93;
+        with_inactive_object.objects[7].color = 0;
+        with_inactive_object.objects[7].bass_mod.kind = 4;
+        let plan = crate::reproducibility::SeedTreeV1::new(42)
+            .evaluation(crate::reproducibility::SeedPanel::Direct, 0);
+        let baseline = render_preset_stereo_dry_with_seed_plan(&preset, 0.1, Some(plan));
+        let changed =
+            render_preset_stereo_dry_with_seed_plan(&with_inactive_object, 0.1, Some(plan));
+        assert_eq!(audio_hash(&baseline), audio_hash(&changed));
+    }
+
+    #[test]
+    fn pure_binaural_tone_audio_does_not_depend_on_replicate() {
+        let mut preset = Preset::default();
+        preset.anchor_volume = 0.0;
+        preset.binaural_beat.enabled = true;
+        preset.binaural_beat.gain_db = -24.0;
+        let tree = crate::reproducibility::SeedTreeV1::new(42);
+        let first = render_preset_stereo_dry_with_seed_plan(
+            &preset,
+            0.1,
+            Some(tree.evaluation(crate::reproducibility::SeedPanel::Direct, 0)),
+        );
+        let second = render_preset_stereo_dry_with_seed_plan(
+            &preset,
+            0.1,
+            Some(tree.evaluation(crate::reproducibility::SeedPanel::Direct, 1)),
+        );
+        assert_eq!(audio_hash(&first), audio_hash(&second));
+
+        let goal = Goal::new(crate::scoring::GoalKind::Focus);
+        let neural_trace = |replicate_index| {
+            let config = SimulationConfig {
+                duration_secs: 2.1,
+                seed_policy: SeedPolicy::domain_separated(
+                    42,
+                    crate::reproducibility::SeedPanel::Direct,
+                    replicate_index,
+                ),
+                ..SimulationConfig::default()
+            };
+            evaluate_preset_detailed(&preset, &goal, &config)
+                .bilateral
+                .combined
+                .eeg
+        };
+        assert_ne!(neural_trace(0), neural_trace(1));
+    }
+
+    #[test]
+    fn seeded_simulation_replays_exactly_and_changes_across_replicates() {
+        let preset = seeded_noise_preset();
+        let goal = Goal::new(crate::scoring::GoalKind::Focus);
+        let base = SimulationConfig {
+            duration_secs: 2.1,
+            ..SimulationConfig::default()
+        };
+        let run = |replicate_index| {
+            let mut config = base.clone();
+            config.seed_policy = SeedPolicy::domain_separated(
+                42,
+                crate::reproducibility::SeedPanel::Direct,
+                replicate_index,
+            );
+            evaluate_preset(&preset, &goal, &config)
+        };
+        let first = run(0);
+        let replay = run(0);
+        let second = run(1);
+        assert_eq!(first.model_signature, replay.model_signature);
+        for (left, right) in [
+            (first.score, replay.score),
+            (first.fhn_firing_rate, replay.fhn_firing_rate),
+            (first.dominant_freq, replay.dominant_freq),
+            (first.delta_power, replay.delta_power),
+            (first.theta_power, replay.theta_power),
+            (first.alpha_power, replay.alpha_power),
+            (first.beta_power, replay.beta_power),
+            (first.gamma_power, replay.gamma_power),
+        ] {
+            assert_eq!(left.to_bits(), right.to_bits());
+        }
+        assert_ne!(first.score.to_bits(), second.score.to_bits());
+    }
 
     // ---------------------------------------------------------------
     // Constants

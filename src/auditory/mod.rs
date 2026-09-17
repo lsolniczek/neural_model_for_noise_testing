@@ -14,5 +14,5 @@ pub use features::{
 };
 pub use gammatone::{BandGroupOutput, GammatoneFilterbank, BAND_LABELS};
 pub use physiological_thalamic_gate::PhysiologicalThalamicGate;
-pub use room_impulse::{apply_rir, generate_rir, EnvironmentParams};
+pub use room_impulse::{apply_rir, generate_rir, generate_rir_seeded, EnvironmentParams};
 pub use thalamic_gate::{estimate_arousal, ArousalEstimate, ArousalModel, ArousalSource, ThalamicGate};

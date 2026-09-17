@@ -13,6 +13,8 @@
 /// - Fujihira & Shiraishi (2015): ASSR reduced under reverberation
 /// - Bidelman & Krishnan (2010): brainstem FFR degraded by reverb
 /// - Carney et al. (2015): computational models always place room before cochlea
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Environment parameters for RIR generation.
@@ -94,6 +96,32 @@ impl EnvironmentParams {
 /// Per Kuttruff (2009): h(t) = noise(t) × exp(-decay_rate × t)
 /// with frequency-dependent shaping via a 3-band EQ.
 pub fn generate_rir(params: &EnvironmentParams, sample_rate: u32) -> Vec<f32> {
+    let mut rng_state = 0xDEAD_BEEF_CAFE_BABEu64;
+    generate_rir_with_noise(params, sample_rate, || {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state as f64 / u64::MAX as f64) * 2.0 - 1.0
+    })
+}
+
+/// Generate the same RIR model with a domain-separated ChaCha12 stream.
+pub fn generate_rir_seeded(
+    params: &EnvironmentParams,
+    sample_rate: u32,
+    seed: [u8; 32],
+) -> Vec<f32> {
+    let mut rng = ChaCha12Rng::from_seed(seed);
+    generate_rir_with_noise(params, sample_rate, || {
+        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0
+    })
+}
+
+fn generate_rir_with_noise(
+    params: &EnvironmentParams,
+    sample_rate: u32,
+    mut noise_sample: impl FnMut() -> f64,
+) -> Vec<f32> {
     if params.is_anechoic() {
         // Passthrough: single-sample impulse
         return vec![1.0];
@@ -134,16 +162,11 @@ pub fn generate_rir(params: &EnvironmentParams, sample_rate: u32) -> Vec<f32> {
     // then apply frequency-dependent EQ via FFT.
     //
     // Step 1: Generate white noise impulse with mid-band exponential decay
-    let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
     for i in 0..rir_len {
         let t = i as f64 / sr;
         // Exponential decay at mid-band rate
         let envelope = (-decay_mid * t).exp();
-        // Simple xorshift noise
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        let noise = (rng_state as f64 / u64::MAX as f64) * 2.0 - 1.0;
+        let noise = noise_sample();
         rir[i] = (envelope * noise) as f32;
     }
 
@@ -349,6 +372,23 @@ mod tests {
                 assert!(v.is_finite(), "RIR[{i}] non-finite for env={env}: {v}");
             }
         }
+    }
+
+    #[test]
+    fn seeded_rir_replays_and_changes_with_seed() {
+        let params = EnvironmentParams::from_index(1);
+        let tree = crate::reproducibility::SeedTreeV1::new(42);
+        let first_seed = tree
+            .evaluation(crate::reproducibility::SeedPanel::Direct, 0)
+            .environment_rir_seed();
+        let second_seed = tree
+            .evaluation(crate::reproducibility::SeedPanel::Direct, 1)
+            .environment_rir_seed();
+        let first = generate_rir_seeded(&params, 8_000, first_seed);
+        let replay = generate_rir_seeded(&params, 8_000, first_seed);
+        let second = generate_rir_seeded(&params, 8_000, second_seed);
+        assert_eq!(first, replay);
+        assert_ne!(first, second);
     }
 
     #[test]

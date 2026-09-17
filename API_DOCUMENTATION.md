@@ -42,6 +42,21 @@ cargo run --release -- <command> [options]
 
 ## CLI Commands
 
+All new stochastic CLI runs use the versioned `nmm_seed_tree_v1` contract.
+`--seed` is the experiment root; typed domains separate DE, dataset genomes,
+search, finalists, direct evaluation, audio, movement, neural columns, room
+impulses and disturbances. Search and finalist panels therefore never reuse a
+stream. Schema-3 exports record the root, panel, replicate index, RNG revisions
+and exact DSP revision. `replay-export` verifies every stored realization and
+its aggregate. Schema-2 exports always replay through the frozen legacy path.
+
+ChaCha streams and seed derivation are portable and exact. The checked-in audio
+hash guarantee is bitwise for the pinned canonical macOS ARM64 build. FFT,
+`libm` and floating-point reductions can differ slightly on another platform;
+cross-platform replay uses the documented numeric tolerance. Replicated scores
+describe simulation variability. They are not biological or clinical
+validation.
+
 ### optimize
 
 Run evolutionary optimization to find the best noise preset for a target brain state.
@@ -59,7 +74,11 @@ cargo run --release -- optimize [OPTIONS]
 | `--population` | int | `30` | DE population size |
 | `--duration` | float | `3.0` | Audio duration per evaluation (seconds) |
 | `--output` | path | auto-generated | Output JSON file path |
-| `--seed` | int | `42` | RNG seed for reproducibility |
+| `--seed` | int | `42` | Root seed. DE, search realizations and finalist realizations use separate derived streams |
+| `--search-replicates` | int | `1` | Search-panel realizations averaged for each DE fitness evaluation |
+| `--finalist-count` | int | `5` | Distinct final-population candidates evaluated on the common finalist panel |
+| `--finalist-replicates` | int | `64` | Common-random-number realizations per finalist; calibrated by the frozen P-06 benchmark |
+| `--indifference-delta` | float | `0.01` | Minimum score advantage required, after simultaneous confidence intervals, for status `unique` |
 | `--de-f` | float | `0.7` | DE mutation scale factor (0.5-0.9 typical) |
 | `--de-cr` | float | `0.8` | DE crossover rate (0.7-0.9 typical) |
 | `--convergence` | float | `0.001` | Stop if fitness std drops below this |
@@ -185,6 +204,8 @@ cargo run --release -- evaluate <PRESET_PATH> [OPTIONS]
 | `--goal` | string | `all` | Goal to evaluate against. Use `all` to test all 9 goals |
 | `--brain-type` | string | `normal` | Brain type profile. Use `all` to test all 5 types |
 | `--duration` | float | `10.0` | Audio duration per evaluation (seconds) |
+| `--seed` | int | `42` | Root seed for the domain-separated direct evaluation panel |
+| `--replicates` | int | `64` | Independent direct-panel realizations; reports mean, sample SD, SE and a 95% t interval |
 | `--assr` | flag | `false` | Enable ASSR transfer function (auditory pathway filtering). Off by default for `evaluate`; always on in the `optimize` pipeline |
 | `--no-assr` | flag | `false` | Explicitly disable ASSR. Mainly useful for symmetry with other `--no-*` flags or scripted matrix comparisons |
 | `--thalamic-gate` | flag | `true` | Enable the heuristic arousal-dependent thalamic gate. As arousal drops, the JR `band_offsets` shift by a fixed Steriade-inspired profile `[100%, 70%, 20%, 0%] × max_shift` across bands 0..3, so low bands move most and band 3 stays unchanged. On by default for `evaluate`; use `--no-thalamic-gate` to disable. Refs: Steriade et al. 1993, Hughes & Crunelli 2005 |
@@ -313,6 +334,8 @@ cargo run --release -- disturb <PRESET_PATH> [OPTIONS]
 | `--spike-duration` | float | `0.05` | Duration of the spike (seconds) |
 | `--spike-gain` | float | `0.8` | Spike amplitude (0.0-1.0) |
 | `--duration` | float | `15.0` | Total simulation duration (seconds) |
+| `--seed` | int | `42` | Root seed for audio, movement, neural, room and disturbance streams |
+| `--replicates` | int | `64` | Independent disturbance-panel realizations in canonical mode |
 | `--assr` | flag | `false` | Enable ASSR in canonical disturbance mode |
 | `--no-assr` | flag | `false` | Disable ASSR in canonical disturbance mode |
 | `--thalamic-gate` | flag | `true` | Enable heuristic thalamic gate in canonical disturbance mode |
@@ -332,7 +355,7 @@ cargo run --release -- disturb <PRESET_PATH> [OPTIONS]
 cargo run --release -- disturb presets/balanced_theta_smr.json
 
 # Explicitly run the historical ablated disturbance path
-cargo run --release -- disturb presets/balanced_theta_smr.json --legacy-ablated
+cargo run --release -- disturb presets/balanced_theta_smr.json --legacy-ablated --replicates 1
 
 # Strong spike, early injection
 cargo run --release -- disturb presets/my_preset.json --spike-gain 1.0 --spike-time 3.0
@@ -440,7 +463,8 @@ cargo run --release -- generate-data [OPTIONS]
 | `--brain-type` | string | `normal` | Brain type (or "all" for all 5) |
 | `--duration` | float | `3.0` | Audio duration per evaluation (seconds). Shorter = faster but noisier |
 | `--threads` | int | `4` | Number of parallel evaluation threads |
-| `--seed` | int | `42` | RNG seed for preset generation |
+| `--seed` | int | `42` | Root seed; genomes and dataset evaluation streams use separate derived domains |
+| `--replicates` | int | `1` | Dataset-panel realizations per genome/goal/profile group |
 | `--phys-gate` | flag | `false` | Evaluate rows with the physiological thalamic gate enabled instead of the heuristic gate-only path |
 
 #### Examples

@@ -1150,7 +1150,7 @@ mod tests {
             sig.numeric_params.cet_c_slow_connectivity.to_bits(),
             30.0f64.to_bits()
         );
-        assert_eq!(sig.numeric_params.jr_stochastic_rng_seed, 42);
+        assert_eq!(sig.numeric_params.jr_stochastic_rng_seed, Some(42));
         assert_eq!(sig.numeric_params.jr_v_max.to_bits(), 5.0f64.to_bits());
         assert_eq!(
             sig.numeric_params.fhn_spike_threshold.to_bits(),

@@ -21,6 +21,9 @@
 /// 6-state system (y3 stays at zero, EEG = y1 - y2).
 use crate::brain_type::{BandModelType, BilateralParams, TonotopicParams};
 use crate::neural::wilson_cowan::{WilsonCowanModel, DEFAULT_ADAPTIVE_ENTRAINMENT_RANGE_HZ};
+use crate::reproducibility::{EvaluationSeedPlan, Hemisphere};
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
@@ -192,8 +195,10 @@ pub struct JansenRitModel {
     /// breaking the deterministic alpha attractor.
     /// 0.0 = deterministic (default). Typical: 5.0-30.0 pulses/s.
     pub stochastic_sigma: f64,
-    /// RNG state for stochastic noise (simple xorshift64 for reproducibility).
+    /// Frozen schema-2 RNG state. New domain-separated runs use
+    /// `stochastic_chacha` and never advance this legacy stream.
     stochastic_rng: u64,
+    stochastic_chacha: Option<ChaCha12Rng>,
     // ── Slow GABA_B inhibitory population (Priority 13b — CET) ──────────
     //
     // The Wendling 4-population JR has two inhibitory populations but BOTH
@@ -295,6 +300,7 @@ impl JansenRitModel {
             habituation_recovery: 0.0,
             stochastic_sigma: 0.0,
             stochastic_rng: 42,
+            stochastic_chacha: None,
             // Slow GABA_B (CET 13b) — disabled by default → bitwise regression safe.
             b_slow_gain: 0.0,
             b_slow_rate: 0.0,
@@ -338,6 +344,7 @@ impl JansenRitModel {
             habituation_recovery: 0.0,
             stochastic_sigma: 0.0,
             stochastic_rng: 42,
+            stochastic_chacha: None,
             b_slow_gain: 0.0,
             b_slow_rate: 0.0,
             c_slow: 0.0,
@@ -384,6 +391,7 @@ impl JansenRitModel {
             habituation_recovery: 0.0,
             stochastic_sigma: 0.0,
             stochastic_rng: 42,
+            stochastic_chacha: None,
             b_slow_gain: 0.0,
             b_slow_rate: 0.0,
             c_slow: 0.0,
@@ -485,6 +493,11 @@ impl JansenRitModel {
         self.c_slow = c;
     }
 
+    /// Select the schema-3 stochastic stream for this exact neural column.
+    pub fn set_stochastic_seed_v1(&mut self, seed: [u8; 32]) {
+        self.stochastic_chacha = Some(ChaCha12Rng::from_seed(seed));
+    }
+
     /// Slow GABA_B inhibitory population derivatives.
     /// Driven by sigmoid(v_pyr) where v_pyr is the pyramidal membrane potential
     /// WITHOUT y_slow subtraction. The GABA_B effect is implemented as gain
@@ -518,7 +531,7 @@ impl JansenRitModel {
         ]
     }
 
-    /// Generate approximate Gaussian noise using Box-Muller from xorshift64.
+    /// Generate Gaussian noise using the version selected by the seed policy.
     /// Per Ableidinger et al. (2017): stochastic input breaks the mean-field
     /// assumption, enabling theta/delta oscillations.
     #[inline]
@@ -526,20 +539,28 @@ impl JansenRitModel {
         if self.stochastic_sigma == 0.0 {
             return 0.0;
         }
-        // xorshift64 for uniform [0, 1)
-        self.stochastic_rng ^= self.stochastic_rng << 13;
-        self.stochastic_rng ^= self.stochastic_rng >> 7;
-        self.stochastic_rng ^= self.stochastic_rng << 17;
-        let u1 = (self.stochastic_rng as f64) / (u64::MAX as f64);
+        let (u1, u2) = if let Some(rng) = self.stochastic_chacha.as_mut() {
+            const TWO_POW_53: f64 = 9_007_199_254_740_992.0;
+            let uniform_open = |rng: &mut ChaCha12Rng| {
+                let upper_53 = rng.next_u64() >> 11;
+                (upper_53 as f64 + 0.5) / TWO_POW_53
+            };
+            (uniform_open(rng), uniform_open(rng))
+        } else {
+            // Frozen schema-2 xorshift64 path.
+            self.stochastic_rng ^= self.stochastic_rng << 13;
+            self.stochastic_rng ^= self.stochastic_rng >> 7;
+            self.stochastic_rng ^= self.stochastic_rng << 17;
+            let u1 = (self.stochastic_rng as f64) / (u64::MAX as f64);
 
-        self.stochastic_rng ^= self.stochastic_rng << 13;
-        self.stochastic_rng ^= self.stochastic_rng >> 7;
-        self.stochastic_rng ^= self.stochastic_rng << 17;
-        let u2 = (self.stochastic_rng as f64) / (u64::MAX as f64);
+            self.stochastic_rng ^= self.stochastic_rng << 13;
+            self.stochastic_rng ^= self.stochastic_rng >> 7;
+            self.stochastic_rng ^= self.stochastic_rng << 17;
+            let u2 = (self.stochastic_rng as f64) / (u64::MAX as f64);
+            (u1.max(1e-15), u2)
+        };
 
-        // Box-Muller transform
-        let u1_safe = u1.max(1e-15);
-        let gauss = (-2.0 * u1_safe.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let gauss = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
         gauss * self.stochastic_sigma
     }
 
@@ -1207,6 +1228,48 @@ pub fn simulate_bilateral(
     // 0.5 = default (moderate arousal, no scaling applied).
     arousal: f64,
 ) -> BilateralResult {
+    simulate_bilateral_with_seed_plan(
+        left_bands,
+        right_bands,
+        left_energy,
+        right_energy,
+        bilateral,
+        c,
+        input_scale,
+        sample_rate,
+        fast_inhib,
+        v0,
+        habituation_rate,
+        habituation_recovery,
+        stochastic_sigma,
+        b_slow_gain,
+        b_slow_rate,
+        c_slow,
+        arousal,
+        None,
+    )
+}
+
+pub(crate) fn simulate_bilateral_with_seed_plan(
+    left_bands: &[Vec<f64>; 4],
+    right_bands: &[Vec<f64>; 4],
+    left_energy: &[f64; 4],
+    right_energy: &[f64; 4],
+    bilateral: &BilateralParams,
+    c: f64,
+    input_scale: f64,
+    sample_rate: f64,
+    fast_inhib: &FastInhibParams,
+    v0: f64,
+    habituation_rate: f64,
+    habituation_recovery: f64,
+    stochastic_sigma: f64,
+    b_slow_gain: f64,
+    b_slow_rate: f64,
+    c_slow: f64,
+    arousal: f64,
+    seed_plan: Option<EvaluationSeedPlan>,
+) -> BilateralResult {
     let n = left_bands[0].len();
     let contra = bilateral.contralateral_ratio;
     let ipsi = 1.0 - contra;
@@ -1260,6 +1323,8 @@ pub fn simulate_bilateral(
         b_slow_rate,
         c_slow,
         arousal,
+        seed_plan,
+        Hemisphere::Right,
     );
     let (lh_eeg, lh_y3) = run_hemisphere_tonotopic(
         &lh_bands,
@@ -1277,6 +1342,8 @@ pub fn simulate_bilateral(
         b_slow_rate,
         c_slow,
         arousal,
+        seed_plan,
+        Hemisphere::Left,
     );
 
     // Phase 2: Apply effective net-inhibitory callosal coupling.
@@ -1386,6 +1453,8 @@ fn run_hemisphere_tonotopic(
     b_slow_rate: f64,
     c_slow: f64,
     arousal: f64,
+    seed_plan: Option<EvaluationSeedPlan>,
+    hemisphere: Hemisphere,
 ) -> (Vec<f64>, Vec<f64>) {
     let n = bands[0].len();
     let mut eeg = vec![0.0_f64; n];
@@ -1440,6 +1509,9 @@ fn run_hemisphere_tonotopic(
                 jr.habituation_rate = habituation_rate;
                 jr.habituation_recovery = habituation_recovery;
                 jr.stochastic_sigma = stochastic_sigma;
+                if let Some(plan) = seed_plan {
+                    jr.set_stochastic_seed_v1(plan.neural_seed(hemisphere, b as u8));
+                }
                 jr.arousal = arousal;
                 // CET 13b — slow GABA_B (default 0.0 → no-op).
                 jr.set_slow_inhib(b_slow_gain, b_slow_rate, c_slow);
