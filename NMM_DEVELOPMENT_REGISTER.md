@@ -1,7 +1,7 @@
 # NMM — kanoniczny rejestr rozwoju
 
 **Stan na:** 2026-09-17
-**Przejrzana rewizja bazowa NMM:** `53f4808`
+**Przejrzana rewizja bazowa NMM:** `99e58bc67d0b9a141becf524386fddc1b1d018ae`
 **Rola dokumentu:** jedno miejsce, które mówi, co naprawdę jest w kodzie i co nadal trzeba zrobić.
 
 Ten rejestr łączy:
@@ -13,6 +13,7 @@ Ten rejestr łączy:
 - plany Stage 8 i Stage 8d,
 - review kodu wykonane 2026-09-03,
 - audyt RNG i research P-06 wykonane 2026-09-04–05,
+- implementację i pełny odbiór P-06 wykonane 2026-09-17,
 - oraz review kolejności prac wykonane 2026-09-06.
 
 Stare dokumenty nadal wyjaśniają historię i szczegóły decyzji. Ten plik jest nadrzędnym źródłem **aktualnego statusu**.
@@ -48,12 +49,12 @@ Prosty słownik:
 
 | Obszar | Co już mamy | Najważniejszy brak |
 |---|---|---|
-| Pipeline | Zielone testy, jedna ścieżka oceny, wersjonowana sygnatura i replay eksportu | Seed nie steruje jeszcze całą symulacją |
+| Pipeline | Zielone testy, schema 3, wersjonowane drzewo seedów, replikowana ocena i replay | Bitowa gwarancja jest ograniczona do kanonicznego macOS ARM64 |
 | Dźwięk | Renderer binauralny, pomieszczenie, gammatone, modulatory | Brak stałej kalibracji poziomu dźwięku do wejścia neuronalnego |
 | Legacy NMM | JR, WC, FHN, półkule, habituacja, szum | Nośna dźwięku nadal wybiera rodzinę rytmu korowego |
 | Candidate V2 | Oddzielne cechy nośnej i modulacji, diagnostyka | To jeszcze algebraiczny szkic, nie pełny model dynamiczny |
 | Cele | Dziewięć opisanych celów, jawne etykiety dowodów | Wagi i idealne pasma są głównie ręcznymi założeniami |
-| Optymalizacja | DE, etapy, ograniczenia, surrogate jako filtr | Kategorie są traktowane jak liczby, wynik nie jest sprawdzany na wielu realizacjach |
+| Optymalizacja | DE, etapy, ograniczenia, surrogate jako filtr i CRN finalistów | Kategorie są nadal traktowane jak liczby, a kontrakt surrogate wymaga naprawy |
 | Walidacja | Schemat danych, podział po uczestnikach, benchmarki i raporty | Brak pełnej walidacji na rzeczywistych danych uczestników |
 
 ## Indeks zadań
@@ -76,7 +77,7 @@ Prosty słownik:
 | P-03 | `planned` | P0 | Rozdzielenie nośnej od modulacji |
 | P-04 | `planned` | P0 | Dynamiczny CandidateV2 |
 | P-05 | `planned` | P1 | ASSR z faktycznie wyrenderowanego audio |
-| P-06 | `planned` | P0 | Seedy i odporność na losowość |
+| P-06 | `implemented` | P0 | Seedy i odporność na losowość |
 | P-07 | `planned` | P1 | Pobudzenie z niepewnością |
 | P-08 | `planned` | P0 | Nowy, wielowymiarowy scoring |
 | P-09 | `planned` | P1 | Ciągłe profile osób |
@@ -132,7 +133,7 @@ Prosty słownik:
 
 **Prace naukowe i metodyczne:** [Sandve et al. 2013 — zasady odtwarzalnych analiz obliczeniowych](https://doi.org/10.1371/journal.pcbi.1003285), [Wilson et al. 2014 — dobre praktyki oprogramowania naukowego](https://doi.org/10.1371/journal.pbio.1001745).
 
-**Znane ograniczenie:** Metadane `reproducibility_seed` nie sterują jeszcze całym losowym przebiegiem; obsługuje to P-06.
+**Stan po P-06:** `run_seed` steruje objętymi kontraktem strumieniami przez schema 3; schema 2 pozostaje odtwarzana jako jawny `LegacyFixedV1`.
 
 ## I-02. Słuchowe przygotowanie dźwięku
 
@@ -217,7 +218,7 @@ Prosty słownik:
 
 **Prace naukowe:** [Buckwar, Ableidinger i Hinterleitner 2017 — stochastyczny Jansen–Rit](https://doi.org/10.1186/s13408-017-0046-4), [Tsodyks i Markram 1997 — depresja synaptyczna](https://pubmed.ncbi.nlm.nih.gov/9012851/).
 
-**Znane ograniczenie:** Instancje JR używają tego samego prywatnego seedu, a komentarze nie zgadzają się z miejscem podania szumu. Naprawę opisują P-06 i P-16.
+**Stan po P-06:** Instancje JR mają rozdzielone, adresowane strumienie dla półkuli i pasma. P-06 nie zatwierdza jednak dyskretyzacji stochastic JR ani parametrów szumu; ewentualna promocja wymaga osobnej walidacji numerycznej i P-12.
 
 ## I-07. Diagnostyka okresowa/aperiodyczna i cechy CandidateV2
 
@@ -320,6 +321,47 @@ Prosty słownik:
 
 **Dowód odbioru:** `cargo test --locked --all-targets` — lib 517/517, bridge ASSR 1/1 i główne binarium 679/679, bez `RUST_MIN_STACK`; DSP core 759/759 oraz jawny test stosu 2 MiB; `python3 -m unittest discover -s tests` — 64/64; integralność historycznego baseline — poprawna. Testy pominięte są wyłącznie jawnie oznaczonymi testami eksploracyjnymi/drukującymi.
 
+## P-06. Prawdziwe seedy i odporność na losowość
+
+**Status:** `implemented`
+**Priorytet:** P0
+**Kod:** [`src/reproducibility.rs`](src/reproducibility.rs), [`src/replicated.rs`](src/replicated.rs), [`src/pipeline.rs`](src/pipeline.rs), [`src/export.rs`](src/export.rs), [`src/bin/p06_replication_benchmark.rs`](src/bin/p06_replication_benchmark.rs)
+**Plan i pełny odbiór:** [`P06_SEEDS_AND_ROBUSTNESS_PLAN.md`](P06_SEEDS_AND_ROBUSTNESS_PLAN.md)
+
+**Problem:** Stałe, współdzielone seedy JR i osobne ukryte generatory DSP, ruchu,
+pomieszczenia oraz zakłóceń nie podlegały jednemu kontraktowi. Seed DE był
+mieszany z seedem symulacji, a wybór najlepszego presetu opierał się na jednej
+realizacji.
+
+**Co zrobiono:** `SeedTreeV1` wyprowadza przez BLAKE3 osobne, typowane domeny,
+a objęte kontraktem strumienie używają przypiętego `ChaCha12Rng`. Schema 3
+zapisuje regułę seedowania i rewizje RNG, natomiast schema 2 jest odtwarzana
+wyłącznie jako `LegacyFixedV1`. DSP, ruch, JR, pomieszczenie, zakłócenia,
+genomy datasetu i optymalizator otrzymują adresowane strumienie. Replikowana
+ocena raportuje wynik per seed, średnią, sample SD, SE oraz 95% CI. Finaliści
+korzystają ze wspólnego panelu CRN rozłącznego z wyszukiwaniem i mogą zwrócić
+`unique`, `inconclusive` albo `insufficient_distinct_candidates`.
+
+**Benchmark:** Wersjonowany panel obejmuje pięć presetów, pięć profili,
+dziewięć celów i 64 realizacje referencyjne. Żaden panel do 32 realizacji nie
+spełnił wszystkich progów: dla `N=32` mediana Spearmana i zgodność top-1
+przeszły, lecz 95. percentyl błędu średniej wyniósł `0.0139268243` przy limicie
+`0.01`. Domyślne `evaluate`, `disturb` i ocena finalistów używają więc 64
+realizacji; `generate-data` zachowuje domyślnie jedną realizację.
+
+**Dowód odbioru:** DSP `v0.4.0` jest przypięty do
+`81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06`. Implementacja NMM jest w
+`68ec6b0bc3e4a3c0e3bab853e8a2d06e38d3a66c` i
+`99e58bc67d0b9a141becf524386fddc1b1d018ae`. Pełne testy DSP i NMM,
+discovery Pythona, historyczny baseline oraz
+[GitHub Actions run 6, attempt 2](https://github.com/lsolniczek/neural_model_for_noise_testing/actions/runs/35168103760)
+przeszły. Manifest, surowe 14 400 wierszy i podsumowanie są w
+[`benchmarks/p06`](benchmarks/p06/README.md).
+
+**Granica interpretacji:** P-06 zapewnia reprodukcję i uczciwsze porównanie
+symulacji. Nie potwierdza biologicznej trafności modelu ani wpływu presetu na
+człowieka; ten dowód należy do P-12.
+
 ---
 
 # Zadania `planned`
@@ -412,34 +454,6 @@ Prosty słownik:
 **Prace naukowe:** [Yin et al. 2011](https://pubmed.ncbi.nlm.nih.gov/21148093/), [Ross et al. 2003](https://pubmed.ncbi.nlm.nih.gov/14644459/), [Johnson et al. 2024](https://www.nature.com/articles/s41598-024-66697-4).
 
 **Kryteria odbioru:** Każdy typ modulatora może być wykryty z audio; dwa rytmy są widoczne osobno; amplituda i stabilność fazy nie są jednym wynikiem; testy kontrolne bez modulacji nie tworzą sztucznego ASSR.
-
-## P-06. Prawdziwe seedy i odporność na losowość
-
-**Status:** `planned`
-**Priorytet:** P0
-**Dotyczy:** `update_model.md` Priority 7, Audit Stage 0, nowe review RNG
-**Plan wykonawczy:** [`P06_SEEDS_AND_ROBUSTNESS_PLAN.md`](P06_SEEDS_AND_ROBUSTNESS_PLAN.md)
-
-**Bieżąca kolejność:** Najpierw dokończenie rozpoczętych prac nad seedami w DSP,
-następnie integracja i pełny odbiór P-06 w NMM. Status pozostaje `planned`
-do spełnienia kryteriów odbioru; nie oznacza to, że prace nie zostały rozpoczęte.
-
-**Problem:** Każdy JR startuje z seedem `42`, więc różne kolumny mogą mieć sztucznie podobny szum. DSP, random walk, zakłócenia i losowa odpowiedź pomieszczenia mają kolejne własne stałe seedy. `--seed` jest głównie metadanymi, a seed algorytmu DE jest pomieszany z seedem symulacji. „Najlepszy” preset jest oceniany na jednej realizacji.
-
-**Pomysł na rozwiązanie:**
-
-1. Jeden jawny seed uruchomienia ma sterować audio, ruchem, neuronami, odpowiedzią pomieszczenia, zakłóceniami i wyszukiwaniem, ale przez rozdzielone domeny.
-2. Z wersjonowanego drzewa deterministycznie wyprowadzać osobne strumienie dla DSP, obiektu, ruchu, półkuli, pasma i kolumny.
-3. Zastąpić produkcyjny xorshift i nieprzenośny `StdRng` jawnym, przypiętym `ChaCha12Rng`; regułę wyprowadzania i RNG zapisać w sygnaturze schema 3.
-4. Porównywać finalistów na wspólnym, rozłącznym od wyszukiwania panelu seedów (common random numbers).
-5. Raportować wyniki per-seed, średnią, sample SD, SE i 95% CI. Gdy różnicy większej od jawnego `delta` nie da się wykazać, zwracać `inconclusive` zamiast sztucznego zwycięzcy.
-6. Domyślną liczbę realizacji wybrać w wersjonowanym benchmarku względem panelu referencyjnego 64 seedów.
-
-**Dlaczego warto:** Usuwa sztuczną synchronizację i wybiera preset, który działa stabilnie, a nie tylko miał szczęście w jednej symulacji.
-
-**Prace naukowe i metodyczne:** [Ableidinger, Buckwar i Hinterleitner 2017](https://doi.org/10.1186/s13408-017-0046-4), [Salmon et al. 2011](https://doi.org/10.1145/2063384.2063405), [Nelson i Matejcik 1995](https://doi.org/10.1287/mnsc.41.12.1935), [Monks et al. 2019](https://doi.org/10.1080/17477778.2018.1442155), [Sandve et al. 2013](https://doi.org/10.1371/journal.pcbi.1003285).
-
-**Kryteria odbioru:** Obowiązuje pełne Definition of Done z planu P-06: kompletny inwentarz RNG; known-answer tests drzewa seedów; ten sam seed daje ten sam hash audio, wynik i replay; półkule, pasma i obiekty nie współdzielą strumieni; wielowątkowość nie zmienia payloadu; finaliści mają wspólny panel seedów, pełne statystyki i uczciwy status `unique`/`inconclusive`; liczba realizacji wynika z benchmarku 64-seedowego; testy NMM i DSP oraz całe CI są zielone.
 
 ## P-07. Pobudzenie jako zmienna z niepewnością
 
@@ -675,8 +689,8 @@ do spełnienia kryteriów odbioru; nie oznacza to, że prace nie zostały rozpoc
 
 # Kolejność realizacji
 
-**Aktualny priorytet:** dokończyć rozpoczęte seedowanie DSP, a następnie P-06
-w NMM. Pozostałe prace rozpoczynamy po zamknięciu tego etapu.
+**Aktualny priorytet:** Faza 0 jest zamknięta. Następne jest P-10 w zakresie
+naprawczym, potem P-11 i infrastruktura P-12 zgodnie z Fazą A.
 
 Dalsza kolejność rozdziela pilne naprawy, przygotowanie walidacji i rozwój modelu.
 Zadania P-10, P-11, P-12 i P-13 obejmują kilka etapów, dlatego pojawiają się
@@ -687,41 +701,29 @@ P-12 zaczyna się od protokołu i danych rozwojowych. Wyniki na tych danych
 kierują rozbudową modelu; zamknięty holdout służy dopiero do końcowej oceny
 zamrożonego wariantu. P-16 jest utrzymywane na bieżąco we wszystkich fazach.
 
-## Faza 0 — dokończenie seedów w DSP i NMM (bieżąca praca)
+## Faza 0 — seedy w DSP i NMM (`completed`)
 
-Punktem odniesienia jest P-01 — zielony baseline (`implemented`).
+Punktem odniesienia był P-01 — zielony baseline (`implemented`). Etap został
+zamknięty 2026-09-17:
 
-1. Dokończyć rozpoczęte zmiany DSP zgodnie z
-   [`DSP_SEEDED_ENGINE_API_PLAN.md`](DSP_SEEDED_ENGINE_API_PLAN.md), wykonać
-   odbiór i zapisać konkretny commit/tag z finalnym API seedów.
-2. Uzgodnić plan P-06 z wydanym API DSP i przypiąć tę rewizję jako zależność NMM.
-3. Dokończyć P-06 w NMM: doprowadzenie seedów do wszystkich objętych kontraktem
-   warstw, rozdzielenie strumieni, sygnatura i replay, ocena wielorealizacyjna
-   oraz porównanie finalistów.
-4. Wykonać pełny odbiór P-06, w tym benchmark liczby realizacji dla jawnie
-   zapisanej bieżącej konfiguracji modelu, i zaktualizować status wraz z dowodami.
+1. DSP wydał seedowane API jako `v0.4.0` na commicie
+   `81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06`; NMM przypina pełny SHA.
+2. Presety Tone zostały przeniesione na globalne DSP `binaural_beat`, a stare
+   presety są migrowane podczas wczytywania.
+3. NMM wdrożył schema 3, `SeedTreeV1`, adresowane strumienie wszystkich warstw,
+   replikowaną ocenę, CRN finalistów, dataset i replay agregatów.
+4. Zamrożony benchmark 64-seedowy wybrał domyślne 64 realizacje i zapisał
+   manifest, raw CSV oraz podsumowanie.
+5. Pełne testy DSP i NMM, Python, historyczny baseline oraz GitHub Actions na
+   macOS ARM64 przeszły.
 
-**Warunek przejścia:** DSP i P-06 NMM spełniają swoje kryteria odbioru.
-Naprawy konieczne do ich spełnienia należą do tego etapu; pozostałe naprawy
-DE, surrogate, kalibracja SPL i przygotowanie badań nie są nowymi warunkami
-rozpoczęcia ani zamknięcia seedowania. Późniejsze zmiany modelu wymagają
-ponowienia odpowiednich benchmarków, a nie odkładania obecnego odbioru P-06.
+**Dowody:** commity NMM `68ec6b0` i `99e58bc`, plan odbioru
+[`P06_SEEDS_AND_ROBUSTNESS_PLAN.md`](P06_SEEDS_AND_ROBUSTNESS_PLAN.md) oraz
+[CI run 6, attempt 2](https://github.com/lsolniczek/neural_model_for_noise_testing/actions/runs/35168103760).
 
-**Stan bieżący:** DSP `v0.4.0` jest wydany na commicie
-`81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06` i przypięty w NMM po pełnym SHA.
-Pełny odbiór przeszedł 7/7, w tym niezależny replay 1 344 renderów, obie pary
-CPU bez retry, historyczne bramy CPU przy limicie 3%, alokacje, Rust,
-Swift/XCFramework i WASM/TypeScript. Integracja presetów NMM została wykonana:
-nowe presety używają
-globalnego `binaural_beat`, a legacy `source_kind=1` jest migrowane przy
-wczytaniu. Pierwszy aktywny i słyszalny Tone wygrywa; kolejne są ignorowane z
-ostrzeżeniem; częstotliwość różnicowa pochodzi kolejno z okresowego modulatora
-satellite, bass albo z wartości 6 Hz; gain wynosi -40 dB, a niższa częstotliwość
-trafia do lewego ucha. Po wyznaczeniu globalnej pary dawne sloty Tone są
-wyłączane i normalizowane przed ponownym zapisem, więc nie wracają jako obiekty
-szumowe po kolejnym wczytaniu. Nowy genom ma 211 pól, a decoder przyjmuje również stary
-genom 230-polowy. Artefakty surrogate wytrenowane dla 230-polowego genomu są
-celowo odrzucane przez kontrolę wymiaru i wymagają ponownego treningu.
+Późniejsze zmiany scoringu, skali wejścia, czasu analizy, modelu
+stochastycznego, drzewa seedów, RNG, fixture'ów lub DSP wymagają ponowienia
+odpowiednich testów i benchmarku P-06.
 
 ## Faza A — pilne naprawy i przygotowanie sprawdzianu
 
@@ -805,7 +807,7 @@ w fazie E ponownie przechodzą właściwe sprawdziany P-12 przed promocją.
 
 # Zasada wyboru „najlepszego presetu” do czasu wykonania planu
 
-Do czasu ukończenia P-02, P-03, P-06, P-08, P-10 i P-12 wynik należy opisywać tak:
+Do czasu ukończenia P-02, P-03, P-08, P-10 i P-12 wynik należy opisywać tak:
 
 > Najlepszy preset znaleziony dla jawnie podanej wersji symulatora, celu, profilu, konfiguracji i seedów.
 

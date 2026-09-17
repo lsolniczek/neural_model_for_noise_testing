@@ -1,18 +1,23 @@
 # P-06 — prawdziwe seedy i odporność wyniku na losowość
 
-**Status:** `planned`
+**Status:** `implemented`
 **Priorytet:** P0
 **Zależność wejściowa:** P-01 (`implemented`)
-**Następne zadania:** P-02, następnie P-10
+**Następne zadania:** P-10 (zakres naprawczy), następnie P-11 i infrastruktura P-12
 **Źródło statusu:** [`NMM_DEVELOPMENT_REGISTER.md`](NMM_DEVELOPMENT_REGISTER.md)
-**Zależność DSP przed implementacją:** [`DSP_SEEDED_ENGINE_API_PLAN.md`](DSP_SEEDED_ENGINE_API_PLAN.md)
+**Zależność DSP:** [`DSP_SEEDED_ENGINE_API_PLAN.md`](DSP_SEEDED_ENGINE_API_PLAN.md)
 
 Zmiany seedów wewnątrz DSP zostały odebrane jako osobne zadanie. Wydanie DSP
 `v0.4.0` i zdalny `master` wskazują commit
 `81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06`; pełna walidacja przeszła 7/7,
 w tym niezależny replay 1 344 renderów. NMM przypina dokładnie ten commit.
-P-06 pozostaje w statusie `planned`, ponieważ implementacja rozdzielenia
-seedów wewnątrz NMM nie została jeszcze rozpoczęta.
+
+Implementację NMM zamykają commity `68ec6b0bc3e4a3c0e3bab853e8a2d06e38d3a66c`
+i `99e58bc67d0b9a141becf524386fddc1b1d018ae`. Wersjonowane drzewo seedów,
+replikowana ocena, CRN finalistów, replay schema 3 i benchmark są w kodzie.
+GitHub Actions run 6, attempt 2 przeszedł oba joby, w tym pełne testy Rust na
+macOS ARM64. Domyślna liczba realizacji wynosi 64 zgodnie z zamrożonym
+benchmarkiem, ponieważ żaden panel do 32 nie spełnił wszystkich progów.
 
 ## 1. Cel
 
@@ -31,9 +36,9 @@ Chcemy uzyskać cztery własności:
 P-06 zapewnia powtarzalność obliczeń i uczciwsze porównanie symulacji. Nie jest
 dowodem, że NMM trafnie przewiduje odpowiedź człowieka; to wymaga P-12.
 
-## 2. Co jest dziś niepoprawne lub niepełne
+## 2. Stan wejściowy przed P-06
 
-| Miejsce | Stan obecny | Skutek |
+| Miejsce | Stan przed P-06 | Skutek |
 |---|---|---|
 | `SimulationConfig.reproducibility_seed` | Seed jest opisany jako metadata-only | `--seed` nie steruje oceną |
 | `NumericParamsSnapshot` | Zawsze zapisuje `jr_stochastic_rng_seed = 42` | Raport sugeruje jeden wspólny seed JR |
@@ -47,9 +52,10 @@ dowodem, że NMM trafnie przewiduje odpowiedź człowieka; to wymaga P-12.
 | CSV | `seed_eval`, `score_std` i `repeats` już istnieją, lecz często są puste lub mają `repeats=1` | Schemat obiecuje więcej niż wykonuje kod |
 | `disturb` | Lewe i prawe impulsy korzystają ze stałych seedów | Seed eksperymentu nie obejmuje zakłócenia |
 
-Istniejący xorshift64 nie jest dobrym docelowym RNG do badań symulacyjnych.
-Proste generatory xorshift mają znane słabości statystyczne, a stan zerowy jest
-stanem zablokowanym. P-06 zastąpi go w ścieżkach NMM jawnym, wersjonowanym RNG.
+Xorshift64 ze stanu wejściowego nie był dobrym docelowym RNG do badań
+symulacyjnych. Proste generatory xorshift mają znane słabości statystyczne, a
+stan zerowy jest stanem zablokowanym. Implementacja zastąpiła go w ścieżkach
+NMM jawnym, wersjonowanym RNG.
 
 ## 3. Wnioski z researchu
 
@@ -368,7 +374,7 @@ jest sortowana po stabilnym kluczu, nie po kolejności zakończenia wątków.
 Timestamp pozostaje metadanymi operacyjnymi i nie uczestniczy w porównaniu
 reprodukcji payloadu naukowego.
 
-## 7. Plan implementacji
+## 7. Zrealizowany plan implementacji
 
 ### Etap 0 — zamrożenie stanu wejściowego
 
@@ -470,79 +476,96 @@ warunki są spełnione.
 
 ### A. Kontrakt i kompletność
 
-- [ ] Inwentarz obejmuje każdy produkcyjny RNG w NMM i DSP; każde pominięcie ma
+- [x] Inwentarz obejmuje każdy produkcyjny RNG w NMM i DSP; każde pominięcie ma
       jawną decyzję „stały parametr algorytmu” wraz z uzasadnieniem.
-- [ ] `--seed` steruje DSP noise/modulatorami, random walk, stochastic JR i
+- [x] `--seed` steruje DSP noise/modulatorami, random walk, stochastic JR i
       disturb oraz losową odpowiedzią pomieszczenia; nie istnieje już komentarz
       metadata-only.
-- [ ] Seed DE i seed ocenianego zjawiska należą do różnych domen.
-- [ ] W nowych ścieżkach nie ma `StdRng`, `thread_rng`, prostego xorshift64 ani
+- [x] Seed DE i seed ocenianego zjawiska należą do różnych domen.
+- [x] W nowych ścieżkach nie ma `StdRng`, `thread_rng`, prostego xorshift64 ani
       seeda tworzonego jako `root + index`.
-- [ ] Wszystkie wersje RNG i reguła wyprowadzania są w `ModelSignature` schema 3.
+- [x] Wszystkie wersje RNG i reguła wyprowadzania są w `ModelSignature` schema 3.
 
 ### B. Testy deterministyczne
 
-- [ ] Known-answer tests blokują dokładne wyniki `SeedTreeV1` dla seedów
+- [x] Known-answer tests blokują dokładne wyniki `SeedTreeV1` dla seedów
       `0`, `1`, `42` i `u64::MAX`.
-- [ ] Ten sam seed i preset dają bitowo identyczny hash audio na kanonicznym
+- [x] Ten sam seed i preset dają bitowo identyczny hash audio na kanonicznym
       macOS ARM64.
-- [ ] Ten sam seed daje dokładnie ten sam `SimulationResult` i agregat.
-- [ ] Inny numer realizacji zmienia hash audio dla presetu szumowego, tor
+- [x] Ten sam seed daje dokładnie ten sam `SimulationResult` i agregat.
+- [x] Inny numer realizacji zmienia hash audio dla presetu szumowego, tor
       random walk, odpowiedź pomieszczenia i ślad JR przy `sigma > 0`.
-- [ ] Inny numer realizacji nie zmienia audio presetu `p06_tone_control`, ale
+- [x] Inny numer realizacji nie zmienia audio presetu `p06_tone_control`, ale
       zmienia jego ślad JR przy `sigma > 0`.
-- [ ] Osiem adresów `(2 półkule × 4 pasma)` jest różnych i nie współdzieli stanu.
-- [ ] Dodanie nieaktywnego obiektu ani zmiana liczby wątków nie zmienia
+- [x] Osiem adresów `(2 półkule × 4 pasma)` jest różnych i nie współdzieli stanu.
+- [x] Dodanie nieaktywnego obiektu ani zmiana liczby wątków nie zmienia
       istniejących strumieni.
-- [ ] DE z tym samym `run_seed` odtwarza dokładną trajektorię po przejściu na
+- [x] DE z tym samym `run_seed` odtwarza dokładną trajektorię po przejściu na
       jawny `ChaCha12Rng`.
-- [ ] Payload datasetu dla `threads=1` i `threads=4` jest identyczny po
+- [x] Payload datasetu dla `threads=1` i `threads=4` jest identyczny po
       pominięciu timestampów operacyjnych.
 
 ### C. Statystyka i uczciwy wynik
 
-- [ ] Testy agregatora potwierdzają mean, sample SD (`n-1`), SE i 95% CI na
+- [x] Testy agregatora potwierdzają mean, sample SD (`n-1`), SE i 95% CI na
       ręcznie policzonym zestawie.
-- [ ] Test znanego wyniku potwierdza kwantyl t, liczbę porównań
+- [x] Test znanego wyniku potwierdza kwantyl t, liczbę porównań
       `K*(K-1)/2` i wzór przedziału Bonferroniego.
-- [ ] Dla `n=1` niepewność ma wartość `null`, a nie zero.
-- [ ] Każdy finalista otrzymuje dokładnie ten sam panel seedów CRN.
-- [ ] Panel finalistów jest rozłączny z panelem użytym podczas wyszukiwania.
-- [ ] Test syntetyczny rozpoznaje jednoznacznego zwycięzcę.
-- [ ] Test syntetyczny z małą różnicą zwraca `inconclusive`, nie fałszywe
+- [x] Dla `n=1` niepewność ma wartość `null`, a nie zero.
+- [x] Każdy finalista otrzymuje dokładnie ten sam panel seedów CRN.
+- [x] Panel finalistów jest rozłączny z panelem użytym podczas wyszukiwania.
+- [x] Test syntetyczny rozpoznaje jednoznacznego zwycięzcę.
+- [x] Test syntetyczny z małą różnicą zwraca `inconclusive`, nie fałszywe
       „best”.
-- [ ] Jeden kanoniczny kandydat po deduplikacji zwraca
+- [x] Jeden kanoniczny kandydat po deduplikacji zwraca
       `insufficient_distinct_candidates`.
-- [ ] Raport zawiera `delta`, poziom ufności, korektę wielokrotną, `n`, pełną
+- [x] Raport zawiera `delta`, poziom ufności, korektę wielokrotną, `n`, pełną
       listę seedów, wyniki per-seed i ostrzeżenie o założeniach przedziału t.
-- [ ] Benchmark 64-seedowy wybiera i zapisuje domyślne `finalist_replicates`
+- [x] Benchmark 64-seedowy wybiera i zapisuje domyślne `finalist_replicates`
       zgodnie z trzema warunkami z etapu 7.
 
 ### D. Replay i kompatybilność
 
-- [ ] `replay-export` odtwarza każdą realizację oraz agregat bez różnic.
-- [ ] Zmiana jednego seeda, rewizji drzewa albo RNG jest wykrywana jako błąd.
-- [ ] Schema 2 jest odtwarzana tylko jako `LegacyFixedV1`.
-- [ ] Manifest i goldeny P-01 pozostają niezmienione w trybie legacy.
-- [ ] Nowa ścieżka ma osobny wersjonowany manifest goldenów P-06.
+- [x] `replay-export` odtwarza każdą realizację oraz agregat bez różnic.
+- [x] Zmiana jednego seeda, rewizji drzewa albo RNG jest wykrywana jako błąd.
+- [x] Schema 2 jest odtwarzana tylko jako `LegacyFixedV1`.
+- [x] Manifest i goldeny P-01 pozostają niezmienione w trybie legacy.
+- [x] Nowa ścieżka ma osobny wersjonowany manifest goldenów P-06.
 
 ### E. DSP, wydajność i CI
 
-- [ ] DSP seeded constructor ma test tego samego i różnych seedów.
-- [ ] Wszystkie testy DSP przechodzą, w tym stos 2 MiB i realtime allocation.
-- [ ] Mediana czasu renderowania seeded DSP na kanonicznym benchmarku nie
+- [x] DSP seeded constructor ma test tego samego i różnych seedów.
+- [x] Wszystkie testy DSP przechodzą, w tym stos 2 MiB i realtime allocation.
+- [x] Mediana czasu renderowania seeded DSP na kanonicznym benchmarku nie
       pogarsza się o więcej niż 5% względem legacy; raw wynik jest zapisany.
-- [ ] `cargo test --locked --all-targets` przechodzi bez `RUST_MIN_STACK`.
-- [ ] Pełny discovery Pythona i weryfikacja historycznego baseline'u przechodzą.
-- [ ] GitHub Actions jest zielony, włącznie z jobem macOS ARM64.
+- [x] `cargo test --locked --all-targets` przechodzi bez `RUST_MIN_STACK`.
+- [x] Pełny discovery Pythona i weryfikacja historycznego baseline'u przechodzą.
+- [x] GitHub Actions jest zielony, włącznie z jobem macOS ARM64.
 
 ### F. Dokumentacja
 
-- [ ] `--help` jasno odróżnia run seed, panel wyszukiwania i panel finalistów.
-- [ ] Dokumentacja podaje, co jest gwarantowane bitowo, a co tylko numerycznie.
-- [ ] Eksport nie nazywa wyniku biologicznie ani klinicznie zwalidowanym.
-- [ ] Rejestr zostaje zaktualizowany dopiero razem z kodem, testami, manifestem
+- [x] `--help` jasno odróżnia run seed, panel wyszukiwania i panel finalistów.
+- [x] Dokumentacja podaje, co jest gwarantowane bitowo, a co tylko numerycznie.
+- [x] Eksport nie nazywa wyniku biologicznie ani klinicznie zwalidowanym.
+- [x] Rejestr zostaje zaktualizowany dopiero razem z kodem, testami, manifestem
       benchmarku i zielonym CI.
+
+### Wynik odbioru
+
+- DSP: `v0.4.0`, commit `81b51fad005bb6522cbbf42ef08ca4a3c6c9ab06`;
+  komplet testów core, seeded API, stosu 2 MiB i alokacji przeszedł.
+- NMM: `cargo test --locked --all-targets` przeszedł bez `RUST_MIN_STACK` na
+  lokalnym i CI-owym macOS ARM64; pełny discovery Pythona przeszedł 64/64, a
+  historyczny baseline P-01 zachował integralność.
+- CI: [run 6, attempt 2](https://github.com/lsolniczek/neural_model_for_noise_testing/actions/runs/35168103760)
+  zakończył oba joby statusem `success`.
+- Benchmark: 14 400 wierszy, panel referencyjny 64, czas 105,21 s. Dla `N=32`
+  mediana Spearmana i zgodność wyboru przeszły, ale 95. percentyl błędu średniej
+  wyniósł `0.0139268243` przy limicie `0.01`; dlatego wybrano domyślne `N=64`.
+- Artefakty: [`benchmarks/p06/manifest.json`](benchmarks/p06/manifest.json),
+  [`benchmarks/p06/results/summary.json`](benchmarks/p06/results/summary.json)
+  oraz [`benchmarks/p06/results/raw_scores.csv`](benchmarks/p06/results/raw_scores.csv).
+  SHA-256 raw CSV: `4fc7dc4d1adfb89a722e2a2098a630e90dae26126d0d4ccabac977060c2adf25`.
 
 ## 9. Ryzyka i decyzje, których nie wolno ukryć
 
